@@ -303,12 +303,6 @@ func (c *SymphonyConfig) ThreadSandbox() string {
 	return c.getString("codex.thread_sandbox", "")
 }
 
-// -- Server --
-
-func (c *SymphonyConfig) ServerPort() int {
-	return c.getInt("server.port", 7777)
-}
-
 // -- Validation --
 
 func (c *SymphonyConfig) Validate() []string {
@@ -330,7 +324,6 @@ func (c *SymphonyConfig) Validate() []string {
 	} else {
 		errs = append(errs, validateCreatableWritableDir(c.WorkspaceRoot(), "workspace.root")...)
 	}
-	errs = append(errs, validateTCPPortAvailable(c.ServerPort(), "server.port")...)
 	if c.PollIntervalMs() <= 0 {
 		errs = append(errs, "polling.interval_ms must be greater than 0")
 	}
