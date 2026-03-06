@@ -23,10 +23,9 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 		return
 	}
 
+	slog.Info("updater.updated_waiting_for_idle")
+	<-mgr.RequestRestartWhenIdle()
 	slog.Info("updater.updated_restarting", "exit_code", RestartExitCode)
-	mgr.Shutdown()
-	// Give shutdown a moment before exiting.
-	time.Sleep(2 * time.Second)
 	os.Exit(RestartExitCode)
 }
 
