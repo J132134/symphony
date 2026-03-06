@@ -32,7 +32,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/symphony</string>
+        <string>/Users/aaron.hj/.local/bin/symphony</string>
         <string>daemon</string>
         <string>--log-level</string>
         <string>INFO</string>

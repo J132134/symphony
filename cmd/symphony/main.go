@@ -171,7 +171,7 @@ func cmdDaemon(args []string) {
 	if cfg.AutoUpdate.Enabled {
 		stopUpdate := make(chan struct{})
 		go func() {
-			daemon.RunUpdateLoop(mgr, cfg.AutoUpdate.IntervalMinutes, "", stopUpdate)
+			daemon.RunUpdateLoop(mgr, cfg.AutoUpdate.IntervalMinutes, cfg.AutoUpdate.RepoDir, stopUpdate)
 		}()
 		defer close(stopUpdate)
 	}

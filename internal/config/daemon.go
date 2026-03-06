@@ -16,6 +16,7 @@ type ProjectConfig struct {
 type AutoUpdateConfig struct {
 	Enabled         bool
 	IntervalMinutes int
+	RepoDir         string // git repo path for pull + build
 }
 
 type StatusServerConfig struct {
@@ -77,6 +78,9 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 		if mins, ok := au["interval_minutes"]; ok {
 			cfg.AutoUpdate.IntervalMinutes = toInt(mins, 30)
+		}
+		if rd, ok := au["repo_dir"].(string); ok && rd != "" {
+			cfg.AutoUpdate.RepoDir = resolvePath(rd)
 		}
 	}
 
