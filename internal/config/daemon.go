@@ -197,6 +197,7 @@ func (c *DaemonConfig) MaxTotalConcurrentSessions() int {
 	return c.Agent.MaxTotalConcurrentSessions
 }
 
+
 func DefaultMaxTotalConcurrentSessions() int {
 	cpus := runtime.NumCPU()
 	switch {

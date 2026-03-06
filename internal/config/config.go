@@ -227,6 +227,13 @@ func (c *SymphonyConfig) HooksTimeoutMs() int {
 	return c.getInt("hooks.timeout_ms", 60_000)
 }
 
+func (c *SymphonyConfig) DrainTimeoutMs() int {
+	if explicit := c.getInt("daemon.drain_timeout_ms", 0); explicit > 0 {
+		return explicit
+	}
+	return c.StallTimeoutMs() + c.HooksTimeoutMs()
+}
+
 // -- Agent --
 
 func (c *SymphonyConfig) MaxConcurrentAgents() int {
@@ -335,6 +342,9 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	if c.MaxConcurrentAgents() <= 0 {
 		errs = append(errs, "agent.max_concurrent_agents must be greater than 0")
+	}
+	if raw := c.get("daemon.drain_timeout_ms"); raw != nil && c.getInt("daemon.drain_timeout_ms", 0) <= 0 {
+		errs = append(errs, "daemon.drain_timeout_ms must be greater than 0")
 	}
 	return errs
 }
