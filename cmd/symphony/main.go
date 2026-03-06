@@ -42,6 +42,8 @@ func main() {
 		cmdDaemon(args[1:])
 	case "menubar":
 		cmdMenubar(args[1:])
+	case "self-update-helper":
+		cmdSelfUpdateHelper(args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -187,6 +189,17 @@ func cmdMenubar(args []string) {
 	}); err != nil {
 		fatalf("menubar: %v", err)
 	}
+}
+
+func cmdSelfUpdateHelper(args []string) {
+	opts := parseFlags(args, map[string]string{
+		"--repo-dir":    "",
+		"--install-dir": "",
+		"--log-level":   "INFO",
+	})
+
+	initLogger(opts["--log-level"])
+	os.Exit(daemon.RunSelfUpdateHelper(opts["--repo-dir"], opts["--install-dir"]))
 }
 
 // -- helpers --
