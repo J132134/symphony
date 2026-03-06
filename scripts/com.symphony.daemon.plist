@@ -34,6 +34,8 @@
     <dict>
         <key>LINEAR_API_KEY</key>
         <string></string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>ProgramArguments</key>
