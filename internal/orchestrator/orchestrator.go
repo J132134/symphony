@@ -21,8 +21,6 @@ import (
 	"symphony/internal/workspace"
 )
 
-const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
-
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
 	workflowPath  string
@@ -270,7 +268,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 			break
 		}
 		if o.canDispatch(cfg, issue) {
-			if !o.dispatch(ctx, cfg, issue, 1, 0) {
+			if !o.dispatch(ctx, cfg, issue, 1) {
 				break
 			}
 		}
@@ -302,12 +300,6 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	}
 	if _, ok := o.state.RetryQueue[issue.ID]; ok {
 		return false
-	}
-	if abandoned, ok := o.state.Abandoned[issue.ID]; ok {
-		if config.NormalizeState(abandoned.State) == normState && !issueUpdatedAfter(abandoned.ResumeAfter(issue), issue.UpdatedAt) {
-			return false
-		}
-		delete(o.state.Abandoned, issue.ID)
 	}
 	if len(o.state.Running) >= o.state.MaxConcurrentAgents {
 		return false
@@ -362,7 +354,7 @@ func sortCandidates(issues []*types.Issue) {
 
 // -- dispatch --
 
-func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum, failureCount int) bool {
+func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
 	if o.globalLimiter != nil && !o.globalLimiter.TryAcquire() {
 		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
 		return false
@@ -375,7 +367,6 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		IssueID:        issue.ID,
 		Identifier:     issue.Identifier,
 		Attempt:        attemptNum,
-		FailureCount:   failureCount,
 		StartedAt:      time.Now().UTC(),
 		Status:         StatusPreparingWorkspace,
 		IssueState:     issue.State,
@@ -408,6 +399,7 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 
 	o.mu.Lock()
 	delete(o.workerCancels, issueID)
+	tr := o.tracker
 	o.mu.Unlock()
 
 	ctxErr := ctx.Err() != nil || isCtxErr(err)
@@ -435,6 +427,12 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		slog.Error("orchestrator.worker_failed", "project", o.name, "issue_id", issueID, "error", err)
 	}
 
+	if err == nil {
+		o.maybePostSuccessFeedback(ctx, cfg, tr, issueID, attempt)
+	} else if attempt.Attempt >= cfg.MaxAttempts() {
+		o.maybePostFinalFailureFeedback(ctx, cfg, tr, issueID, attempt, err)
+	}
+
 	if draining {
 		o.state.mu.Lock()
 		delete(o.state.Claimed, issueID)
@@ -446,14 +444,16 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	if err == nil {
-		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, 0, "", false)
+		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "", false)
 	} else {
-		failureCount := attempt.FailureCount + 1
-		if o.shouldAbandonRetry(cfg, failureCount) {
-			o.abandonRetry(ctx, cfg, issueID, attempt, err.Error())
+		if attempt.Attempt >= cfg.MaxAttempts() {
+			o.state.mu.Lock()
+			delete(o.state.Claimed, issueID)
+			o.state.mu.Unlock()
+			slog.Info("orchestrator.worker_failed_final", "project", o.name, "issue_id", issueID, "attempt", attempt.Attempt)
 			return
 		}
-		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt+1, failureCount, err.Error(), true)
+		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, err.Error(), true)
 	}
 }
 
@@ -679,8 +679,6 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 			continue
 		}
 
-		attempt.IssueState = cur.State
-
 		if termNorm[config.NormalizeState(cur.State)] {
 			slog.Info("orchestrator.reconcile_terminal", "issue", cur.Identifier, "state", cur.State)
 			o.cancelWorker(id)
@@ -708,7 +706,7 @@ func (o *Orchestrator) cancelWorker(issueID string) {
 
 // -- retry --
 
-func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum, failureCount int, errMsg string, abnormal bool) {
+func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum int, errMsg string, abnormal bool) {
 	o.state.mu.Lock()
 	if existing, ok := o.state.RetryQueue[issueID]; ok && existing.timer != nil {
 		existing.timer.Stop()
@@ -718,22 +716,17 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 	var delayMs int
 	if abnormal {
 		max := float64(cfg.MaxRetryBackoffMs())
-		exp := failureCount
-		if exp < 1 {
-			exp = 1
-		}
-		delayMs = int(math.Min(float64(10_000)*math.Pow(2, float64(exp-1)), max))
+		delayMs = int(math.Min(float64(10_000)*math.Pow(2, float64(attemptNum-1)), max))
 	} else {
 		delayMs = 1_000
 	}
 
 	entry := &RetryEntry{
-		IssueID:      issueID,
-		Identifier:   identifier,
-		Attempt:      attemptNum,
-		FailureCount: failureCount,
-		DueAt:        time.Now().Add(time.Duration(delayMs) * time.Millisecond),
-		Error:        errMsg,
+		IssueID:    issueID,
+		Identifier: identifier,
+		Attempt:    attemptNum,
+		DueAt:      time.Now().Add(time.Duration(delayMs) * time.Millisecond),
+		Error:      errMsg,
 	}
 	entry.timer = time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
 		o.onRetryTimer(ctx, cfg, issueID)
@@ -784,7 +777,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	if err != nil {
 		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.retry_fetch_failed", "issue_id", issueID, "error", err)
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, "poll failed", true)
+		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "poll failed", true)
 		return
 	}
 	o.state.RecordTrackerSuccess(time.Now().UTC())
@@ -819,7 +812,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	o.state.mu.Unlock()
 
 	if slots <= 0 || !o.hasGlobalCapacity() {
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, "no slots", true)
+		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
 		return
 	}
 
@@ -827,8 +820,8 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	delete(o.state.Claimed, issueID)
 	o.state.mu.Unlock()
 
-	if !o.dispatch(ctx, cfg, issue, entry.Attempt, entry.FailureCount) {
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, "no global slots", true)
+	if !o.dispatch(ctx, cfg, issue, entry.Attempt) {
+		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no global slots", true)
 	}
 }
 
@@ -969,71 +962,6 @@ func (o *Orchestrator) releaseGlobalSlot(attempt *RunAttempt) {
 	}
 	o.globalLimiter.Release()
 	attempt.GlobalSlotHeld = false
-}
-
-func (o *Orchestrator) shouldAbandonRetry(cfg *config.SymphonyConfig, failureCount int) bool {
-	maxAttempts := cfg.MaxRetryAttempts()
-	return maxAttempts > 0 && failureCount > maxAttempts
-}
-
-func (o *Orchestrator) abandonRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID string, attempt *RunAttempt, errMsg string) {
-	if attempt == nil {
-		return
-	}
-
-	failureCount := attempt.FailureCount + 1
-
-	o.state.mu.Lock()
-	delete(o.state.Claimed, issueID)
-	delete(o.state.RetryQueue, issueID)
-	o.state.Abandoned[issueID] = &AbandonedEntry{
-		Identifier:   attempt.Identifier,
-		State:        attempt.IssueState,
-		FailureCount: failureCount,
-		Error:        errMsg,
-		AbandonedAt:  time.Now().UTC(),
-	}
-	o.state.mu.Unlock()
-
-	slog.Warn("orchestrator.retry_abandoned", "project", o.name,
-		"issue_id", issueID, "attempt", attempt.Attempt, "failure_count", failureCount)
-
-	o.mu.Lock()
-	tr := o.tracker
-	o.mu.Unlock()
-	if tr == nil {
-		return
-	}
-	if err := tr.CreateIssueComment(ctx, issueID, buildRetryAbandonComment(attempt.Identifier, cfg.MaxRetryAttempts(), failureCount, errMsg)); err != nil {
-		slog.Warn("orchestrator.retry_abandon_comment_failed", "issue_id", issueID, "error", err)
-	}
-}
-
-func buildRetryAbandonComment(identifier string, maxAttempts, failureCount int, errMsg string) string {
-	body := fmt.Sprintf(
-		"%s\nSymphony가 %s 이슈의 재시도를 중단했습니다.\n\n`agent.max_retry_attempts=%d`를 초과해 연속 실패가 누적되었습니다.\n\n연속 실패 횟수: %d회.",
-		retryAbandonCommentMarker,
-		identifier, maxAttempts, failureCount,
-	)
-	if trimmed := strings.TrimSpace(errMsg); trimmed != "" {
-		body += fmt.Sprintf("\n\n마지막 오류:\n```text\n%s\n```", truncateForComment(trimmed, 2_000))
-	}
-	return body
-}
-
-func truncateForComment(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max]
-}
-
-func issueUpdatedAfter(at time.Time, updatedAt *time.Time) bool {
-	return updatedAt != nil && updatedAt.After(at)
-}
-
-func isRetryAbandonComment(body string) bool {
-	return strings.Contains(body, retryAbandonCommentMarker)
 }
 
 func (o *Orchestrator) isDraining() bool {

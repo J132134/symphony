@@ -93,6 +93,23 @@ func (c *SymphonyConfig) getInt(key string, def int) int {
 	return def
 }
 
+func (c *SymphonyConfig) getBool(key string, def bool) bool {
+	v := c.get(key)
+	if v == nil {
+		return def
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		b, err := strconv.ParseBool(t)
+		if err == nil {
+			return b
+		}
+	}
+	return def
+}
+
 func parseStateList(v any) []string {
 	if v == nil {
 		return nil
@@ -136,6 +153,18 @@ func (c *SymphonyConfig) TrackerProjectSlug() string {
 }
 func (c *SymphonyConfig) TrackerEndpoint() string {
 	return c.getString("tracker.endpoint", "https://api.linear.app/graphql")
+}
+func (c *SymphonyConfig) TrackerPostComments() bool {
+	return c.getBool("tracker.post_comments", true)
+}
+func (c *SymphonyConfig) TrackerOnSuccessState() string {
+	return strings.TrimSpace(c.getString("tracker.on_success_state", ""))
+}
+func (c *SymphonyConfig) TrackerOnFailureState() string {
+	return strings.TrimSpace(c.getString("tracker.on_failure_state", ""))
+}
+func (c *SymphonyConfig) TrackerPRURLTemplate() string {
+	return strings.TrimSpace(c.getString("tracker.pr_url_template", ""))
 }
 func (c *SymphonyConfig) ActiveStates() []string {
 	v := c.get("tracker.active_states")
@@ -196,11 +225,11 @@ func (c *SymphonyConfig) HooksTimeoutMs() int {
 func (c *SymphonyConfig) MaxConcurrentAgents() int {
 	return c.getInt("agent.max_concurrent_agents", 10)
 }
+func (c *SymphonyConfig) MaxAttempts() int {
+	return c.getInt("agent.max_attempts", 3)
+}
 func (c *SymphonyConfig) MaxTurns() int {
 	return c.getInt("agent.max_turns", 3)
-}
-func (c *SymphonyConfig) MaxRetryAttempts() int {
-	return c.getInt("agent.max_retry_attempts", 0)
 }
 func (c *SymphonyConfig) MaxRetryBackoffMs() int {
 	return c.getInt("agent.max_retry_backoff_ms", 300_000)
@@ -285,9 +314,6 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	if c.CodexCommand() == "" {
 		errs = append(errs, "codex.command must be non-empty")
-	}
-	if c.MaxRetryAttempts() < 0 {
-		errs = append(errs, "agent.max_retry_attempts must be >= 0")
 	}
 	return errs
 }

@@ -2,34 +2,56 @@ package config
 
 import "testing"
 
-func TestSymphonyConfigMaxRetryAttemptsDefault(t *testing.T) {
+func TestTrackerFeedbackConfigDefaults(t *testing.T) {
 	t.Parallel()
 
 	cfg := New(nil)
-	if got := cfg.MaxRetryAttempts(); got != 0 {
-		t.Fatalf("MaxRetryAttempts() = %d, want 0", got)
+
+	if !cfg.TrackerPostComments() {
+		t.Fatal("TrackerPostComments should default to true")
+	}
+	if got := cfg.TrackerOnSuccessState(); got != "" {
+		t.Fatalf("TrackerOnSuccessState = %q, want empty", got)
+	}
+	if got := cfg.TrackerOnFailureState(); got != "" {
+		t.Fatalf("TrackerOnFailureState = %q, want empty", got)
+	}
+	if got := cfg.TrackerPRURLTemplate(); got != "" {
+		t.Fatalf("TrackerPRURLTemplate = %q, want empty", got)
+	}
+	if got := cfg.MaxAttempts(); got != 3 {
+		t.Fatalf("MaxAttempts = %d, want 3", got)
 	}
 }
 
-func TestSymphonyConfigValidateRejectsNegativeRetryAttempts(t *testing.T) {
+func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 	t.Parallel()
 
 	cfg := New(map[string]any{
 		"tracker": map[string]any{
-			"kind":         "linear",
-			"api_key":      "token",
-			"project_slug": "proj",
-		},
-		"codex": map[string]any{
-			"command": "codex app-server",
+			"post_comments":    false,
+			"on_success_state": "Human Review",
+			"on_failure_state": "Rework",
+			"pr_url_template":  "https://example.com/{branch}",
 		},
 		"agent": map[string]any{
-			"max_retry_attempts": -1,
+			"max_attempts": 5,
 		},
 	})
 
-	errs := cfg.Validate()
-	if len(errs) == 0 {
-		t.Fatal("Validate() returned no errors for negative retry attempts")
+	if cfg.TrackerPostComments() {
+		t.Fatal("TrackerPostComments should honor explicit false")
+	}
+	if got := cfg.TrackerOnSuccessState(); got != "Human Review" {
+		t.Fatalf("TrackerOnSuccessState = %q, want Human Review", got)
+	}
+	if got := cfg.TrackerOnFailureState(); got != "Rework" {
+		t.Fatalf("TrackerOnFailureState = %q, want Rework", got)
+	}
+	if got := cfg.TrackerPRURLTemplate(); got != "https://example.com/{branch}" {
+		t.Fatalf("TrackerPRURLTemplate = %q", got)
+	}
+	if got := cfg.MaxAttempts(); got != 5 {
+		t.Fatalf("MaxAttempts = %d, want 5", got)
 	}
 }
