@@ -43,9 +43,6 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 		},
 		"codex": map[string]any{
 			"command": "codex app-server",
-			"state_commands": map[string]any{
-				"Human Review": "claude",
-			},
 		},
 	})
 
@@ -64,34 +61,8 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 	if got := cfg.MaxAttempts(); got != 5 {
 		t.Fatalf("MaxAttempts = %d, want 5", got)
 	}
-	if got := cfg.CodexCommandForState("Human Review"); got != "claude" {
-		t.Fatalf("CodexCommandForState(Human Review) = %q, want claude", got)
-	}
-	if got := cfg.CodexCommandForState("In Progress"); got != "codex app-server" {
-		t.Fatalf("CodexCommandForState(In Progress) = %q, want codex app-server", got)
-	}
-	if !cfg.UsesClaudeForState("Human Review") {
-		t.Fatal("UsesClaudeForState(Human Review) = false, want true")
-	}
-	if cfg.UsesClaudeForState("In Progress") {
-		t.Fatal("UsesClaudeForState(In Progress) = true, want false")
-	}
-}
-
-func TestUsesClaudeForStateFallsBackToDefaultCommand(t *testing.T) {
-	t.Parallel()
-
-	cfg := New(map[string]any{
-		"codex": map[string]any{
-			"command": "/usr/local/bin/claude-code --print",
-		},
-	})
-
-	if !cfg.UsesClaudeForState("Todo") {
-		t.Fatal("UsesClaudeForState(Todo) = false, want true")
-	}
-	if !cfg.UsesClaudeForState("Human Review") {
-		t.Fatal("UsesClaudeForState(Human Review) = false, want true")
+	if got := cfg.CodexCommand(); got != "codex app-server" {
+		t.Fatalf("CodexCommand() = %q, want codex app-server", got)
 	}
 }
 
