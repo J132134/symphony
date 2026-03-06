@@ -310,7 +310,7 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if _, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
 		return false
 	}
-	if !shouldRunStateWithAgent(cfg, issue.State) {
+	if normState == humanReviewState {
 		return false
 	}
 
@@ -798,7 +798,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 			continue
 		}
 
-		if !shouldRunStateWithAgent(cfg, cur.State) {
+		if config.NormalizeState(cur.State) == humanReviewState {
 			slog.Info("orchestrator.reconcile_paused_for_human_review", "issue", cur.Identifier, "state", cur.State)
 			o.cancelWorker(id)
 		}
@@ -939,7 +939,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		o.state.mu.Unlock()
 		return
 	}
-	if !shouldRunStateWithAgent(cfg, issue.State) {
+	if config.NormalizeState(issue.State) == humanReviewState {
 		slog.Info("orchestrator.retry_paused_for_human_review", "issue_id", issueID, "state", issue.State)
 		o.state.mu.Lock()
 		delete(o.state.Claimed, issueID)
@@ -1089,14 +1089,8 @@ func (o *Orchestrator) runningConcurrentCountLocked(cfg *config.SymphonyConfig) 
 	return count
 }
 
-func shouldRunStateWithAgent(cfg *config.SymphonyConfig, state string) bool {
-	if config.NormalizeState(state) != humanReviewState {
-		return true
-	}
-	if cfg == nil {
-		return true
-	}
-	return cfg.UsesClaudeForState(state)
+func shouldRunStateWithAgent(_ *config.SymphonyConfig, state string) bool {
+	return config.NormalizeState(state) != humanReviewState
 }
 
 func countsTowardConcurrency(cfg *config.SymphonyConfig, state string) bool {
@@ -1195,9 +1189,9 @@ func (o *Orchestrator) admissionPauseState(now time.Time) (time.Time, string, bo
 	return until, reason, paused
 }
 
-func buildAgentConfig(cfg *config.SymphonyConfig, issueState string) *agent.Config {
+func buildAgentConfig(cfg *config.SymphonyConfig, _ string) *agent.Config {
 	return &agent.Config{
-		Command:              cfg.CodexCommandForState(issueState),
+		Command:              cfg.CodexCommand(),
 		ApprovalPolicy:       cfg.ApprovalPolicy(),
 		MaxTurns:             cfg.MaxTurns(),
 		TurnTimeoutMs:        cfg.TurnTimeoutMs(),

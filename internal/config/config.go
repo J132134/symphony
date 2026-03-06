@@ -274,27 +274,6 @@ func (c *SymphonyConfig) MaxConcurrentAgentsByState() map[string]int {
 func (c *SymphonyConfig) CodexCommand() string {
 	return c.getString("codex.command", "codex app-server")
 }
-func (c *SymphonyConfig) CodexCommandForState(state string) string {
-	overrides := c.get("codex.state_commands")
-	m, ok := overrides.(map[string]any)
-	if ok {
-		for key, cmd := range m {
-			if NormalizeState(key) != NormalizeState(state) {
-				continue
-			}
-			if s, ok := cmd.(string); ok {
-				s = strings.TrimSpace(c.resolveEnv(s))
-				if s != "" {
-					return s
-				}
-			}
-		}
-	}
-	return c.CodexCommand()
-}
-func (c *SymphonyConfig) UsesClaudeForState(state string) bool {
-	return isClaudeCommand(c.CodexCommandForState(state))
-}
 func (c *SymphonyConfig) ApprovalPolicy() string {
 	return c.getString("codex.approval_policy", "auto-edit")
 }

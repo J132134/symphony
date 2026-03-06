@@ -109,30 +109,6 @@ func TestRunningConcurrentCountExcludesManualHumanReview(t *testing.T) {
 	}
 }
 
-func TestRunningConcurrentCountIncludesClaudeHumanReview(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	cfg := config.New(map[string]any{
-		"codex": map[string]any{
-			"command": "codex app-server",
-			"state_commands": map[string]any{
-				"Human Review": "claude",
-			},
-		},
-	})
-
-	o.state.mu.Lock()
-	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
-	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
-	got := o.runningConcurrentCountLocked(cfg)
-	o.state.mu.Unlock()
-
-	if got != 2 {
-		t.Fatalf("runningConcurrentCountLocked() = %d, want 2", got)
-	}
-}
-
 func TestCanDispatchIgnoresManualHumanReviewForConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 
@@ -275,29 +251,6 @@ func TestHasGlobalCapacityForStateIgnoresManualHumanReview(t *testing.T) {
 	}
 	if !o.hasGlobalCapacityForState(cfg, "Human Review") {
 		t.Fatal("human review issue should bypass the global limiter")
-	}
-}
-
-func TestHasGlobalCapacityForStateIncludesClaudeHumanReview(t *testing.T) {
-	t.Parallel()
-
-	limiter := NewSessionLimiter(1)
-	if !limiter.TryAcquire() {
-		t.Fatal("expected limiter warm-up acquire to succeed")
-	}
-
-	o := New("", 0, "alpha", limiter)
-	cfg := config.New(map[string]any{
-		"codex": map[string]any{
-			"command": "codex app-server",
-			"state_commands": map[string]any{
-				"Human Review": "claude",
-			},
-		},
-	})
-
-	if o.hasGlobalCapacityForState(cfg, "Human Review") {
-		t.Fatal("claude human review issue should respect the global limiter")
 	}
 }
 
@@ -619,23 +572,20 @@ func TestOnRetryTimerDuringRateLimitPauseReschedulesAtResume(t *testing.T) {
 	}
 }
 
-func TestBuildAgentConfigUsesStateSpecificCommand(t *testing.T) {
+func TestBuildAgentConfigUsesDefaultCommand(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.New(map[string]any{
 		"codex": map[string]any{
-			"command": "codex app-server",
-			"state_commands": map[string]any{
-				"Human Review": "claude",
-			},
+			"command": "codex app-server --model gpt-5",
 		},
 	})
 
-	if got := buildAgentConfig(cfg, "Human Review").Command; got != "claude" {
-		t.Fatalf("buildAgentConfig(Human Review).Command = %q, want claude", got)
+	if got := buildAgentConfig(cfg, "Human Review").Command; got != "codex app-server --model gpt-5" {
+		t.Fatalf("buildAgentConfig(Human Review).Command = %q", got)
 	}
-	if got := buildAgentConfig(cfg, "In Progress").Command; got != "codex app-server" {
-		t.Fatalf("buildAgentConfig(In Progress).Command = %q, want codex app-server", got)
+	if got := buildAgentConfig(cfg, "In Progress").Command; got != "codex app-server --model gpt-5" {
+		t.Fatalf("buildAgentConfig(In Progress).Command = %q", got)
 	}
 }
 
