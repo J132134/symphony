@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"symphony/internal/agent"
 	"symphony/internal/config"
 	"symphony/internal/tracker"
 	"symphony/internal/types"
@@ -469,6 +470,152 @@ func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
 	}
 	if len(o.state.Running) != 0 {
 		t.Fatalf("manual human review retry should not dispatch, got %d running", len(o.state.Running))
+	}
+}
+
+func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	resetAt := time.Now().UTC().Add(2 * time.Minute)
+	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-20", IssueState: "In Progress"}
+	o.handleAgentEvent(attempt.IssueID, attempt, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: time.Now().UTC(),
+		RateLimit: &agent.RateLimitEvent{ResetAt: &resetAt},
+	})
+
+	if until, reason, paused := o.admissionPauseState(time.Now().UTC()); !paused {
+		t.Fatal("expected orchestrator to enter paused state")
+	} else {
+		if reason != "rate_limit_reset" {
+			t.Fatalf("pause reason = %q, want rate_limit_reset", reason)
+		}
+		if until.Before(resetAt.Add(-time.Second)) {
+			t.Fatalf("pause until = %v, want near %v", until, resetAt)
+		}
+	}
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-21", State: "In Progress"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("dispatch should be blocked while rate limit pause is active")
+	}
+
+	expired := time.Now().UTC().Add(-time.Second)
+	o.state.mu.Lock()
+	o.state.PausedUntil = &expired
+	o.state.mu.Unlock()
+
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("dispatch should resume once the pause expires")
+	}
+}
+
+func TestHandleAgentEventRateLimitPausesGlobalLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(2)
+	o := New("", 0, "alpha", limiter)
+
+	resetAt := time.Now().UTC().Add(45 * time.Second)
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: time.Now().UTC(),
+		RateLimit: &agent.RateLimitEvent{ResetAt: &resetAt},
+	})
+
+	if _, ok := limiter.PausedUntil(); !ok {
+		t.Fatal("expected shared limiter to be paused")
+	}
+	if limiter.TryAcquire() {
+		t.Fatal("shared limiter should reject new sessions while paused")
+	}
+}
+
+func TestHandleAgentEventRateLimitWithoutResetUsesBackoff(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	now := time.Now().UTC()
+
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: now,
+		RateLimit: &agent.RateLimitEvent{},
+	})
+
+	until, reason, paused := o.admissionPauseState(now)
+	if !paused {
+		t.Fatal("expected backoff pause to activate")
+	}
+	if reason != "rate_limit_backoff" {
+		t.Fatalf("pause reason = %q, want rate_limit_backoff", reason)
+	}
+	if until.Before(now.Add(29*time.Second)) || until.After(now.Add(31*time.Second)) {
+		t.Fatalf("first backoff until = %v, want about %v", until, now.Add(30*time.Second))
+	}
+
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: now.Add(time.Second),
+		RateLimit: &agent.RateLimitEvent{},
+	})
+
+	until, _, paused = o.admissionPauseState(now.Add(time.Second))
+	if !paused {
+		t.Fatal("expected pause to remain active after repeated rate limit")
+	}
+	if until.Before(now.Add(60 * time.Second)) {
+		t.Fatalf("second backoff until = %v, want at least %v", until, now.Add(60*time.Second))
+	}
+}
+
+func TestOnRetryTimerDuringRateLimitPauseReschedulesAtResume(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-20",
+		Attempt:    2,
+		DueAt:      time.Now(),
+	}
+	pausedUntil := time.Now().UTC().Add(90 * time.Second)
+
+	o.state.mu.Lock()
+	o.state.PausedUntil = &pausedUntil
+	o.state.PauseReason = "rate_limit_reset"
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), config.New(nil), entry.IssueID)
+	stopRetryTimer(t, o, entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	rescheduled, ok := o.state.RetryQueue[entry.IssueID]
+	if !ok {
+		t.Fatal("retry entry should be rescheduled while paused")
+	}
+	if rescheduled.Error != "rate limit pause" {
+		t.Fatalf("retry error = %q, want rate limit pause", rescheduled.Error)
+	}
+	if rescheduled.DueAt.Before(pausedUntil.Add(-time.Second)) {
+		t.Fatalf("retry due_at = %v, want near %v", rescheduled.DueAt, pausedUntil)
+	}
+	if len(o.state.Running) != 0 {
+		t.Fatalf("no issue should be redispatched during pause, got %d running", len(o.state.Running))
 	}
 }
 
