@@ -9,6 +9,8 @@ import (
 	"symphony/internal/types"
 )
 
+const retryAbandonedCommentMarker = "<!-- symphony:retry-abandoned -->"
+
 type RunStatus string
 
 const (
@@ -24,12 +26,6 @@ const (
 	StatusStalled             RunStatus = "stalled"
 	StatusCanceled            RunStatus = "canceled_by_reconciliation"
 )
-
-const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
-
-func isRetryAbandonComment(body string) bool {
-	return strings.Contains(body, retryAbandonCommentMarker)
-}
 
 type TokenUsage struct {
 	InputTokens  int64
@@ -101,6 +97,10 @@ func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {
 		return *comment.CreatedAt
 	}
 	return resumeAfter
+}
+
+func isRetryAbandonComment(body string) bool {
+	return strings.Contains(body, retryAbandonedCommentMarker)
 }
 
 // State holds all orchestrator runtime state.
