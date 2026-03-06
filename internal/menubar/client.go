@@ -65,7 +65,3 @@ func (c *Client) Refresh() error {
 	}
 	return nil
 }
-
-func (c *Client) DashboardURL() string {
-	return c.baseURL
-}
