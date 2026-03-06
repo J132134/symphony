@@ -1,0 +1,275 @@
+// Package tracker implements the Linear GraphQL tracker client.
+package tracker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"symphony/internal/types"
+)
+
+const issuesQuery = `
+query($projectSlug: String!, $states: [String!], $after: String) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $states } }
+    }
+    first: 50
+    after: $after
+    orderBy: createdAt
+  ) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier title description priority
+      state { name }
+      branchName url
+      labels { nodes { name } }
+      relations {
+        nodes { type relatedIssue { id identifier state { name } } }
+      }
+      createdAt updatedAt
+    }
+  }
+}`
+
+const issuesByIDsQuery = `
+query($ids: [ID!]!) {
+  issues(filter: { id: { in: $ids } }) {
+    nodes { id identifier state { name } }
+  }
+}`
+
+// LinearClient fetches issues from the Linear GraphQL API.
+type LinearClient struct {
+	endpoint     string
+	projectSlug  string
+	activeStates []string
+	client       *http.Client
+}
+
+func NewLinearClient(apiKey, endpoint, projectSlug string, activeStates []string) (*LinearClient, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("Linear API key is required")
+	}
+	if projectSlug == "" {
+		return nil, fmt.Errorf("Linear project slug is required")
+	}
+	return &LinearClient{
+		endpoint:     endpoint,
+		projectSlug:  projectSlug,
+		activeStates: activeStates,
+		client: &http.Client{
+			Transport: &authTransport{key: apiKey, base: http.DefaultTransport},
+			Timeout:   30 * time.Second,
+		},
+	}, nil
+}
+
+type authTransport struct {
+	key  string
+	base http.RoundTripper
+}
+
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req2 := req.Clone(req.Context())
+	req2.Header.Set("Authorization", t.key)
+	req2.Header.Set("Content-Type", "application/json")
+	return t.base.RoundTrip(req2)
+}
+
+func (c *LinearClient) FetchCandidateIssues(ctx context.Context) ([]*types.Issue, error) {
+	return c.fetchPaginated(ctx, c.activeStates)
+}
+
+func (c *LinearClient) FetchIssuesByStates(ctx context.Context, states []string) ([]*types.Issue, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	return c.fetchPaginated(ctx, states)
+}
+
+func (c *LinearClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	data, err := c.execute(ctx, issuesByIDsQuery, map[string]any{"ids": ids})
+	if err != nil {
+		return nil, err
+	}
+	issuesData, _ := data["issues"].(map[string]any)
+	nodes, _ := issuesData["nodes"].([]any)
+
+	var result []*types.Issue
+	for _, n := range nodes {
+		node, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		stateMap, _ := node["state"].(map[string]any)
+		result = append(result, &types.Issue{
+			ID:         strVal(node["id"]),
+			Identifier: strVal(node["identifier"]),
+			State:      strVal(stateMap["name"]),
+		})
+	}
+	return result, nil
+}
+
+func (c *LinearClient) fetchPaginated(ctx context.Context, states []string) ([]*types.Issue, error) {
+	var all []*types.Issue
+	var cursor string
+
+	for {
+		vars := map[string]any{"projectSlug": c.projectSlug, "states": states}
+		if cursor != "" {
+			vars["after"] = cursor
+		}
+
+		data, err := c.execute(ctx, issuesQuery, vars)
+		if err != nil {
+			return nil, err
+		}
+
+		issuesData, ok := data["issues"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unexpected response shape")
+		}
+
+		nodes, _ := issuesData["nodes"].([]any)
+		for _, n := range nodes {
+			if node, ok := n.(map[string]any); ok {
+				all = append(all, normalizeIssue(node))
+			}
+		}
+
+		pageInfo, _ := issuesData["pageInfo"].(map[string]any)
+		if hasNext, _ := pageInfo["hasNextPage"].(bool); !hasNext {
+			break
+		}
+		cursor, ok = pageInfo["endCursor"].(string)
+		if !ok || cursor == "" {
+			return nil, fmt.Errorf("pagination: hasNextPage=true but endCursor missing")
+		}
+	}
+	return all, nil
+}
+
+func (c *LinearClient) execute(ctx context.Context, query string, vars map[string]any) (map[string]any, error) {
+	body, _ := json.Marshal(map[string]any{"query": query, "variables": vars})
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Linear API status %d: %s", resp.StatusCode, truncate(string(raw), 500))
+	}
+
+	var result struct {
+		Data   map[string]any `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("json decode: %w", err)
+	}
+	if len(result.Errors) > 0 {
+		msgs := make([]string, len(result.Errors))
+		for i, e := range result.Errors {
+			msgs[i] = e.Message
+		}
+		return nil, fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; "))
+	}
+	if result.Data == nil {
+		return nil, fmt.Errorf("response missing 'data'")
+	}
+	return result.Data, nil
+}
+
+func normalizeIssue(node map[string]any) *types.Issue {
+	stateMap, _ := node["state"].(map[string]any)
+
+	var labels []string
+	if ld, ok := node["labels"].(map[string]any); ok {
+		for _, n := range castSlice(ld["nodes"]) {
+			if nm, ok := n.(map[string]any); ok {
+				if name := strVal(nm["name"]); name != "" {
+					labels = append(labels, strings.ToLower(name))
+				}
+			}
+		}
+	}
+
+	var blockedBy []types.BlockerRef
+	if rd, ok := node["relations"].(map[string]any); ok {
+		for _, n := range castSlice(rd["nodes"]) {
+			nm, ok := n.(map[string]any)
+			if !ok || strVal(nm["type"]) != "blocks" {
+				continue
+			}
+			related, ok := nm["relatedIssue"].(map[string]any)
+			if !ok || strVal(related["id"]) == "" {
+				continue
+			}
+			relState, _ := related["state"].(map[string]any)
+			blockedBy = append(blockedBy, types.BlockerRef{
+				ID:         strVal(related["id"]),
+				Identifier: strVal(related["identifier"]),
+				State:      strVal(relState["name"]),
+			})
+		}
+	}
+
+	iss := &types.Issue{
+		ID:          strVal(node["id"]),
+		Identifier:  strVal(node["identifier"]),
+		Title:       strVal(node["title"]),
+		Description: strVal(node["description"]),
+		State:       strVal(stateMap["name"]),
+		BranchName:  strVal(node["branchName"]),
+		URL:         strVal(node["url"]),
+		Labels:      labels,
+		BlockedBy:   blockedBy,
+	}
+	if pri, ok := node["priority"].(float64); ok && pri > 0 {
+		p := int(pri)
+		iss.Priority = &p
+	}
+	iss.CreatedAt = parseISO(strVal(node["createdAt"]))
+	iss.UpdatedAt = parseISO(strVal(node["updatedAt"]))
+	return iss
+}
+
+func parseISO(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, strings.Replace(s, "Z", "+00:00", 1))
+	if err != nil {
+		return nil
+	}
+	return &t
+}
+
+func strVal(v any) string { s, _ := v.(string); return s }
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+func castSlice(v any) []any { s, _ := v.([]any); return s }

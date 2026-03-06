@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Symphony 오케스트레이터 데몬 launchd 에이전트.
+  Symphony Go 오케스트레이터 데몬 launchd 에이전트.
   멀티 프로젝트 모드로 Linear 이슈를 폴링하고 Codex 에이전트를 디스패치한다.
 
+  빌드:
+    cd go && make install          # /usr/local/bin/symphony 에 설치
+    # 또는 INSTALL_DIR=~/bin make install
+
   설치:
-    cp scripts/com.symphony.daemon.plist ~/Library/LaunchAgents/
+    cp go/scripts/com.symphony.daemon.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.symphony.daemon.plist
+
+  상태 확인:
+    launchctl list | grep symphony
 
   중지 (재시작 없이):
     launchctl stop com.symphony.daemon
@@ -14,9 +21,9 @@
   제거:
     launchctl unload ~/Library/LaunchAgents/com.symphony.daemon.plist
 
-  exit(0) = 정상 종료 → launchd가 재시작하지 않음
+  exit(0)  = 정상 종료 → launchd가 재시작하지 않음
   exit(42) = 자동 업데이트 → launchd가 재시작함 (KeepAlive SuccessfulExit: false)
-  crash  = 자동 복구 (ThrottleInterval 10s)
+  crash    = 자동 복구 (ThrottleInterval 10s)
 -->
 <plist version="1.0">
 <dict>
@@ -25,10 +32,10 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/aaron.hj/.local/bin/uv</string>
-        <string>run</string>
-        <string>symphony</string>
+        <string>/usr/local/bin/symphony</string>
         <string>daemon</string>
+        <string>--log-level</string>
+        <string>INFO</string>
     </array>
 
     <key>WorkingDirectory</key>
