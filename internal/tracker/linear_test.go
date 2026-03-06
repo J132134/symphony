@@ -44,6 +44,49 @@ func TestNormalizeIssueCapturesLatestComment(t *testing.T) {
 	}
 }
 
+func TestNormalizeIssueCapturesBlockedByRelations(t *testing.T) {
+	t.Parallel()
+
+	issue := normalizeIssue(map[string]any{
+		"id":          "issue-1",
+		"identifier":  "J-33",
+		"title":       "blocked issue",
+		"description": "",
+		"state":       map[string]any{"name": "Todo"},
+		"comments":    map[string]any{"nodes": []any{}},
+		"labels":      map[string]any{"nodes": []any{}},
+		"relations": map[string]any{
+			"nodes": []any{
+				map[string]any{
+					"type": "blocked_by",
+					"relatedIssue": map[string]any{
+						"id":         "issue-31",
+						"identifier": "J-31",
+						"state":      map[string]any{"name": "In Progress"},
+					},
+				},
+				map[string]any{
+					"type": "blocks",
+					"relatedIssue": map[string]any{
+						"id":         "issue-99",
+						"identifier": "J-99",
+						"state":      map[string]any{"name": "Todo"},
+					},
+				},
+			},
+		},
+		"createdAt": "2026-03-05T00:00:00Z",
+		"updatedAt": "2026-03-06T00:00:01Z",
+	})
+
+	if len(issue.BlockedBy) != 1 {
+		t.Fatalf("len(BlockedBy) = %d, want 1", len(issue.BlockedBy))
+	}
+	if got := issue.BlockedBy[0]; got.Identifier != "J-31" || got.State != "In Progress" {
+		t.Fatalf("BlockedBy[0] = %#v, want identifier/state for J-31 in progress", got)
+	}
+}
+
 func TestCreateIssueComment(t *testing.T) {
 	t.Parallel()
 

@@ -128,6 +128,31 @@ func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
 	}
 }
 
+func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states":   []any{"Todo", "In Progress"},
+			"terminal_states": []any{"Done"},
+		},
+	})
+
+	issue := &types.Issue{
+		ID:         "issue-33",
+		Identifier: "J-33",
+		State:      "Todo",
+		BlockedBy: []types.BlockerRef{
+			{ID: "issue-31", Identifier: "J-31", State: "In Progress"},
+		},
+	}
+
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("todo issue with non-terminal blocker should not dispatch")
+	}
+}
+
 func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
 	t.Parallel()
 
