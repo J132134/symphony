@@ -57,6 +57,8 @@ codex:
 ---
 You are working on Linear ticket `{{ issue.identifier }}`.
 
+`Human Review` 상태는 해당 상태가 Claude로 실행될 때만 concurrent 제한에 포함된다. `Human Review`를 Claude로 처리하지 않는 프로젝트는 리뷰 대기 중 서브프로세스를 내리고, 다른 active 상태로 바뀌면 다시 진행한다.
+
 {% if attempt and attempt > 1 %}
 Continuation context:
 
