@@ -276,6 +276,9 @@ func (c *SymphonyConfig) TurnTimeoutMs() int {
 func (c *SymphonyConfig) ReadTimeoutMs() int {
 	return c.getInt("codex.read_timeout_ms", 5_000)
 }
+func (c *SymphonyConfig) ThreadStartTimeoutMs() int {
+	return c.getInt("codex.thread_start_timeout_ms", 60_000)
+}
 func (c *SymphonyConfig) StallTimeoutMs() int {
 	return c.getInt("codex.stall_timeout_ms", 300_000)
 }
