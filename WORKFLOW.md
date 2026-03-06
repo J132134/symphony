@@ -41,7 +41,7 @@ hooks:
   timeout_ms: 120000
 
 agent:
-  max_concurrent_agents: 1
+  max_concurrent_agents: 2
   max_turns: 20
   max_retry_backoff_ms: 300000
 
