@@ -87,15 +87,20 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
+func TestRunningConcurrentCountExcludesManualHumanReview(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
 
 	o.state.mu.Lock()
 	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
 	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
-	got := o.runningConcurrentCountLocked()
+	got := o.runningConcurrentCountLocked(cfg)
 	o.state.mu.Unlock()
 
 	if got != 1 {
@@ -103,7 +108,31 @@ func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
 	}
 }
 
-func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
+func TestRunningConcurrentCountIncludesClaudeHumanReview(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
+	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
+	got := o.runningConcurrentCountLocked(cfg)
+	o.state.mu.Unlock()
+
+	if got != 2 {
+		t.Fatalf("runningConcurrentCountLocked() = %d, want 2", got)
+	}
+}
+
+func TestCanDispatchIgnoresManualHumanReviewForConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
@@ -126,6 +155,25 @@ func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
 	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
 	if !o.canDispatch(cfg, issue) {
 		t.Fatal("human review issue should not consume a concurrent slot")
+	}
+}
+
+func TestCanDispatchSkipsManualHumanReviewState(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "In Progress", "Human Review"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-1", Identifier: "J-40", State: "Human Review"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("manual human review issue should not dispatch")
 	}
 }
 
@@ -154,7 +202,7 @@ func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
 	}
 }
 
-func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
+func TestHasGlobalCapacityForStateIgnoresManualHumanReview(t *testing.T) {
 	t.Parallel()
 
 	limiter := NewSessionLimiter(1)
@@ -163,12 +211,136 @@ func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
 	}
 
 	o := New("", 0, "alpha", limiter)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
 
-	if o.hasGlobalCapacityForState("In Progress") {
+	if o.hasGlobalCapacityForState(cfg, "In Progress") {
 		t.Fatal("non-review issue should respect the global limiter")
 	}
-	if !o.hasGlobalCapacityForState("Human Review") {
+	if !o.hasGlobalCapacityForState(cfg, "Human Review") {
 		t.Fatal("human review issue should bypass the global limiter")
+	}
+}
+
+func TestHasGlobalCapacityForStateIncludesClaudeHumanReview(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(1)
+	if !limiter.TryAcquire() {
+		t.Fatal("expected limiter warm-up acquire to succeed")
+	}
+
+	o := New("", 0, "alpha", limiter)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	if o.hasGlobalCapacityForState(cfg, "Human Review") {
+		t.Fatal("claude human review issue should respect the global limiter")
+	}
+}
+
+func TestReconcileCancelsManualHumanReviewIssue(t *testing.T) {
+	t.Parallel()
+
+	server := newLinearIssueStateServer(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
+	})
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	o := New("", 0, "alpha", nil)
+	o.cfg = config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states":   []any{"Todo", "In Progress", "Human Review"},
+			"terminal_states": []any{"Done"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+	o.tracker = client
+
+	cancelled := make(chan struct{}, 1)
+	o.mu.Lock()
+	o.workerCancels["issue-1"] = func() {
+		select {
+		case cancelled <- struct{}{}:
+		default:
+		}
+	}
+	o.mu.Unlock()
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", Identifier: "J-40", IssueState: "In Progress"}
+	o.state.mu.Unlock()
+
+	o.reconcile(context.Background())
+
+	select {
+	case <-cancelled:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("manual human review issue should be cancelled by reconcile")
+	}
+}
+
+func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
+	t.Parallel()
+
+	server := newLinearIssueStateServer(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
+	})
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "In Progress", "Human Review"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-40",
+		Attempt:    2,
+		DueAt:      time.Now(),
+	}
+
+	o.state.mu.Lock()
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.Claimed[entry.IssueID]; ok {
+		t.Fatal("manual human review retry should release claim")
+	}
+	if len(o.state.Running) != 0 {
+		t.Fatalf("manual human review retry should not dispatch, got %d running", len(o.state.Running))
 	}
 }
 
@@ -668,6 +840,87 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	}))
 
 	return recorder, server
+}
+
+func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "issues(filter: { id: { in: $ids } })"):
+			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"nodes":%s}}}`, encodeIssueStateNodes(t, issues))
+		case strings.Contains(req.Query, "state: { name: { in: $states } }"):
+			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":%s}}}`, encodeCandidateIssueNodes(t, issues))
+		default:
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+	}))
+}
+
+func encodeIssueStateNodes(t *testing.T, issues []*types.Issue) string {
+	t.Helper()
+
+	nodes := make([]map[string]any, 0, len(issues))
+	for _, issue := range issues {
+		nodes = append(nodes, map[string]any{
+			"id":         issue.ID,
+			"identifier": issue.Identifier,
+			"state": map[string]any{
+				"name": issue.State,
+			},
+		})
+	}
+	raw, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatalf("marshal issue state nodes: %v", err)
+	}
+	return string(raw)
+}
+
+func encodeCandidateIssueNodes(t *testing.T, issues []*types.Issue) string {
+	t.Helper()
+
+	nodes := make([]map[string]any, 0, len(issues))
+	for _, issue := range issues {
+		nodes = append(nodes, map[string]any{
+			"id":          issue.ID,
+			"identifier":  issue.Identifier,
+			"title":       "",
+			"description": "",
+			"priority":    nil,
+			"state": map[string]any{
+				"name": issue.State,
+			},
+			"branchName": nil,
+			"url":        nil,
+			"comments": map[string]any{
+				"nodes": []any{},
+			},
+			"labels": map[string]any{
+				"nodes": []any{},
+			},
+			"relations": map[string]any{
+				"nodes": []any{},
+			},
+			"createdAt": time.Now().UTC().Format(time.RFC3339),
+			"updatedAt": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	raw, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatalf("marshal candidate issue nodes: %v", err)
+	}
+	return string(raw)
 }
 
 func initGitWorkspace(t *testing.T) string {
