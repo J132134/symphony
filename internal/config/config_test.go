@@ -95,6 +95,43 @@ func TestUsesClaudeForStateFallsBackToDefaultCommand(t *testing.T) {
 	}
 }
 
+func TestDrainTimeoutDefaultsToStallPlusHooks(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"codex": map[string]any{
+			"stall_timeout_ms": 300_000,
+		},
+		"hooks": map[string]any{
+			"timeout_ms": 60_000,
+		},
+	})
+
+	if got := cfg.DrainTimeoutMs(); got != 360_000 {
+		t.Fatalf("DrainTimeoutMs() = %d, want 360000", got)
+	}
+}
+
+func TestDrainTimeoutHonorsExplicitOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"daemon": map[string]any{
+			"drain_timeout_ms": 123_000,
+		},
+		"codex": map[string]any{
+			"stall_timeout_ms": 300_000,
+		},
+		"hooks": map[string]any{
+			"timeout_ms": 60_000,
+		},
+	})
+
+	if got := cfg.DrainTimeoutMs(); got != 123_000 {
+		t.Fatalf("DrainTimeoutMs() = %d, want 123000", got)
+	}
+}
+
 func TestSymphonyConfigValidateRejectsEmptyWorkspaceRoot(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +180,38 @@ func TestSymphonyConfigValidateRejectsInvalidRuntimeValues(t *testing.T) {
 	requireErrorContaining(t, errs, "idle_interval_ms")
 	requireErrorContaining(t, errs, "agent.max_concurrent_agents")
 	requireErrorContaining(t, errs, "agent.max_turns")
+}
+
+func TestSymphonyConfigValidateRejectsInvalidDrainTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"tracker": map[string]any{
+			"kind":         "linear",
+			"api_key":      "token",
+			"project_slug": "proj",
+		},
+		"workspace": map[string]any{
+			"root": t.TempDir(),
+		},
+		"polling": map[string]any{
+			"interval_ms":      1000,
+			"idle_interval_ms": 1000,
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents": 1,
+			"max_turns":             1,
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+		"daemon": map[string]any{
+			"drain_timeout_ms": 0,
+		},
+	})
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "daemon.drain_timeout_ms")
 }
 
 func TestSymphonyConfigValidateRejectsUncreatableWorkspaceRoot(t *testing.T) {

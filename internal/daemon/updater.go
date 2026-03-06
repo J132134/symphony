@@ -17,6 +17,11 @@ const (
 	updateHelperNoChange = 10
 )
 
+var (
+	prepareUpdateFn = prepareUpdate
+	updaterExitFn   = os.Exit
+)
+
 // CheckForUpdates prepares an updated binary out-of-process and exits so an external supervisor can restart it.
 func CheckForUpdates(mgr *Manager, repoDir string) {
 	defer func() {
@@ -25,7 +30,7 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 		}
 	}()
 
-	updated, err := prepareUpdate(repoDir)
+	updated, err := prepareUpdateFn(repoDir)
 	if err != nil {
 		slog.Warn("updater.prepare_failed", "error", err)
 		return
@@ -34,10 +39,11 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 		return
 	}
 
-	slog.Info("updater.updated_waiting_for_idle")
-	<-mgr.RequestRestartWhenIdle()
+	slog.Info("updater.updated_draining")
+	mgr.Shutdown()
+	mgr.Wait()
 	slog.Info("updater.updated_restarting_via_supervisor")
-	os.Exit(0)
+	updaterExitFn(0)
 }
 
 func getGitHash(dir string) string {

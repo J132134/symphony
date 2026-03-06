@@ -4,12 +4,14 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,7 @@ var identRe = regexp.MustCompile(`[^A-Za-z0-9._\-]`)
 const (
 	symphonyStateDir   = ".symphony"
 	afterRunOutputFile = "after_run.stdout"
+	hookKillGrace      = 10 * time.Second
 )
 
 // SanitizeIdentifier replaces unsafe characters with underscores.
@@ -179,25 +182,75 @@ func (m *Manager) runHook(ctx context.Context, name, script, wsPath string) (str
 	hctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(hctx, "bash", "-lc", script)
+	cmd := exec.Command("bash", "-lc", script)
 	cmd.Dir = wsPath
 	cmd.Env = append(os.Environ(), "SYMPHONY_WORKSPACE="+wsPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("hook '%s' start: %w", name, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	var err error
+	var cause error
+	select {
+	case err = <-done:
+	case <-hctx.Done():
+		cause = hctx.Err()
+		if waitErr, finished := gracefullyStopProcessGroup(cmd, done, hookKillGrace); finished {
+			err = waitErr
+		} else {
+			err = <-done
+		}
+	}
+
 	stdoutText := strings.TrimSpace(stdout.String())
 	stderrText := strings.TrimSpace(stderr.String())
-	if err != nil {
-		if hctx.Err() == context.DeadlineExceeded {
-			return stdoutText, fmt.Errorf("hook '%s' timed out after %dms", name, m.hooksTimeoutMs)
+	if cause != nil {
+		if ctx.Err() != nil {
+			return stdoutText, fmt.Errorf("hook '%s' cancelled: %w", name, cause)
 		}
+		return stdoutText, fmt.Errorf("hook '%s' timed out after %dms", name, m.hooksTimeoutMs)
+	}
+	if err != nil {
 		detail := strings.TrimSpace(strings.Join([]string{stdoutText, stderrText}, "\n"))
 		return stdoutText, fmt.Errorf("hook '%s' failed (exit %v): %s", name, cmd.ProcessState, detail)
 	}
 	return stdoutText, nil
+}
+
+func gracefullyStopProcessGroup(cmd *exec.Cmd, done <-chan error, grace time.Duration) (error, bool) {
+	if cmd == nil || cmd.Process == nil {
+		return nil, false
+	}
+	_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGTERM)
+
+	select {
+	case err := <-done:
+		return err, true
+	case <-time.After(grace):
+		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
+		return nil, false
+	}
+}
+
+func signalProcessGroup(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	err := syscall.Kill(-pid, sig)
+	if err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) persistAfterRunOutput(wsPath, stdout string) error {

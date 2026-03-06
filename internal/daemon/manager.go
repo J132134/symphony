@@ -36,7 +36,10 @@ func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLi
 }
 
 func (pr *projectRunner) start(parent context.Context) {
-	ctx, cancel := context.WithCancel(parent)
+	if parent != nil && parent.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 
 	pr.mu.Lock()
@@ -180,13 +183,21 @@ type Manager struct {
 
 	restartRequested bool
 	restartReady     chan struct{}
+	done             chan struct{}
 }
 
 func NewManager(cfg *config.DaemonConfig) *Manager {
+	return NewManagerWithLimiter(cfg, nil)
+}
+
+func NewManagerWithLimiter(cfg *config.DaemonConfig, limiter *orchestrator.SessionLimiter) *Manager {
+	if limiter == nil {
+		limiter = orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions())
+	}
 	return &Manager{
 		cfg:     cfg,
 		runners: make(map[string]*projectRunner, len(cfg.Projects)),
-		limiter: orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions()),
+		limiter: limiter,
 	}
 }
 
@@ -194,10 +205,13 @@ func NewManager(cfg *config.DaemonConfig) *Manager {
 func (m *Manager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
 
 	m.mu.Lock()
 	m.ctx = ctx
 	m.cancel = cancel
+	m.done = done
 	cfg := m.cfg
 	m.mu.Unlock()
 
@@ -214,6 +228,7 @@ func (m *Manager) Run(ctx context.Context) {
 	m.mu.Lock()
 	m.ctx = nil
 	m.cancel = nil
+	m.done = nil
 	m.mu.Unlock()
 	slog.Info("daemon.stopped")
 }
@@ -228,10 +243,22 @@ func (m *Manager) Shutdown() {
 	}
 }
 
+func (m *Manager) Wait() {
+	m.mu.RLock()
+	done := m.done
+	m.mu.RUnlock()
+	if done != nil {
+		<-done
+	}
+}
+
 // ApplyConfig incrementally reconciles the managed runners with the latest config.
 func (m *Manager) ApplyConfig(cfg *config.DaemonConfig) {
 	if cfg == nil {
 		return
+	}
+	if m.limiter != nil {
+		m.limiter.SetLimit(cfg.MaxTotalConcurrentSessions())
 	}
 
 	nextProjects := make(map[string]config.ProjectConfig, len(cfg.Projects))

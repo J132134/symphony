@@ -2,11 +2,13 @@ package workspace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFinishRunPersistsHookOutputForTurnContext(t *testing.T) {
@@ -76,6 +78,101 @@ func TestGetTurnContextReturnsErrorWhenGitMetadataUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "git diff HEAD --stat") {
 		t.Fatalf("GetTurnContext() error = %q, want git diff context", err)
+	}
+}
+
+func TestFinishRunHonorsParentDrainDeadline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	wsPath := filepath.Join(root, "J-31")
+	if err := os.MkdirAll(wsPath, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	manager, err := NewManager(root, map[string]string{
+		"after_run": "sleep 1",
+	}, 2_000)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = manager.FinishRun(ctx, &Workspace{Path: wsPath, Key: "J-31"})
+	if err == nil {
+		t.Fatal("FinishRun() error = nil, want deadline failure")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("FinishRun elapsed = %v, want parent deadline to cut it short", elapsed)
+	}
+}
+
+func TestRunHookGracefullyStopsProcessGroupOnDeadline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	wsPath := filepath.Join(root, "J-31")
+	if err := os.MkdirAll(wsPath, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	manager, err := NewManager(root, nil, 2_000)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	marker := filepath.Join(wsPath, "term.txt")
+	script := fmt.Sprintf("trap 'echo term > %q; exit 0' TERM; while true; do sleep 1; done", marker)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = manager.runHook(ctx, "after_run", script, wsPath)
+	if err == nil {
+		t.Fatal("runHook() error = nil, want deadline failure")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("runHook elapsed = %v, want graceful stop within parent deadline window", elapsed)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil {
+		t.Fatalf("expected TERM trap marker, read error = %v", readErr)
+	} else if strings.TrimSpace(string(got)) != "term" {
+		t.Fatalf("TERM trap marker = %q, want %q", strings.TrimSpace(string(got)), "term")
+	}
+}
+
+func TestCleanupHonorsParentDrainDeadline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	wsPath := filepath.Join(root, "J-31")
+	if err := os.MkdirAll(wsPath, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	manager, err := NewManager(root, map[string]string{
+		"before_remove": "sleep 1",
+	}, 2_000)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if err := manager.Cleanup(ctx, &Workspace{Path: wsPath, Key: "J-31"}); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Cleanup elapsed = %v, want parent deadline to cut it short", elapsed)
+	}
+	if _, err := os.Stat(wsPath); !os.IsNotExist(err) {
+		t.Fatalf("workspace should be removed, err=%v", err)
 	}
 }
 

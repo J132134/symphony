@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"symphony/internal/config"
+	"symphony/internal/orchestrator"
 )
 
 func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(t *testing.T) {
@@ -327,6 +329,153 @@ func TestRuntimeReloadAllowsCurrentStatusServerPort(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for runtime shutdown")
+	}
+}
+
+func TestRuntimeSwapStartsNewBeforeStoppingOld(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+	}
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), cfg); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+
+	nextCfg := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+	}
+	if err := runtime.swap(context.Background(), nextCfg); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "start:beta", "stop:alpha"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestRuntimeSwapStopsOldBeforeStartingNewWhenStatusServerPortIsReused(t *testing.T) {
+	t.Parallel()
+
+	port := 7777
+	alpha := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port},
+	}
+	beta := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port},
+		Agent:        config.DaemonAgentConfig{MaxTotalConcurrentSessions: 5},
+	}
+
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "stop:alpha", "start:beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var limits []int
+	var ptrs []string
+
+	runtime := &Runtime{
+		startRuntime: func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+			limiter, _ := parent.Value(runtimeLimiterKey{}).(*orchestrator.SessionLimiter)
+			if limiter == nil {
+				t.Fatal("expected shared limiter in runtime context")
+			}
+			mu.Lock()
+			limits = append(limits, limiter.Limit())
+			ptrs = append(ptrs, fmt.Sprintf("%p", limiter))
+			mu.Unlock()
+
+			done := make(chan struct{})
+			return &managedRuntime{
+				cfg: cfg,
+				cancel: func() { close(done) },
+				done: done,
+			}, nil
+		},
+	}
+
+	alpha := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		Agent:    config.DaemonAgentConfig{MaxTotalConcurrentSessions: 2},
+	}
+	beta := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		Agent:    config.DaemonAgentConfig{MaxTotalConcurrentSessions: 5},
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := limits, []int{2, 5}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("limiter limits = %v, want %v", got, want)
+	}
+	if len(ptrs) != 2 || ptrs[0] != ptrs[1] {
+		t.Fatalf("expected limiter pointer to be shared, got %v", ptrs)
 	}
 }
 
