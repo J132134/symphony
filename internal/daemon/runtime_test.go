@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -237,6 +238,98 @@ func TestRuntimeAppliesProjectOnlyReloadIncrementally(t *testing.T) {
 	}
 }
 
+func TestRuntimeReloadAllowsCurrentStatusServerPort(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfigToken(t, configPath, "alpha")
+
+	ln, port := listenOnRandomPort(t)
+	defer ln.Close()
+
+	alphaCfg := &config.DaemonConfig{
+		ConfigPath:   configPath,
+		Projects:     []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port},
+	}
+	betaCfg := &config.DaemonConfig{
+		ConfigPath:   configPath,
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port},
+	}
+
+	reloader := &recordingConfigApplier{}
+	var mu sync.Mutex
+	starts := 0
+	runtime := &Runtime{
+		configPath:    configPath,
+		watchDebounce: 10 * time.Millisecond,
+		loadConfig: func(path string) (*config.DaemonConfig, error) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			switch string(data) {
+			case "alpha":
+				return alphaCfg, nil
+			case "beta!!":
+				return betaCfg, nil
+			default:
+				t.Fatalf("unexpected config token: %q", data)
+				return nil, nil
+			}
+		},
+		startRuntime: func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+			mu.Lock()
+			starts++
+			mu.Unlock()
+
+			ctx, cancel := context.WithCancel(parent)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				<-ctx.Done()
+			}()
+			return &managedRuntime{cfg: cfg, reloader: reloader, cancel: cancel, done: done}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(ctx, alphaCfg)
+	}()
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return starts == 1
+	})
+
+	writeConfigToken(t, configPath, "beta!!")
+	waitFor(t, func() bool {
+		return reflect.DeepEqual(reloader.projectSets(), [][]string{{"beta"}})
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runtime exited with error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime shutdown")
+	}
+}
+
 func writeConfigToken(t *testing.T, path, token string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
@@ -254,6 +347,20 @@ func waitFor(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
+}
+
+func listenOnRandomPort(t *testing.T) (net.Listener, int) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type %T", ln.Addr())
+	}
+	return ln, addr.Port
 }
 
 type recordingConfigApplier struct {

@@ -37,6 +37,9 @@ func (c *SymphonyConfig) resolveEnv(v string) string {
 
 func (c *SymphonyConfig) expandPath(v string) string {
 	resolved := c.resolveEnv(v)
+	if strings.TrimSpace(resolved) == "" {
+		return ""
+	}
 	if strings.HasPrefix(resolved, "~") {
 		home, _ := os.UserHomeDir()
 		resolved = home + resolved[1:]
@@ -194,7 +197,11 @@ func (c *SymphonyConfig) PollIntervalIdleMs() int {
 
 func (c *SymphonyConfig) WorkspaceRoot() string {
 	v := c.getString("workspace.root", "~/.symphony/workspaces")
-	return filepath.Clean(c.expandPath(v))
+	expanded := c.expandPath(v)
+	if strings.TrimSpace(expanded) == "" {
+		return ""
+	}
+	return filepath.Clean(expanded)
 }
 
 // -- Hooks --
@@ -317,6 +324,24 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	if c.CodexCommand() == "" {
 		errs = append(errs, "codex.command must be non-empty")
+	}
+	if strings.TrimSpace(c.WorkspaceRoot()) == "" {
+		errs = append(errs, "workspace.root must be non-empty")
+	} else {
+		errs = append(errs, validateCreatableWritableDir(c.WorkspaceRoot(), "workspace.root")...)
+	}
+	errs = append(errs, validateTCPPortAvailable(c.ServerPort(), "server.port")...)
+	if c.PollIntervalMs() <= 0 {
+		errs = append(errs, "polling.interval_ms must be greater than 0")
+	}
+	if c.PollIntervalIdleMs() < c.PollIntervalMs() {
+		errs = append(errs, "polling.idle_interval_ms must be greater than or equal to polling.interval_ms")
+	}
+	if c.MaxTurns() <= 0 {
+		errs = append(errs, "agent.max_turns must be greater than 0")
+	}
+	if c.MaxConcurrentAgents() <= 0 {
+		errs = append(errs, "agent.max_concurrent_agents must be greater than 0")
 	}
 	return errs
 }
