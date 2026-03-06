@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -123,19 +124,25 @@ func (c *DaemonConfig) Validate() []string {
 	names := map[string]int{}
 	for _, p := range c.Projects {
 		names[p.Name]++
-		if p.Name == "" {
+		if strings.TrimSpace(p.Name) == "" {
 			errs = append(errs, "each project must have a name")
 		}
-		if p.Workflow == "" {
+		if strings.TrimSpace(p.Workflow) == "" {
 			errs = append(errs, fmt.Sprintf("project '%s': workflow path is required", p.Name))
-		} else if _, err := os.Stat(p.Workflow); err != nil {
-			errs = append(errs, fmt.Sprintf("project '%s': workflow not found: %s", p.Name, p.Workflow))
+		} else {
+			errs = append(errs, validateReadableFile(p.Workflow, fmt.Sprintf("project '%s': workflow", p.Name))...)
 		}
 	}
 	for name, count := range names {
 		if count > 1 {
 			errs = append(errs, fmt.Sprintf("duplicate project name: %s", name))
 		}
+	}
+	if strings.TrimSpace(c.AutoUpdate.RepoDir) != "" {
+		errs = append(errs, validateGitRepoDir(c.AutoUpdate.RepoDir, "auto_update.repo_dir")...)
+	}
+	if c.StatusServer.Enabled {
+		errs = append(errs, validateTCPPortAvailable(c.StatusServer.Port, "status_server.port")...)
 	}
 	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
 		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
@@ -167,6 +174,9 @@ func DefaultMaxTotalConcurrentSessions() int {
 }
 
 func resolvePath(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
 	if len(v) > 0 && v[0] == '$' {
 		v = os.Getenv(v[1:])
 	}
