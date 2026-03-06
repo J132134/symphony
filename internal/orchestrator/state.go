@@ -12,6 +12,7 @@ import (
 )
 
 type RunStatus string
+type RetryKind string
 
 const (
 	StatusPreparingWorkspace  RunStatus = "preparing_workspace"
@@ -25,6 +26,11 @@ const (
 	StatusTimedOut            RunStatus = "timed_out"
 	StatusStalled             RunStatus = "stalled"
 	StatusCanceled            RunStatus = "canceled_by_reconciliation"
+)
+
+const (
+	RetryKindFailure  RetryKind = "failure"
+	RetryKindCapacity RetryKind = "capacity"
 )
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
@@ -172,8 +178,10 @@ func workerCancelledError(reason WorkerCancelReason, detail string) error {
 type RetryEntry struct {
 	IssueID      string
 	Identifier   string
+	Kind         RetryKind
 	Attempt      int
 	FailureCount int
+	DeferCount   int
 	DueAt        time.Time
 	Error        string
 	timer        *time.Timer
@@ -232,6 +240,10 @@ type State struct {
 	LastTrackerSuccessAt *time.Time
 	LastTrackerErrorAt   *time.Time
 	LastTrackerError     string
+
+	PausedUntil         *time.Time
+	PauseReason         string
+	RateLimitPauseCount int
 }
 
 func NewState() *State {

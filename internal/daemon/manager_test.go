@@ -11,6 +11,25 @@ import (
 	"symphony/internal/orchestrator"
 )
 
+type fakeManagedOrchestrator struct {
+	state *orchestrator.State
+	run   func(context.Context) error
+}
+
+func (f *fakeManagedOrchestrator) Run(ctx context.Context) error {
+	if f.run == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return f.run(ctx)
+}
+
+func (f *fakeManagedOrchestrator) BeginDrain()                    {}
+func (f *fakeManagedOrchestrator) DrainAndStop()                  {}
+func (f *fakeManagedOrchestrator) IsIdle() bool                   { return true }
+func (f *fakeManagedOrchestrator) GetState() *orchestrator.State  { return f.state }
+func (f *fakeManagedOrchestrator) TriggerRefresh(context.Context) {}
+
 func TestRequestRestartWhenIdleWaitsForRunningWork(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +112,172 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 	if summary.Projects[2].LastError != "workflow load failed" {
 		t.Fatalf("last_error = %q, want workflow load failed", summary.Projects[2].LastError)
+	}
+}
+
+func TestProjectRunnerQuarantinesAfterRestartBudget(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+	step := 0
+	pr := newProjectRunner(
+		config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"},
+		nil,
+		config.ProjectHealthConfig{
+			RestartBudgetCount:         3,
+			RestartBudgetWindowMinutes: 15,
+			ProbeIntervalSeconds:       11,
+		},
+	)
+	pr.now = func() time.Time {
+		ts := base.Add(time.Duration(step) * time.Second)
+		step++
+		return ts
+	}
+	pr.after = func(d time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		if d < 11*time.Second {
+			ch <- base.Add(d)
+		}
+		return ch
+	}
+	pr.newOrch = func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator {
+		return &fakeManagedOrchestrator{
+			state: orchestrator.NewState(),
+			run: func(context.Context) error {
+				return errors.New("boom")
+			},
+		}
+	}
+	pr.probe = func(context.Context, config.ProjectConfig) error {
+		return errors.New("still broken")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pr.run(ctx)
+	}()
+
+	waitFor(t, func() bool {
+		snapshot := pr.projectSnapshot()
+		return snapshot.Health == "quarantined" && snapshot.CrashCount == 3 && snapshot.QuarantinedAt != ""
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestProjectRunnerProbeRecoversAndResetsCrashBudget(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+	step := 0
+	starts := 0
+
+	pr := newProjectRunner(
+		config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"},
+		nil,
+		config.ProjectHealthConfig{
+			RestartBudgetCount:         3,
+			RestartBudgetWindowMinutes: 15,
+			ProbeIntervalSeconds:       11,
+		},
+	)
+	pr.now = func() time.Time {
+		ts := base.Add(time.Duration(step) * time.Second)
+		step++
+		return ts
+	}
+	pr.after = func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- base
+		return ch
+	}
+	pr.newOrch = func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator {
+		starts++
+		if starts <= 3 {
+			return &fakeManagedOrchestrator{
+				state: orchestrator.NewState(),
+				run: func(context.Context) error {
+					return errors.New("boom")
+				},
+			}
+		}
+		return &fakeManagedOrchestrator{
+			state: orchestrator.NewState(),
+			run: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+	}
+	probeCalls := 0
+	pr.probe = func(context.Context, config.ProjectConfig) error {
+		probeCalls++
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pr.run(ctx)
+	}()
+
+	waitFor(t, func() bool {
+		snapshot := pr.projectSnapshot()
+		return starts >= 4 && probeCalls >= 1 && snapshot.Health == "healthy" && snapshot.CrashCount == 0
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestManagerGetSummaryMarksQuarantinedProjects(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{},
+		runners: map[string]*projectRunner{
+			"alpha": {
+				proj:          config.ProjectConfig{Name: "alpha"},
+				healthCfg:     config.ProjectHealthConfig{RestartBudgetWindowMinutes: 15},
+				healthState:   runnerHealthQuarantined,
+				crashTimes:    []time.Time{now.Add(-time.Minute), now},
+				quarantinedAt: &now,
+				lastErr:       "tracker auth failed",
+				now:           func() time.Time { return now },
+			},
+		},
+	}
+
+	summary := mgr.GetSummary()
+	if summary.Status != "quarantined" {
+		t.Fatalf("status = %q, want quarantined", summary.Status)
+	}
+	if summary.Projects[0].Health != "quarantined" {
+		t.Fatalf("health = %q, want quarantined", summary.Projects[0].Health)
+	}
+	if summary.Projects[0].CrashCount != 2 {
+		t.Fatalf("crash_count = %d, want 2", summary.Projects[0].CrashCount)
+	}
+	if summary.Projects[0].QuarantinedAt == "" {
+		t.Fatal("quarantined_at = empty, want timestamp")
 	}
 }
 

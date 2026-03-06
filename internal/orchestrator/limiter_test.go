@@ -1,6 +1,9 @@
 package orchestrator
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSessionLimiterAcquireRelease(t *testing.T) {
 	t.Parallel()
@@ -92,5 +95,22 @@ func TestSessionLimiterPreemptNonUrgent(t *testing.T) {
 	}
 	if preempted["issue-2"] != 0 {
 		t.Fatalf("issue-2 callback count = %d, want 0", preempted["issue-2"])
+	}
+}
+
+func TestSessionLimiterPauseUntilBlocksNewAcquire(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(2)
+	limiter.PauseUntil(time.Now().UTC().Add(30 * time.Second))
+
+	if limiter.TryAcquire() {
+		t.Fatal("acquire should fail while limiter is paused")
+	}
+	if got := limiter.Available(); got != 0 {
+		t.Fatalf("Available() = %d, want 0 while paused", got)
+	}
+	if _, ok := limiter.PausedUntil(); !ok {
+		t.Fatal("PausedUntil() should report an active pause")
 	}
 }

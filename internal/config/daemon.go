@@ -26,16 +26,23 @@ type StatusServerConfig struct {
 	Port    int
 }
 
+type ProjectHealthConfig struct {
+	RestartBudgetCount         int
+	RestartBudgetWindowMinutes int
+	ProbeIntervalSeconds       int
+}
+
 type DaemonAgentConfig struct {
 	MaxTotalConcurrentSessions int
 }
 
 type DaemonConfig struct {
-	Projects     []ProjectConfig
-	AutoUpdate   AutoUpdateConfig
-	Agent        DaemonAgentConfig
-	StatusServer StatusServerConfig
-	ConfigPath   string
+	Projects      []ProjectConfig
+	AutoUpdate    AutoUpdateConfig
+	Agent         DaemonAgentConfig
+	StatusServer  StatusServerConfig
+	ProjectHealth ProjectHealthConfig
+	ConfigPath    string
 
 	maxTotalConcurrentSessionsConfigured bool
 	autoUpdateRepoDirConfigured          bool
@@ -116,6 +123,23 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 	}
 
+	cfg.ProjectHealth = ProjectHealthConfig{
+		RestartBudgetCount:         3,
+		RestartBudgetWindowMinutes: 15,
+		ProbeIntervalSeconds:       60,
+	}
+	if ph, ok := raw["project_health"].(map[string]any); ok {
+		if count, ok := ph["restart_budget_count"]; ok {
+			cfg.ProjectHealth.RestartBudgetCount = toInt(count, cfg.ProjectHealth.RestartBudgetCount)
+		}
+		if mins, ok := ph["restart_budget_window_minutes"]; ok {
+			cfg.ProjectHealth.RestartBudgetWindowMinutes = toInt(mins, cfg.ProjectHealth.RestartBudgetWindowMinutes)
+		}
+		if secs, ok := ph["probe_interval_seconds"]; ok {
+			cfg.ProjectHealth.ProbeIntervalSeconds = toInt(secs, cfg.ProjectHealth.ProbeIntervalSeconds)
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -153,6 +177,15 @@ func (c *DaemonConfig) Validate() []string {
 	}
 	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
 		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
+	}
+	if c.ProjectHealth.RestartBudgetCount <= 0 {
+		errs = append(errs, "project_health.restart_budget_count must be greater than 0")
+	}
+	if c.ProjectHealth.RestartBudgetWindowMinutes <= 0 {
+		errs = append(errs, "project_health.restart_budget_window_minutes must be greater than 0")
+	}
+	if c.ProjectHealth.ProbeIntervalSeconds <= 0 {
+		errs = append(errs, "project_health.probe_interval_seconds must be greater than 0")
 	}
 	return errs
 }
