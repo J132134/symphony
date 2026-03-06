@@ -41,9 +41,24 @@ func validateGitRepoDir(path, label string) []string {
 		return []string{fmt.Sprintf("%s must be a directory: %s", label, path)}
 	}
 
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--is-inside-work-tree")
-	out, err := cmd.CombinedOutput()
-	if err != nil || strings.TrimSpace(string(out)) != "true" {
+	insideCmd := exec.Command("git", "-C", path, "rev-parse", "--is-inside-work-tree")
+	insideOut, err := insideCmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(insideOut)) != "true" {
+		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
+	}
+
+	topCmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
+	topOut, err := topCmd.CombinedOutput()
+	if err != nil {
+		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
+	}
+
+	repoRoot := filepath.Clean(strings.TrimSpace(string(topOut)))
+	targetPath, err := filepath.Abs(path)
+	if err != nil {
+		targetPath = filepath.Clean(path)
+	}
+	if repoRoot != filepath.Clean(targetPath) {
 		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
 	}
 	return nil
