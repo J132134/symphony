@@ -84,6 +84,9 @@ projects:
   - name: frontend
     workflow: ~/projects/frontend/WORKFLOW.md
 
+agent:
+  max_total_concurrent_sessions: 4
+
 status_server:
   enabled: true
   port: 7777
@@ -100,6 +103,8 @@ symphony daemon --config /path/to/config.yaml
 ```
 
 `symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록, 상태 서버, auto update 루프를 같은 프로세스 안에서 재기동하고, 유효하지 않으면 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
+
+`agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 제한`과 `데몬 전체 제한`을 모두 만족해야 한다.
 
 ## 에이전트 선택
 
@@ -175,6 +180,12 @@ hooks:
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
 | `codex.stall_timeout_ms` | `300000` (5분) |
 | `hooks.timeout_ms` | `60000` (60초) |
+
+### 데몬 전용 기본값
+
+| 항목 | 기본값 |
+|---|---|
+| `agent.max_total_concurrent_sessions` | `동적` (`NumCPU() <= 2` → `1`, `<= 4` → `2`, 그 외 `NumCPU()/2`, 최대 `8`) |
 
 ## 동작 흐름
 

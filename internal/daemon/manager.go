@@ -13,7 +13,8 @@ import (
 
 // projectRunner manages the lifecycle of one Orchestrator with auto-restart.
 type projectRunner struct {
-	proj config.ProjectConfig
+	proj    config.ProjectConfig
+	limiter *orchestrator.SessionLimiter
 
 	mu   sync.Mutex
 	orch *orchestrator.Orchestrator
@@ -22,7 +23,7 @@ type projectRunner struct {
 func (pr *projectRunner) run(ctx context.Context) {
 	backoff := 5 * time.Second
 	for ctx.Err() == nil {
-		o := orchestrator.New(pr.proj.Workflow, 0, pr.proj.Name)
+		o := orchestrator.New(pr.proj.Workflow, 0, pr.proj.Name, pr.limiter)
 
 		pr.mu.Lock()
 		pr.orch = o
@@ -80,10 +81,14 @@ type Manager struct {
 	cfg     *config.DaemonConfig
 	runners []*projectRunner
 	cancel  context.CancelFunc
+	limiter *orchestrator.SessionLimiter
 }
 
 func NewManager(cfg *config.DaemonConfig) *Manager {
-	return &Manager{cfg: cfg}
+	return &Manager{
+		cfg:     cfg,
+		limiter: orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions()),
+	}
 }
 
 // Run starts all projects and blocks until ctx is cancelled.
@@ -94,12 +99,12 @@ func (m *Manager) Run(ctx context.Context) {
 
 	m.runners = make([]*projectRunner, len(m.cfg.Projects))
 	for i, proj := range m.cfg.Projects {
-		pr := &projectRunner{proj: proj}
+		pr := &projectRunner{proj: proj, limiter: m.limiter}
 		m.runners[i] = pr
 		go pr.run(ctx)
 	}
 
-	slog.Info("daemon.started", "projects", len(m.cfg.Projects))
+	slog.Info("daemon.started", "projects", len(m.cfg.Projects), "max_total_concurrent_sessions", m.cfg.MaxTotalConcurrentSessions())
 	<-ctx.Done()
 
 	slog.Info("daemon.shutting_down")
