@@ -4,11 +4,14 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/orchestrator"
+	"symphony/internal/status"
+	"symphony/internal/version"
 )
 
 // projectRunner manages the lifecycle of one Orchestrator with auto-restart.
@@ -18,6 +21,7 @@ type projectRunner struct {
 
 	mu       sync.Mutex
 	orch     *orchestrator.Orchestrator
+	lastErr  string
 	draining bool
 }
 
@@ -35,6 +39,7 @@ func (pr *projectRunner) run(ctx context.Context) {
 
 		pr.mu.Lock()
 		pr.orch = o
+		pr.lastErr = ""
 		pr.mu.Unlock()
 
 		slog.Info("daemon.project_starting", "project", pr.proj.Name)
@@ -42,6 +47,9 @@ func (pr *projectRunner) run(ctx context.Context) {
 
 		pr.mu.Lock()
 		pr.orch = nil
+		if err != nil && ctx.Err() == nil {
+			pr.lastErr = err.Error()
+		}
 		pr.mu.Unlock()
 
 		if ctx.Err() != nil {
@@ -109,6 +117,15 @@ func (pr *projectRunner) getState() *orchestrator.State {
 		return nil
 	}
 	return o.GetState()
+}
+
+func (pr *projectRunner) snapshot() (*orchestrator.State, string) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.orch == nil {
+		return nil, pr.lastErr
+	}
+	return pr.orch.GetState(), pr.lastErr
 }
 
 // Manager coordinates multiple Orchestrators.
@@ -195,6 +212,18 @@ func (m *Manager) RequestRestartWhenIdle() <-chan struct{} {
 	return ch
 }
 
+// TriggerRefresh asks each running orchestrator to poll immediately.
+func (m *Manager) TriggerRefresh(ctx context.Context) {
+	for _, pr := range m.runners {
+		pr.mu.Lock()
+		orch := pr.orch
+		pr.mu.Unlock()
+		if orch != nil {
+			orch.TriggerRefresh(ctx)
+		}
+	}
+}
+
 // GetAllStates returns state for all running projects.
 func (m *Manager) GetAllStates() map[string]*orchestrator.State {
 	m.mu.Lock()
@@ -234,4 +263,92 @@ func (m *Manager) allIdle() bool {
 		}
 	}
 	return true
+}
+
+func (m *Manager) GetSummary() status.Summary {
+	build := version.Current()
+	summary := status.Summary{
+		Status:    "idle",
+		Version:   build.Version,
+		GitHash:   build.GitHash,
+		Dirty:     build.Dirty,
+		Projects:  make([]status.ProjectSummary, 0, len(m.runners)),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	projectNames := make([]string, 0, len(m.runners))
+	projectMap := make(map[string]status.ProjectSummary, len(m.runners))
+	var hasError bool
+	var hasNetworkIssue bool
+
+	for _, pr := range m.runners {
+		st, lastErr := pr.snapshot()
+		project := status.ProjectSummary{
+			Name:             pr.proj.Name,
+			Status:           "idle",
+			TrackerConnected: true,
+		}
+		projectNames = append(projectNames, pr.proj.Name)
+
+		if st == nil {
+			if lastErr != "" {
+				project.Status = "error"
+				project.LastError = lastErr
+				hasError = true
+			}
+			projectMap[pr.proj.Name] = project
+			continue
+		}
+
+		st.Lock()
+		project.SubprocessCount = len(st.Running)
+		project.RetryCount = len(st.RetryQueue)
+		for _, attempt := range st.Running {
+			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
+			summary.RunningIssueIDs = append(summary.RunningIssueIDs, attempt.Identifier)
+		}
+		sort.Strings(project.RunningIssueIDs)
+		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		if !project.TrackerConnected {
+			project.Status = "network_lost"
+			hasNetworkIssue = true
+		} else if project.RetryCount > 0 {
+			project.Status = "error"
+			hasError = true
+			for _, retry := range st.RetryQueue {
+				if retry.Error != "" {
+					project.LastError = retry.Error
+					break
+				}
+			}
+		} else if project.SubprocessCount > 0 {
+			project.Status = "running"
+		}
+		st.Unlock()
+
+		summary.SubprocessCount += project.SubprocessCount
+		summary.RetryCount += project.RetryCount
+		projectMap[pr.proj.Name] = project
+	}
+
+	sort.Strings(projectNames)
+	for _, name := range projectNames {
+		project := projectMap[name]
+		summary.Projects = append(summary.Projects, project)
+	}
+
+	sort.Strings(summary.RunningIssueIDs)
+	summary.ProjectCount = len(summary.Projects)
+
+	switch {
+	case hasError:
+		summary.Status = "error"
+	case hasNetworkIssue:
+		summary.Status = "network_lost"
+	case summary.SubprocessCount > 0:
+		summary.Status = "running"
+	default:
+		summary.Status = "idle"
+	}
+	return summary
 }

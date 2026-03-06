@@ -211,9 +211,11 @@ func (o *Orchestrator) tick(ctx context.Context) {
 
 	candidates, err := tr.FetchCandidateIssues(ctx)
 	if err != nil {
+		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.fetch_failed", "project", o.name, "error", err)
 		return
 	}
+	o.state.RecordTrackerSuccess(time.Now().UTC())
 
 	sortCandidates(candidates)
 
@@ -594,9 +596,11 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 
 	current, err := tr.FetchIssueStatesByIDs(ctx, runningIDs)
 	if err != nil {
+		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.reconcile_fetch_failed", "error", err)
 		return
 	}
+	o.state.RecordTrackerSuccess(time.Now().UTC())
 
 	issueMap := make(map[string]*types.Issue, len(current))
 	for _, iss := range current {
@@ -709,10 +713,12 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 
 	candidates, err := tr.FetchCandidateIssues(ctx)
 	if err != nil {
+		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.retry_fetch_failed", "issue_id", issueID, "error", err)
 		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt+1, "poll failed", true)
 		return
 	}
+	o.state.RecordTrackerSuccess(time.Now().UTC())
 
 	var issue *types.Issue
 	for _, c := range candidates {

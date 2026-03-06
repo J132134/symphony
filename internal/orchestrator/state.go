@@ -78,6 +78,10 @@ type State struct {
 
 	CompletedCount int
 	Totals         TokenUsage
+
+	LastTrackerSuccessAt *time.Time
+	LastTrackerErrorAt   *time.Time
+	LastTrackerError     string
 }
 
 func NewState() *State {
@@ -94,3 +98,55 @@ func NewState() *State {
 // Lock/Unlock expose the internal mutex for external packages (e.g. status server).
 func (s *State) Lock()   { s.mu.Lock() }
 func (s *State) Unlock() { s.mu.Unlock() }
+
+func (s *State) RecordTrackerSuccess(at time.Time) {
+	at = at.UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.LastTrackerSuccessAt = &at
+	s.LastTrackerErrorAt = nil
+	s.LastTrackerError = ""
+}
+
+func (s *State) RecordTrackerFailure(at time.Time, err error) {
+	at = at.UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.LastTrackerErrorAt = &at
+	if err != nil {
+		s.LastTrackerError = err.Error()
+	} else {
+		s.LastTrackerError = "unknown tracker error"
+	}
+}
+
+func (s *State) TrackerStatus() (connected bool, lastSuccess string, lastError string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.trackerStatusLocked()
+}
+
+// TrackerStatusLocked reports tracker connectivity while the caller already holds s.mu.
+func (s *State) TrackerStatusLocked() (connected bool, lastSuccess string, lastError string) {
+	return s.trackerStatusLocked()
+}
+
+func (s *State) trackerStatusLocked() (connected bool, lastSuccess string, lastError string) {
+	connected = true
+	if s.LastTrackerErrorAt != nil && (s.LastTrackerSuccessAt == nil || !s.LastTrackerSuccessAt.After(*s.LastTrackerErrorAt)) {
+		connected = false
+		lastError = s.LastTrackerError
+		if lastError == "" {
+			lastError = "unknown tracker error"
+		}
+	}
+	if s.LastTrackerSuccessAt != nil {
+		lastSuccess = s.LastTrackerSuccessAt.Format(time.RFC3339)
+	}
+	return connected, lastSuccess, lastError
+}

@@ -18,6 +18,10 @@ type Source interface {
 	GetAllStates() map[string]*orchestrator.State
 }
 
+type RefreshSource interface {
+	TriggerRefresh(context.Context)
+}
+
 // Server is a lightweight HTTP status server.
 type Server struct {
 	source Source
@@ -29,6 +33,7 @@ func New(source Source, port int) *Server {
 	s := &Server{source: source, port: port}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleDashboard)
+	mux.HandleFunc("GET /api/v1/summary", s.handleSummary)
 	mux.HandleFunc("GET /api/v1/state", s.handleState)
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/v1/{issue_id}", s.handleIssue)
@@ -114,13 +119,21 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"running":  running,
-		"retrying": retrying,
+		"running":         running,
+		"retrying":        retrying,
 		"completed_count": completed,
 		"codex_totals": map[string]any{
 			"input_tokens": inTok, "output_tokens": outTok, "total_tokens": totTok,
 		},
 	})
+}
+
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if summarySource, ok := s.source.(SummarySource); ok {
+		writeJSON(w, 200, summarySource.GetSummary())
+		return
+	}
+	writeJSON(w, 200, BuildSummary(s.source.GetAllStates()))
 }
 
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +171,9 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if refresher, ok := s.source.(RefreshSource); ok {
+		refresher.TriggerRefresh(r.Context())
+	}
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
