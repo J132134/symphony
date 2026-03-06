@@ -32,7 +32,7 @@ func TestOnWorkerDoneDuringDrainDoesNotScheduleRetry(t *testing.T) {
 	o.state.mu.Unlock()
 
 	o.BeginDrain()
-	o.onWorkerDone(context.Background(), config.New(nil), attempt.IssueID, attempt, nil)
+	o.onWorkerDone(context.Background(), config.New(nil), attempt.IssueID, attempt, nil, nil)
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -84,6 +84,54 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 	if len(o.state.Running) != 0 {
 		t.Fatalf("no issue should be redispatched during drain, got %d running", len(o.state.Running))
+	}
+}
+
+func TestGracefulStopDrainWaitsForWorkerWaitGroup(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	o.mu.Lock()
+	o.cfg = config.New(map[string]any{
+		"daemon": map[string]any{
+			"drain_timeout_ms": 25,
+		},
+	})
+	o.mu.Unlock()
+
+	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-31"}
+	handle := &workerHandle{
+		cancel:  func() {},
+		attempt: attempt,
+	}
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.mu.Unlock()
+
+	o.mu.Lock()
+	o.workersByIssue[attempt.IssueID] = handle
+	o.mu.Unlock()
+
+	o.workers.Add(1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = o.gracefulStop(true)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("gracefulStop should wait until workers finish")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	o.workers.Done()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for gracefulStop to finish")
 	}
 }
 
@@ -193,8 +241,6 @@ func TestBuildAgentConfigUsesStateSpecificCommand(t *testing.T) {
 }
 
 func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	workflowPath := filepath.Join(dir, "WORKFLOW.md")
 	writeWorkflowFile(t, workflowPath, 1000, 2000)
@@ -229,8 +275,6 @@ func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
 }
 
 func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	workflowPath := filepath.Join(dir, "WORKFLOW.md")
 	writeWorkflowFile(t, workflowPath, 1000, 2000)
@@ -323,7 +367,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	o.state.Claimed[attempt.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil)
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
 
 	stopRetryTimer(t, o, attempt.IssueID)
 
@@ -402,7 +446,7 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	o.state.mu.Unlock()
 
 	runErr := fmt.Errorf("turn failed: stall_timeout")
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, runErr)
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, runErr)
 
 	if recorder.commentCount() != 1 {
 		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
@@ -506,7 +550,7 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	o.state.Claimed[attempt.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, fmt.Errorf("boom"))
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, fmt.Errorf("boom"))
 	stopRetryTimer(t, o, attempt.IssueID)
 
 	if recorder.commentCount() != 0 {
@@ -520,6 +564,37 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	defer o.state.mu.Unlock()
 	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
 		t.Fatal("expected retry to be scheduled for intermediate failure")
+	}
+}
+
+func TestOnWorkerDoneCancelledByStallSchedulesRetry(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_attempts": 3,
+		},
+	})
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-31",
+		Attempt:    1,
+	}
+	attempt.SetCancelReason(CancelReasonStall)
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, workerCancelledError(CancelReasonStall, "cancelled"))
+	stopRetryTimer(t, o, attempt.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+		t.Fatal("stall cancellation should schedule a retry")
 	}
 }
 

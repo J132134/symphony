@@ -36,6 +36,8 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 
 	slog.Info("updater.updated_waiting_for_idle")
 	<-mgr.RequestRestartWhenIdle()
+	mgr.Shutdown()
+	mgr.Wait()
 	slog.Info("updater.updated_restarting_via_supervisor")
 	os.Exit(0)
 }

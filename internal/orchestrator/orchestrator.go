@@ -38,12 +38,25 @@ type Orchestrator struct {
 
 	state *State
 
-	// workerCancels maps issue_id → context cancel for the running worker.
-	workerCancels map[string]context.CancelFunc
+	workers sync.WaitGroup
+
+	// workersByIssue maps issue_id → running worker handle.
+	workersByIssue map[string]*workerHandle
 
 	workflowWatchDebounce time.Duration
 	stopCh                chan struct{}
 	doneCh                chan struct{}
+}
+
+type workerHandle struct {
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	attempt     *RunAttempt
+	runner      *agent.Runner
+	agentCfg    *agent.Config
+	drainTimer  *time.Timer
+	draining    bool
+	interrupted bool
 }
 
 // New creates an Orchestrator. Call Run to start it.
@@ -53,11 +66,74 @@ func New(workflowPath string, port int, name string, globalLimiter *SessionLimit
 		name:                  name,
 		globalLimiter:         globalLimiter,
 		state:                 NewState(),
-		workerCancels:         make(map[string]context.CancelFunc),
+		workersByIssue:        make(map[string]*workerHandle),
 		workflowWatchDebounce: filewatch.DefaultDebounce,
 		stopCh:                make(chan struct{}),
 		doneCh:                make(chan struct{}),
 	}
+}
+
+func (h *workerHandle) setRunner(runner *agent.Runner, cfg *agent.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.runner = runner
+	h.agentCfg = cfg
+}
+
+func (h *workerHandle) clearRunner() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.runner = nil
+	h.agentCfg = nil
+}
+
+func (h *workerHandle) requestDrain(timeout time.Duration) {
+	h.mu.Lock()
+	if h.draining {
+		h.mu.Unlock()
+		return
+	}
+	h.draining = true
+	deadline := time.Now().Add(timeout)
+	h.attempt.SetDrainDeadline(deadline)
+	if timeout > 0 {
+		h.drainTimer = time.AfterFunc(timeout, func() {
+			h.attempt.SetCancelReason(CancelReasonDrain)
+			h.cancel()
+		})
+	}
+	runner := h.runner
+	agentCfg := h.agentCfg
+	threadID, turnID := h.attempt.ActiveTurn()
+	h.mu.Unlock()
+
+	if runner == nil || agentCfg == nil {
+		return
+	}
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(agentCfg.ReadTimeoutMs)*time.Millisecond)
+	defer cancel()
+	if err := runner.InterruptTurn(ctx, threadID, turnID, agentCfg); err != nil {
+		slog.Warn("orchestrator.turn_interrupt_failed", "issue", h.attempt.Identifier, "error", err)
+	}
+}
+
+func (h *workerHandle) stopDrainTimer() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.drainTimer != nil {
+		h.drainTimer.Stop()
+		h.drainTimer = nil
+	}
+}
+
+func (o *Orchestrator) drainTimeoutFor(cfg *config.SymphonyConfig) time.Duration {
+	if cfg == nil {
+		return 6 * time.Minute
+	}
+	return time.Duration(cfg.DrainTimeoutMs()) * time.Millisecond
 }
 
 // Run starts the orchestrator and blocks until ctx is done or Stop is called.
@@ -118,11 +194,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 // Stop signals shutdown and waits for the loop to exit.
 func (o *Orchestrator) Stop() {
 	o.requestStop(false)
-	o.mu.Lock()
-	for _, cancel := range o.workerCancels {
-		cancel()
-	}
-	o.mu.Unlock()
 	<-o.doneCh
 }
 
@@ -171,6 +242,22 @@ func (o *Orchestrator) IsIdle() bool {
 
 func (o *Orchestrator) TriggerRefresh(ctx context.Context) { go o.tick(ctx) }
 
+func (o *Orchestrator) currentConfig() *config.SymphonyConfig {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.cfg
+}
+
+func (o *Orchestrator) workerHandlesSnapshot() []*workerHandle {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	handles := make([]*workerHandle, 0, len(o.workersByIssue))
+	for _, handle := range o.workersByIssue {
+		handles = append(handles, handle)
+	}
+	return handles
+}
+
 // -- poll loop --
 
 func (o *Orchestrator) pollLoop(ctx context.Context) error {
@@ -203,23 +290,20 @@ func (o *Orchestrator) gracefulStop(drain bool) error {
 	o.clearRetryQueueLocked(true)
 	o.state.mu.Unlock()
 
+	handles := o.workerHandlesSnapshot()
 	if drain {
-		for {
-			o.state.mu.Lock()
-			running := len(o.state.Running)
-			o.state.mu.Unlock()
-			if running == 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+		timeout := o.drainTimeoutFor(o.currentConfig())
+		for _, handle := range handles {
+			handle.requestDrain(timeout)
 		}
 	} else {
-		o.mu.Lock()
-		for _, cancel := range o.workerCancels {
-			cancel()
+		for _, handle := range handles {
+			handle.attempt.SetCancelReason(CancelReasonShutdown)
+			handle.cancel()
 		}
-		o.mu.Unlock()
 	}
+
+	o.workers.Wait()
 
 	slog.Info("orchestrator.stopped", "project", o.name)
 	return nil
@@ -368,7 +452,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 
 	slog.Info("orchestrator.dispatching", "project", o.name, "issue", issue.Identifier, "attempt", attemptNum)
 
-	wctx, cancel := context.WithCancel(ctx)
+	wctx, cancel := context.WithCancel(context.Background())
 	attempt := &RunAttempt{
 		IssueID:        issue.ID,
 		Identifier:     issue.Identifier,
@@ -379,6 +463,10 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		GlobalSlotHeld: globalSlotHeld,
 		cancel:         cancel,
 	}
+	handle := &workerHandle{
+		cancel:  cancel,
+		attempt: attempt,
+	}
 
 	o.state.mu.Lock()
 	o.state.Claimed[issue.ID] = struct{}{}
@@ -386,39 +474,64 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 	o.state.mu.Unlock()
 
 	o.mu.Lock()
-	o.workerCancels[issue.ID] = cancel
+	o.workersByIssue[issue.ID] = handle
 	o.mu.Unlock()
 
+	o.workers.Add(1)
 	go func() {
-		err := o.runAttempt(wctx, cfg, issue, attempt)
-		o.onWorkerDone(ctx, cfg, issue.ID, attempt, err)
+		defer o.workers.Done()
+		err := o.runAttempt(wctx, cfg, issue, attempt, handle)
+		o.onWorkerDone(ctx, cfg, issue.ID, attempt, handle, err)
 	}()
 	return true
 }
 
-func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyConfig, issueID string, attempt *RunAttempt, err error) {
+func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyConfig, issueID string, attempt *RunAttempt, handle *workerHandle, err error) {
 	defer o.releaseGlobalSlot(attempt)
+	defer attempt.ClearDrainDeadline()
 
 	o.state.mu.Lock()
 	delete(o.state.Running, issueID)
 	o.state.mu.Unlock()
 
 	o.mu.Lock()
-	delete(o.workerCancels, issueID)
+	delete(o.workersByIssue, issueID)
 	tr := o.tracker
+	wsMgr := o.wsMgr
 	o.mu.Unlock()
 
-	ctxErr := ctx.Err() != nil || isCtxErr(err)
+	if handle != nil {
+		handle.stopDrainTimer()
+	}
 
-	if ctxErr {
-		o.state.mu.Lock()
-		delete(o.state.Claimed, issueID)
-		o.state.mu.Unlock()
-		slog.Info("orchestrator.worker_cancelled", "project", o.name, "issue_id", issueID)
-		return
+	if attempt.ShouldCleanupOnExit() && wsMgr != nil && attempt.WorkspacePath != "" {
+		cleanupCtx := context.Background()
+		cancelCleanup := func() {}
+		if deadlineCtx, cancel := attempt.DrainContext(); deadlineCtx != nil {
+			cleanupCtx = deadlineCtx
+			cancelCleanup = cancel
+		}
+		ws := &workspace.Workspace{
+			Path: attempt.WorkspacePath,
+			Key:  workspace.SanitizeIdentifier(attempt.Identifier),
+		}
+		if cleanupErr := wsMgr.Cleanup(cleanupCtx, ws); cleanupErr != nil {
+			slog.Warn("orchestrator.cleanup_on_exit_failed", "issue", attempt.Identifier, "error", cleanupErr)
+		}
+		cancelCleanup()
 	}
 
 	draining := o.isDraining()
+	reason := attempt.GetCancelReason()
+	cancelled := isWorkerCancelled(err)
+
+	if reason == CancelReasonTerminal || reason == CancelReasonReconcile || reason == CancelReasonShutdown {
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		slog.Info("orchestrator.worker_cancelled", "project", o.name, "issue_id", issueID, "reason", reason)
+		return
+	}
 
 	if err == nil {
 		o.state.mu.Lock()
@@ -443,9 +556,21 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		o.state.mu.Lock()
 		delete(o.state.Claimed, issueID)
 		o.state.mu.Unlock()
-		if err != nil {
+		if err != nil || cancelled {
 			slog.Info("orchestrator.worker_finished_during_drain", "project", o.name, "issue_id", issueID)
 		}
+		return
+	}
+
+	if cancelled && reason == CancelReasonStall {
+		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "worker cancelled after stall detection", true)
+		return
+	}
+	if cancelled {
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		slog.Info("orchestrator.worker_cancelled", "project", o.name, "issue_id", issueID)
 		return
 	}
 
@@ -465,7 +590,7 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 
 // -- agent attempt --
 
-func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attempt *RunAttempt) error {
+func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attempt *RunAttempt, handle *workerHandle) error {
 	o.mu.Lock()
 	wsMgr := o.wsMgr
 	wf := o.wf
@@ -475,6 +600,9 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	runnerStarted := false
 	defer func() {
 		if runnerStarted {
+			if handle != nil {
+				handle.clearRunner()
+			}
 			runner.StopSession()
 		}
 	}()
@@ -530,6 +658,9 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 		return fmt.Errorf("start session: %w", err)
 	}
 	runnerStarted = true
+	if handle != nil {
+		handle.setRunner(runner, agentCfg)
+	}
 	attempt.Session.ThreadID = threadID
 	attempt.Session.SessionID = runner.SessionID()
 	attempt.Session.AgentPID = runner.PID()
@@ -550,13 +681,19 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 			)
 		}
 
-		result := runner.RunTurn(ctx, threadID, turnPrompt, issue.Identifier, issue.Title, agentCfg,
+		turnID := fmt.Sprintf("%d", time.Now().UnixNano())
+		attempt.SetActiveTurn(threadID, turnID)
+		result := runner.RunTurn(ctx, threadID, turnID, turnPrompt, issue.Identifier, issue.Title, agentCfg,
 			func(e agent.Event) { o.handleAgentEvent(issue.ID, attempt, e) })
+		attempt.ClearActiveTurn(turnID)
 
 		if !result.Success {
 			if !result.CompletedNaturally {
 				attempt.Status = StatusFailed
 				attempt.Error = result.Error
+				if attempt.GetCancelReason() != CancelReasonNone || strings.Contains(result.Error, "cancelled") {
+					return workerCancelledError(attempt.GetCancelReason(), result.Error)
+				}
 				return fmt.Errorf("turn failed: %s", result.Error)
 			}
 			slog.Info("orchestrator.turn_failed_naturally", "issue", issue.Identifier, "turn", turnNum)
@@ -645,7 +782,6 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	o.mu.Lock()
 	cfg := o.cfg
 	tr := o.tracker
-	wsMgr := o.wsMgr
 	o.mu.Unlock()
 
 	if cfg == nil || tr == nil {
@@ -674,7 +810,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	o.state.mu.Unlock()
 
 	for _, id := range stalledIDs {
-		o.cancelWorker(id)
+		o.cancelWorker(id, CancelReasonStall)
 	}
 
 	if len(runningIDs) == 0 {
@@ -707,32 +843,27 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 		cur, found := issueMap[id]
 		if !found {
 			slog.Warn("orchestrator.reconcile_missing", "issue_id", id)
-			o.cancelWorker(id)
+			o.cancelWorker(id, CancelReasonReconcile)
 			continue
 		}
 
-		if termNorm[config.NormalizeState(cur.State)] {
+	if termNorm[config.NormalizeState(cur.State)] {
 			slog.Info("orchestrator.reconcile_terminal", "issue", cur.Identifier, "state", cur.State)
-			o.cancelWorker(id)
-			if wsMgr != nil && attempt != nil && attempt.WorkspacePath != "" {
-				ws := &workspace.Workspace{
-					Path: attempt.WorkspacePath,
-					Key:  workspace.SanitizeIdentifier(attempt.Identifier),
-				}
-				if err := wsMgr.Cleanup(ctx, ws); err != nil {
-					slog.Warn("orchestrator.reconcile_cleanup_failed", "issue_id", id, "error", err)
-				}
+			if attempt != nil {
+				attempt.MarkCleanupOnExit()
 			}
+			o.cancelWorker(id, CancelReasonTerminal)
 		}
 	}
 }
 
-func (o *Orchestrator) cancelWorker(issueID string) {
+func (o *Orchestrator) cancelWorker(issueID string, reason WorkerCancelReason) {
 	o.mu.Lock()
-	cancel, ok := o.workerCancels[issueID]
+	handle, ok := o.workersByIssue[issueID]
 	o.mu.Unlock()
 	if ok {
-		cancel()
+		handle.attempt.SetCancelReason(reason)
+		handle.cancel()
 	}
 }
 

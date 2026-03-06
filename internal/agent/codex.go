@@ -24,6 +24,7 @@ const (
 	methodInitialized   = "initialized"
 	methodThreadStart   = "thread/start"
 	methodTurnStart     = "turn/start"
+	methodTurnInterrupt = "turn/interrupt"
 	methodTurnCompleted = "turn/completed"
 	methodTurnFailed    = "turn/failed"
 	methodTurnCancelled = "turn/cancelled"
@@ -202,7 +203,7 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 // issueTitle is used only for the turn title field in the protocol.
 func (r *Runner) RunTurn(
 	ctx context.Context,
-	threadID, prompt, issueIdentifier, issueTitle string,
+	threadID, turnID, prompt, issueIdentifier, issueTitle string,
 	cfg *Config,
 	cb EventCallback,
 ) TurnResult {
@@ -210,7 +211,6 @@ func (r *Runner) RunTurn(
 		return TurnResult{Error: "process_not_running"}
 	}
 
-	turnID := fmt.Sprintf("%d", time.Now().UnixNano())
 	emit(cb, Event{
 		Name: "turn_started", Timestamp: time.Now().UTC(),
 		SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, PID: r.pid,
@@ -240,6 +240,21 @@ func (r *Runner) RunTurn(
 	defer cancel()
 
 	return r.consumeUntilDone(tctx, threadID, turnID, cb)
+}
+
+func (r *Runner) InterruptTurn(ctx context.Context, threadID, turnID string, cfg *Config) error {
+	if r.cmd == nil || r.cmd.Process == nil {
+		return nil
+	}
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" {
+		return nil
+	}
+	readTimeout := time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
+	_, err := r.sendRequest(ctx, readTimeout, methodTurnInterrupt, map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	})
+	return err
 }
 
 func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, cb EventCallback) TurnResult {
@@ -339,8 +354,12 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 	}
 }
 
-// StopSession gracefully terminates: SIGTERM → 5s → SIGKILL.
+// StopSession gracefully terminates: SIGTERM → 10s → SIGKILL.
 func (r *Runner) StopSession() {
+	r.stopSessionWithTimeout(10 * time.Second)
+}
+
+func (r *Runner) stopSessionWithTimeout(timeout time.Duration) {
 	if r.cmd == nil || r.cmd.Process == nil {
 		return
 	}
@@ -354,7 +373,7 @@ func (r *Runner) StopSession() {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(timeout):
 		slog.Warn("agent.force_kill", "pid", pid)
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		<-done

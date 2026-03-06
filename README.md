@@ -75,6 +75,9 @@ codex:
   command: codex app-server
   approval_policy: auto-edit
   turn_timeout_ms: 3600000
+
+daemon:
+  drain_timeout_ms: 360000
 ---
 You are working on {{ issue.identifier }}: {{ issue.title }}.
 
@@ -146,6 +149,8 @@ symphony menubar
 `symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
 
 `agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 제한`과 `데몬 전체 제한`을 모두 만족해야 한다.
+
+각 프로젝트의 `WORKFLOW.md`에는 `daemon.drain_timeout_ms`를 둘 수 있다. graceful drain의 기본값은 `codex.stall_timeout_ms + hooks.timeout_ms`이며, hot-reload나 shutdown 중에는 새 작업을 막은 뒤 현재 turn/tool call과 `after_run`, `before_remove` 훅이 이 상한 안에서 끝나기를 기다린다. 상한을 넘기면 Codex subprocess는 `SIGTERM`, 10초 후 `SIGKILL` 순서로 종료된다. full runtime reload는 `new runtime start -> old runtime drain` 순서로 실행돼 세션 공백을 줄인다.
 
 ## 에이전트 선택
 
@@ -255,6 +260,7 @@ agent:
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
 | `codex.stall_timeout_ms` | `300000` (5분) |
 | `hooks.timeout_ms` | `60000` (60초) |
+| `daemon.drain_timeout_ms` | `codex.stall_timeout_ms + hooks.timeout_ms` (`360000`, 6분) |
 
 ### 데몬 전용 기본값
 

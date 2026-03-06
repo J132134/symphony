@@ -49,6 +49,18 @@ func (l *SessionLimiter) Limit() int {
 	return l.limit
 }
 
+func (l *SessionLimiter) SetLimit(limit int) {
+	if l == nil {
+		return
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.limit = limit
+}
+
 func (l *SessionLimiter) InUse() int {
 	if l == nil {
 		return 0

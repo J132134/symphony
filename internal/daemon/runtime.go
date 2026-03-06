@@ -10,10 +10,13 @@ import (
 
 	"symphony/internal/config"
 	"symphony/internal/filewatch"
+	"symphony/internal/orchestrator"
 	"symphony/internal/status"
 )
 
 const defaultConfigWatchDebounce = filewatch.DefaultDebounce
+
+type runtimeLimiterKey struct{}
 
 type managedRuntime struct {
 	cfg      *config.DaemonConfig
@@ -41,6 +44,7 @@ type Runtime struct {
 
 	loadConfig   func(string) (*config.DaemonConfig, error)
 	startRuntime func(context.Context, *config.DaemonConfig) (*managedRuntime, error)
+	limiter      *orchestrator.SessionLimiter
 
 	mu      sync.Mutex
 	current *managedRuntime
@@ -68,6 +72,10 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 	if r.watchDebounce <= 0 {
 		r.watchDebounce = defaultConfigWatchDebounce
 	}
+	if r.limiter == nil {
+		r.limiter = orchestrator.NewSessionLimiter(initialCfg.MaxTotalConcurrentSessions())
+	}
+	r.limiter.SetLimit(initialCfg.MaxTotalConcurrentSessions())
 
 	if err := r.swap(ctx, initialCfg); err != nil {
 		return err
@@ -132,23 +140,24 @@ func reuseCurrentStatusServerPort(current, next *config.DaemonConfig) bool {
 }
 
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
-	r.mu.Lock()
-	prev := r.current
-	r.current = nil
-	r.mu.Unlock()
-
-	if prev != nil {
-		prev.stop()
+	if r.limiter == nil {
+		r.limiter = orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions())
 	}
+	r.limiter.SetLimit(cfg.MaxTotalConcurrentSessions())
 
-	next, err := r.startRuntime(parent, cfg)
+	nextParent := context.WithValue(parent, runtimeLimiterKey{}, r.limiter)
+	next, err := r.startRuntime(nextParent, cfg)
 	if err != nil {
 		return err
 	}
 
 	r.mu.Lock()
+	prev := r.current
 	r.current = next
 	r.mu.Unlock()
+	if prev != nil {
+		prev.stop()
+	}
 	return nil
 }
 
@@ -178,7 +187,8 @@ func (r *Runtime) stopCurrent() {
 func startManagedRuntime(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
 	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
-	mgr := NewManager(cfg)
+	limiter, _ := parent.Value(runtimeLimiterKey{}).(*orchestrator.SessionLimiter)
+	mgr := NewManagerWithLimiter(cfg, limiter)
 	go func() {
 		defer close(done)
 		runDaemonApp(ctx, cfg, mgr)
@@ -228,7 +238,6 @@ func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
 		return false
 	}
 	return prev.AutoUpdate == next.AutoUpdate &&
-		prev.Agent == next.Agent &&
 		prev.StatusServer == next.StatusServer
 }
 

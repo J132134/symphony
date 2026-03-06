@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -184,8 +185,63 @@ func TestManagerApplyConfigIgnoresProjectOrderOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestManagerWaitBlocksUntilRunStops(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(&config.DaemonConfig{
+		Projects: []config.ProjectConfig{},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mgr.Run(ctx)
+	}()
+
+	waitForManager(t, func() bool {
+		mgr.mu.RLock()
+		defer mgr.mu.RUnlock()
+		return mgr.done != nil
+	})
+
+	waited := make(chan struct{})
+	go func() {
+		defer close(waited)
+		mgr.Wait()
+	}()
+
+	select {
+	case <-waited:
+		t.Fatal("Wait should block before shutdown")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for manager.Wait")
+	}
+
+	<-done
+}
+
 func closedDone() chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
+}
+
+func waitForManager(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
 }

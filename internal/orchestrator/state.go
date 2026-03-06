@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,7 @@ type TokenUsage struct {
 type LiveSession struct {
 	SessionID    string
 	ThreadID     string
+	TurnID       string
 	AgentPID     string
 	InputTokens  int64
 	OutputTokens int64
@@ -43,6 +46,17 @@ type LiveSession struct {
 	TurnCount    int
 	LastEventAt  *time.Time
 }
+
+type WorkerCancelReason string
+
+const (
+	CancelReasonNone      WorkerCancelReason = ""
+	CancelReasonDrain     WorkerCancelReason = "drain"
+	CancelReasonShutdown  WorkerCancelReason = "shutdown"
+	CancelReasonStall     WorkerCancelReason = "stall"
+	CancelReasonTerminal  WorkerCancelReason = "terminal"
+	CancelReasonReconcile WorkerCancelReason = "reconcile"
+)
 
 type RunAttempt struct {
 	IssueID        string
@@ -57,7 +71,100 @@ type RunAttempt struct {
 	IssueState     string // last known tracker state for per-state concurrency
 	GlobalSlotHeld bool
 
+	mu            sync.Mutex
+	CancelReason  WorkerCancelReason
+	CleanupOnExit bool
+	DrainDeadline *time.Time
+
 	cancel context.CancelFunc
+}
+
+func (a *RunAttempt) SetCancelReason(reason WorkerCancelReason) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.CancelReason = reason
+}
+
+func (a *RunAttempt) GetCancelReason() WorkerCancelReason {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.CancelReason
+}
+
+func (a *RunAttempt) MarkCleanupOnExit() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.CleanupOnExit = true
+}
+
+func (a *RunAttempt) ShouldCleanupOnExit() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.CleanupOnExit
+}
+
+func (a *RunAttempt) SetDrainDeadline(deadline time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.DrainDeadline = &deadline
+}
+
+func (a *RunAttempt) ClearDrainDeadline() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.DrainDeadline = nil
+}
+
+func (a *RunAttempt) DrainContext() (context.Context, context.CancelFunc) {
+	a.mu.Lock()
+	deadline := a.DrainDeadline
+	a.mu.Unlock()
+	if deadline == nil {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithDeadline(context.Background(), *deadline)
+}
+
+func (a *RunAttempt) SetActiveTurn(threadID, turnID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.ThreadID = threadID
+	a.Session.TurnID = turnID
+}
+
+func (a *RunAttempt) ClearActiveTurn(turnID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Session.TurnID == turnID {
+		a.Session.TurnID = ""
+	}
+}
+
+func (a *RunAttempt) ActiveTurn() (threadID, turnID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Session.ThreadID, a.Session.TurnID
+}
+
+var errWorkerCancelled = errors.New("worker cancelled")
+
+func isWorkerCancelled(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isCtxErr(err) ||
+		errors.Is(err, errWorkerCancelled) ||
+		strings.Contains(err.Error(), "cancelled")
+}
+
+func workerCancelledError(reason WorkerCancelReason, detail string) error {
+	if detail == "" {
+		detail = string(reason)
+		if detail == "" {
+			detail = "cancelled"
+		}
+	}
+	return fmt.Errorf("%w: %s", errWorkerCancelled, detail)
 }
 
 type RetryEntry struct {

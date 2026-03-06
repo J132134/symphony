@@ -11,6 +11,7 @@ const (
 	MethodInitialized  = "initialized"
 	MethodThreadStart  = "thread/start"
 	MethodTurnStart    = "turn/start"
+	MethodTurnInterrupt = "turn/interrupt"
 
 	MethodTurnCompleted      = "turn/completed"
 	MethodTurnFailed         = "turn/failed"
