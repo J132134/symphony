@@ -16,13 +16,16 @@
     launchctl list | grep symphony
 
   중지 (재시작 없이):
-    launchctl stop com.symphony.daemon
+    launchctl unload ~/Library/LaunchAgents/com.symphony.daemon.plist
+
+  임시 중지 후 재시작:
+    launchctl stop com.symphony.daemon   # SIGTERM 전송, KeepAlive로 10s 후 재시작
 
   제거:
     launchctl unload ~/Library/LaunchAgents/com.symphony.daemon.plist
 
-  exit(0)  = 정상 종료 → launchd가 재시작하지 않음
-  exit(42) = 자동 업데이트 → launchd가 재시작함 (KeepAlive SuccessfulExit: false)
+  KeepAlive: true → 종료 이유(exit 0/비정상/업데이트)와 무관하게 항상 재시작
+  exit(42) = 자동 업데이트 트리거 (재시작됨)
   crash    = 자동 복구 (ThrottleInterval 10s)
 -->
 <plist version="1.0">
@@ -50,10 +53,7 @@
     <string>/Users/aaron.hj/Projects/symphony</string>
 
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>
