@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -28,9 +29,12 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 		return
 	}
 
+	summary, summaryErr := collectWorkspaceSummary(attempt.WorkspacePath, cfg)
+
 	if cfg.TrackerPostComments() {
-		body, err := buildSuccessComment(cfg, attempt)
-		if err != nil {
+		if summaryErr != nil {
+			slog.Warn("orchestrator.comment_build_failed", "issue_id", issueID, "error", summaryErr)
+		} else if body, err := buildSuccessComment(cfg, attempt, summary); err != nil {
 			slog.Warn("orchestrator.comment_build_failed", "issue_id", issueID, "error", err)
 		} else if err := tr.AddComment(ctx, issueID, body); err != nil {
 			slog.Warn("orchestrator.comment_post_failed", "issue_id", issueID, "error", err)
@@ -40,6 +44,11 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 	if state := cfg.TrackerOnSuccessState(); state != "" {
 		if err := tr.UpdateIssueState(ctx, issueID, state); err != nil {
 			slog.Warn("orchestrator.success_state_update_failed", "issue_id", issueID, "state", state, "error", err)
+		} else if shouldAttachPRLink(state, summary, summaryErr) {
+			linkURL := resolvePRLinkURL(summary, lookupGitHubPRURL)
+			if err := tr.AddLink(ctx, issueID, "PR", linkURL); err != nil {
+				slog.Warn("orchestrator.pr_link_add_failed", "issue_id", issueID, "state", state, "pr_url", linkURL, "error", err)
+			}
 		}
 	}
 }
@@ -65,12 +74,7 @@ func (o *Orchestrator) maybePostFinalFailureFeedback(ctx context.Context, cfg *c
 	}
 }
 
-func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt) (string, error) {
-	summary, err := collectWorkspaceSummary(attempt.WorkspacePath, cfg)
-	if err != nil {
-		return "", err
-	}
-
+func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt, summary workspaceSummary) (string, error) {
 	lines := []string{
 		fmt.Sprintf("✅ **Symphony agent completed** (attempt %d, turn %d/%d)", attempt.Attempt, max(1, attempt.Session.TurnCount), cfg.MaxTurns()),
 		"",
@@ -92,6 +96,53 @@ func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt) (strin
 	}
 
 	return strings.Join(lines, "\n"), nil
+}
+
+func shouldAttachPRLink(state string, summary workspaceSummary, summaryErr error) bool {
+	if summaryErr != nil || summary.PRURL == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(state), humanReviewState)
+}
+
+func resolvePRLinkURL(summary workspaceSummary, lookup func(owner, repo, branch string) string) string {
+	owner, repo := parseGitHubRemote(summary.RemoteURL)
+	branch := strings.TrimSpace(summary.Branch)
+	if lookup != nil && owner != "" && repo != "" && branch != "" {
+		if actual := strings.TrimSpace(lookup(owner, repo, branch)); actual != "" {
+			return actual
+		}
+	}
+	return summary.PRURL
+}
+
+func lookupGitHubPRURL(owner, repo, branch string) string {
+	if owner == "" || repo == "" || branch == "" {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
+		"gh", "pr", "list",
+		"--repo", owner+"/"+repo,
+		"--head", branch,
+		"--state", "all",
+		"--json", "url",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil || ctx.Err() != nil {
+		return ""
+	}
+
+	var payload []struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil || len(payload) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(payload[0].URL)
 }
 
 func buildFailureComment(cfg *config.SymphonyConfig, attempt *RunAttempt, err error) (string, error) {
