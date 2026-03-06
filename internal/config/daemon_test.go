@@ -1,10 +1,25 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func listenOnRandomPort(t *testing.T) (net.Listener, int) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type %T", ln.Addr())
+	}
+	return ln, addr.Port
+}
 
 func TestLoadDaemonConfigUsesDynamicSessionDefault(t *testing.T) {
 	t.Parallel()
