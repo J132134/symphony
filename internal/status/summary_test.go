@@ -94,3 +94,22 @@ func TestBuildSummaryIgnoresAbandonedIssuesInRetryCount(t *testing.T) {
 		t.Fatalf("status = %q, want idle", summary.Status)
 	}
 }
+
+func TestBuildSummaryFromProjectsPrefersQuarantined(t *testing.T) {
+	t.Parallel()
+
+	summary := BuildSummaryFromProjects([]ProjectSummary{
+		{Name: "alpha", Status: "running", Health: "healthy", SubprocessCount: 1},
+		{Name: "beta", Status: "quarantined", Health: "quarantined", CrashCount: 3},
+	})
+
+	if summary.Status != "quarantined" {
+		t.Fatalf("status = %q, want quarantined", summary.Status)
+	}
+	if summary.ProjectCount != 2 {
+		t.Fatalf("project_count = %d, want 2", summary.ProjectCount)
+	}
+	if summary.Projects[1].Health != "quarantined" {
+		t.Fatalf("health = %q, want quarantined", summary.Projects[1].Health)
+	}
+}

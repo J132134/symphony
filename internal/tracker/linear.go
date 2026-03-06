@@ -81,6 +81,13 @@ mutation($id: String!, $stateId: String!) {
   }
 }`
 
+const projectPingQuery = `
+query($projectSlug: String!) {
+  projects(filter: { slugId: { eq: $projectSlug } }, first: 1) {
+    nodes { id }
+  }
+}`
+
 // LinearClient fetches issues from the Linear GraphQL API.
 type LinearClient struct {
 	endpoint     string
@@ -254,6 +261,19 @@ func (c *LinearClient) UpdateIssueState(ctx context.Context, issueID, stateName 
 	payload, _ := data["issueUpdate"].(map[string]any)
 	if ok, _ := payload["success"].(bool); !ok {
 		return fmt.Errorf("issueUpdate returned success=false")
+	}
+	return nil
+}
+
+func (c *LinearClient) Ping(ctx context.Context) error {
+	data, err := c.execute(ctx, projectPingQuery, map[string]any{"projectSlug": c.projectSlug})
+	if err != nil {
+		return err
+	}
+	projectsData, _ := data["projects"].(map[string]any)
+	nodes, _ := projectsData["nodes"].([]any)
+	if len(nodes) == 0 {
+		return fmt.Errorf("project %q not found", c.projectSlug)
 	}
 	return nil
 }
