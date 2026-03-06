@@ -37,6 +37,9 @@ func (c *SymphonyConfig) resolveEnv(v string) string {
 
 func (c *SymphonyConfig) expandPath(v string) string {
 	resolved := c.resolveEnv(v)
+	if strings.TrimSpace(resolved) == "" {
+		return ""
+	}
 	if strings.HasPrefix(resolved, "~") {
 		home, _ := os.UserHomeDir()
 		resolved = home + resolved[1:]
@@ -194,7 +197,11 @@ func (c *SymphonyConfig) PollIntervalIdleMs() int {
 
 func (c *SymphonyConfig) WorkspaceRoot() string {
 	v := c.getString("workspace.root", "~/.symphony/workspaces")
-	return filepath.Clean(c.expandPath(v))
+	expanded := c.expandPath(v)
+	if strings.TrimSpace(expanded) == "" {
+		return ""
+	}
+	return filepath.Clean(expanded)
 }
 
 // -- Hooks --
@@ -267,6 +274,27 @@ func (c *SymphonyConfig) MaxConcurrentAgentsByState() map[string]int {
 func (c *SymphonyConfig) CodexCommand() string {
 	return c.getString("codex.command", "codex app-server")
 }
+func (c *SymphonyConfig) CodexCommandForState(state string) string {
+	overrides := c.get("codex.state_commands")
+	m, ok := overrides.(map[string]any)
+	if ok {
+		for key, cmd := range m {
+			if NormalizeState(key) != NormalizeState(state) {
+				continue
+			}
+			if s, ok := cmd.(string); ok {
+				s = strings.TrimSpace(c.resolveEnv(s))
+				if s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return c.CodexCommand()
+}
+func (c *SymphonyConfig) UsesClaudeForState(state string) bool {
+	return isClaudeCommand(c.CodexCommandForState(state))
+}
 func (c *SymphonyConfig) ApprovalPolicy() string {
 	return c.getString("codex.approval_policy", "auto-edit")
 }
@@ -296,12 +324,6 @@ func (c *SymphonyConfig) ThreadSandbox() string {
 	return c.getString("codex.thread_sandbox", "")
 }
 
-// -- Server --
-
-func (c *SymphonyConfig) ServerPort() int {
-	return c.getInt("server.port", 7777)
-}
-
 // -- Validation --
 
 func (c *SymphonyConfig) Validate() []string {
@@ -318,5 +340,35 @@ func (c *SymphonyConfig) Validate() []string {
 	if c.CodexCommand() == "" {
 		errs = append(errs, "codex.command must be non-empty")
 	}
+	if strings.TrimSpace(c.WorkspaceRoot()) == "" {
+		errs = append(errs, "workspace.root must be non-empty")
+	} else {
+		errs = append(errs, validateCreatableWritableDir(c.WorkspaceRoot(), "workspace.root")...)
+	}
+	if c.PollIntervalMs() <= 0 {
+		errs = append(errs, "polling.interval_ms must be greater than 0")
+	}
+	if c.PollIntervalIdleMs() < c.PollIntervalMs() {
+		errs = append(errs, "polling.idle_interval_ms must be greater than or equal to polling.interval_ms")
+	}
+	if c.MaxTurns() <= 0 {
+		errs = append(errs, "agent.max_turns must be greater than 0")
+	}
+	if c.MaxConcurrentAgents() <= 0 {
+		errs = append(errs, "agent.max_concurrent_agents must be greater than 0")
+	}
 	return errs
+}
+
+func isClaudeCommand(command string) bool {
+	parts := strings.Fields(strings.TrimSpace(command))
+	if len(parts) == 0 {
+		return false
+	}
+	switch filepath.Base(parts[0]) {
+	case "claude", "claude-code":
+		return true
+	default:
+		return false
+	}
 }

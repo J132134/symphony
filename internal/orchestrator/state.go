@@ -56,6 +56,8 @@ type RunAttempt struct {
 	Session        LiveSession
 	IssueState     string // last known tracker state for per-state concurrency
 	GlobalSlotHeld bool
+	Urgent         bool
+	Preempted      bool
 
 	cancel context.CancelFunc
 }
@@ -123,6 +125,10 @@ type State struct {
 	LastTrackerSuccessAt *time.Time
 	LastTrackerErrorAt   *time.Time
 	LastTrackerError     string
+
+	PausedUntil         *time.Time
+	PauseReason         string
+	RateLimitPauseCount int
 }
 
 func NewState() *State {

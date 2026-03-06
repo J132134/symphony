@@ -84,6 +84,7 @@ func TestRunTriggersReloadWhenFileIsRecreated(t *testing.T) {
 			},
 		})
 	}()
+	time.Sleep(50 * time.Millisecond)
 
 	if err := os.Remove(target); err != nil {
 		t.Fatalf("remove target: %v", err)

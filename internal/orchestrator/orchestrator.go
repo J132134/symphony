@@ -23,6 +23,12 @@ import (
 )
 
 const humanReviewState = "human review"
+const urgentPriority = 1
+
+const (
+	rateLimitPauseInitialBackoff = 30 * time.Second
+	rateLimitPauseMaxBackoff     = 5 * time.Minute
+)
 
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
@@ -237,13 +243,16 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	if o.isDraining() {
 		return
 	}
+	if _, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
+		return
+	}
 
 	o.mu.Lock()
 	cfg := o.cfg
 	tr := o.tracker
 	o.mu.Unlock()
 
-	if cfg == nil || tr == nil || len(cfg.Validate()) > 0 {
+	if cfg == nil || tr == nil {
 		return
 	}
 
@@ -261,19 +270,26 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		if o.isStopping() || o.isDraining() {
 			return
 		}
-
-		o.state.mu.Lock()
-		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
-		o.state.mu.Unlock()
-
-		if slots <= 0 {
-			break
+		if _, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
+			return
 		}
-		if !o.hasGlobalCapacityForState(issue.State) {
-			break
+
+		if !isUrgentIssue(issue) {
+			o.state.mu.Lock()
+			slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked(cfg)
+			urgentRunning := o.hasRunningUrgentLocked(cfg)
+			o.state.mu.Unlock()
+
+			if urgentRunning || slots <= 0 {
+				break
+			}
+			if !o.hasGlobalCapacityForIssue(cfg, issue) {
+				break
+			}
 		}
+
 		if o.canDispatch(cfg, issue) {
-			if !o.dispatch(ctx, cfg, issue, 1) {
+			if !o.dispatch(ctx, cfg, issue, 1) && !isUrgentIssue(issue) {
 				break
 			}
 		}
@@ -286,8 +302,15 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	normState := config.NormalizeState(issue.State)
 	activeNorm := normStates(cfg.ActiveStates())
 	termNorm := normStates(cfg.TerminalStates())
+	urgent := isUrgentIssue(issue)
 
 	if !activeNorm[normState] || termNorm[normState] {
+		return false
+	}
+	if _, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
+		return false
+	}
+	if !shouldRunStateWithAgent(cfg, issue.State) {
 		return false
 	}
 
@@ -306,21 +329,26 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if _, ok := o.state.RetryQueue[issue.ID]; ok {
 		return false
 	}
-	if o.runningConcurrentCountLocked() >= o.state.MaxConcurrentAgents {
+	if o.isBlockedByRunningUrgentLocked(cfg, issue) {
+		return false
+	}
+	if !urgent && o.runningConcurrentCountLocked(cfg) >= o.state.MaxConcurrentAgents {
 		return false
 	}
 
 	// Per-state concurrency.
-	if byState := cfg.MaxConcurrentAgentsByState(); len(byState) > 0 {
-		if limit, ok := byState[normState]; ok {
-			count := 0
-			for _, r := range o.state.Running {
-				if config.NormalizeState(r.IssueState) == normState {
-					count++
+	if !urgent {
+		if byState := cfg.MaxConcurrentAgentsByState(); len(byState) > 0 {
+			if limit, ok := byState[normState]; ok {
+				count := 0
+				for _, r := range o.state.Running {
+					if config.NormalizeState(r.IssueState) == normState {
+						count++
+					}
 				}
-			}
-			if count >= limit {
-				return false
+				if count >= limit {
+					return false
+				}
 			}
 		}
 	}
@@ -360,10 +388,31 @@ func sortCandidates(issues []*types.Issue) {
 // -- dispatch --
 
 func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
-	globalSlotHeld := countsTowardConcurrency(issue.State) && o.globalLimiter != nil
-	if globalSlotHeld && !o.globalLimiter.TryAcquire() {
-		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
+	if until, reason, paused := o.admissionPauseState(time.Now().UTC()); paused {
+		slog.Info("orchestrator.dispatch_paused", "project", o.name, "issue", issue.Identifier, "resume_at", until.Format(time.RFC3339), "reason", reason)
 		return false
+	}
+
+	urgent := isUrgentIssue(issue)
+	if urgent {
+		o.preemptForUrgent(cfg, issue)
+	}
+
+	globalSlotHeld := false
+	if shouldAcquireGlobalSlot(cfg, issue) && o.globalLimiter != nil {
+		if urgent {
+			globalSlotHeld = o.globalLimiter.ForceAcquireIssue(issue.ID, true, func() {
+				o.preemptIssue(issue.ID)
+			})
+		} else {
+			globalSlotHeld = o.globalLimiter.TryAcquireIssue(issue.ID, false, func() {
+				o.preemptIssue(issue.ID)
+			})
+		}
+		if !globalSlotHeld {
+			slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
+			return false
+		}
 	}
 
 	slog.Info("orchestrator.dispatching", "project", o.name, "issue", issue.Identifier, "attempt", attemptNum)
@@ -377,10 +426,12 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		Status:         StatusPreparingWorkspace,
 		IssueState:     issue.State,
 		GlobalSlotHeld: globalSlotHeld,
+		Urgent:         urgent,
 		cancel:         cancel,
 	}
 
 	o.state.mu.Lock()
+	delete(o.state.Abandoned, issue.ID)
 	o.state.Claimed[issue.ID] = struct{}{}
 	o.state.Running[issue.ID] = attempt
 	o.state.mu.Unlock()
@@ -407,6 +458,18 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	delete(o.workerCancels, issueID)
 	tr := o.tracker
 	o.mu.Unlock()
+
+	if attempt != nil && attempt.Preempted && err != nil {
+		slog.Info("orchestrator.worker_preempted", "project", o.name, "issue_id", issueID, "identifier", attempt.Identifier)
+		if o.isDraining() {
+			o.state.mu.Lock()
+			delete(o.state.Claimed, issueID)
+			o.state.mu.Unlock()
+			return
+		}
+		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "preempted by urgent", false)
+		return
+	}
 
 	ctxErr := ctx.Err() != nil || isCtxErr(err)
 
@@ -519,17 +582,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
-	agentCfg := &agent.Config{
-		Command:              cfg.CodexCommand(),
-		ApprovalPolicy:       cfg.ApprovalPolicy(),
-		MaxTurns:             cfg.MaxTurns(),
-		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
-		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
-		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
-		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
-		ThreadSandbox:        cfg.ThreadSandbox(),
-	}
+	agentCfg := buildAgentConfig(cfg, issue.State)
 
 	// 5. Handshake.
 	attempt.Status = StatusInitializingSession
@@ -562,6 +615,12 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 		result := runner.RunTurn(ctx, threadID, turnPrompt, issue.Identifier, issue.Title, agentCfg,
 			func(e agent.Event) { o.handleAgentEvent(issue.ID, attempt, e) })
+
+		if ctx.Err() != nil {
+			attempt.Status = StatusCanceled
+			attempt.Error = ctx.Err().Error()
+			return ctx.Err()
+		}
 
 		if !result.Success {
 			if !result.CompletedNaturally {
@@ -639,6 +698,9 @@ func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e a
 		attempt.Session.InputTokens += e.Usage.InputTokens
 		attempt.Session.OutputTokens += e.Usage.OutputTokens
 		attempt.Session.TotalTokens += e.Usage.TotalTokens
+	}
+	if e.Name == "rate_limit" {
+		o.pauseForRateLimit(issueID, attempt, e)
 	}
 	slog.Debug("orchestrator.agent_event", "issue_id", issueID, "event", e.Name)
 }
@@ -733,6 +795,12 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 					slog.Warn("orchestrator.reconcile_cleanup_failed", "issue_id", id, "error", err)
 				}
 			}
+			continue
+		}
+
+		if !shouldRunStateWithAgent(cfg, cur.State) {
+			slog.Info("orchestrator.reconcile_paused_for_human_review", "issue", cur.Identifier, "state", cur.State)
+			o.cancelWorker(id)
 		}
 	}
 }
@@ -767,20 +835,38 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 		IssueID:    issueID,
 		Identifier: identifier,
 		Attempt:    attemptNum,
-		DueAt:      time.Now().Add(time.Duration(delayMs) * time.Millisecond),
 		Error:      errMsg,
 	}
-	entry.timer = time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
-		o.onRetryTimer(ctx, cfg, issueID)
+	o.scheduleRetryAfter(ctx, cfg, entry, time.Duration(delayMs)*time.Millisecond)
+}
+
+func (o *Orchestrator) scheduleRetryAfter(ctx context.Context, cfg *config.SymphonyConfig, entry *RetryEntry, delay time.Duration) {
+	if entry == nil {
+		return
+	}
+
+	o.state.mu.Lock()
+	if existing, ok := o.state.RetryQueue[entry.IssueID]; ok && existing.timer != nil {
+		existing.timer.Stop()
+	}
+	o.state.mu.Unlock()
+
+	if delay < 0 {
+		delay = 0
+	}
+
+	entry.DueAt = time.Now().Add(delay)
+	entry.timer = time.AfterFunc(delay, func() {
+		o.onRetryTimer(ctx, cfg, entry.IssueID)
 	})
 
 	o.state.mu.Lock()
-	o.state.RetryQueue[issueID] = entry
-	o.state.Claimed[issueID] = struct{}{}
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
 	slog.Info("orchestrator.retry_scheduled", "project", o.name,
-		"issue_id", issueID, "attempt", attemptNum, "delay_ms", delayMs)
+		"issue_id", entry.IssueID, "attempt", entry.Attempt, "delay_ms", delay.Milliseconds())
 }
 
 func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyConfig, issueID string) {
@@ -805,6 +891,11 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		delete(o.state.Claimed, issueID)
 		o.state.mu.Unlock()
 		slog.Info("orchestrator.retry_skipped_during_drain", "project", o.name, "issue_id", issueID)
+		return
+	}
+	if until, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
+		entry.Error = "rate limit pause"
+		o.scheduleRetryAfter(ctx, cfg, entry, time.Until(until))
 		return
 	}
 
@@ -848,14 +939,28 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		o.state.mu.Unlock()
 		return
 	}
-
-	o.state.mu.Lock()
-	slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
-	o.state.mu.Unlock()
-
-	if slots <= 0 || !o.hasGlobalCapacityForState(issue.State) {
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
+	if !shouldRunStateWithAgent(cfg, issue.State) {
+		slog.Info("orchestrator.retry_paused_for_human_review", "issue_id", issueID, "state", issue.State)
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
 		return
+	}
+
+	if o.isBlockedByUrgent(cfg, issue) {
+		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "urgent in progress", false)
+		return
+	}
+
+	if !isUrgentIssue(issue) {
+		o.state.mu.Lock()
+		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked(cfg)
+		o.state.mu.Unlock()
+
+		if slots <= 0 || !o.hasGlobalCapacityForIssue(cfg, issue) {
+			o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
+			return
+		}
 	}
 
 	o.state.mu.Lock()
@@ -863,6 +968,11 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	o.state.mu.Unlock()
 
 	if !o.dispatch(ctx, cfg, issue, entry.Attempt) {
+		if until, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
+			entry.Error = "rate limit pause"
+			o.scheduleRetryAfter(ctx, cfg, entry, time.Until(until))
+			return
+		}
 		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no global slots", true)
 	}
 }
@@ -941,6 +1051,10 @@ func (o *Orchestrator) reloadWorkflow() error {
 		return err
 	}
 	cfg := config.New(wf.Config)
+	if errs := cfg.Validate(); len(errs) > 0 {
+		return fmt.Errorf("config: %s", strings.Join(errs, "; "))
+	}
+
 	o.mu.Lock()
 	o.wf = wf
 	o.cfg = cfg
@@ -961,25 +1075,179 @@ func normStates(states []string) map[string]bool {
 	return m
 }
 
-func (o *Orchestrator) runningConcurrentCountLocked() int {
+func isUrgentIssue(issue *types.Issue) bool {
+	return issue != nil && issue.Priority != nil && *issue.Priority == urgentPriority
+}
+
+func (o *Orchestrator) runningConcurrentCountLocked(cfg *config.SymphonyConfig) int {
 	count := 0
 	for _, attempt := range o.state.Running {
-		if countsTowardConcurrency(attempt.IssueState) {
+		if countsTowardConcurrency(cfg, attempt.IssueState) {
 			count++
 		}
 	}
 	return count
 }
 
-func countsTowardConcurrency(state string) bool {
-	return config.NormalizeState(state) != humanReviewState
+func shouldRunStateWithAgent(cfg *config.SymphonyConfig, state string) bool {
+	if config.NormalizeState(state) != humanReviewState {
+		return true
+	}
+	if cfg == nil {
+		return true
+	}
+	return cfg.UsesClaudeForState(state)
 }
 
-func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {
-	if !countsTowardConcurrency(state) {
+func countsTowardConcurrency(cfg *config.SymphonyConfig, state string) bool {
+	return shouldRunStateWithAgent(cfg, state)
+}
+
+func (o *Orchestrator) pauseForRateLimit(issueID string, attempt *RunAttempt, e agent.Event) {
+	now := e.Timestamp.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	o.state.mu.Lock()
+	until, reason := o.pauseStateLocked(now, e.RateLimit)
+	o.state.mu.Unlock()
+
+	if o.globalLimiter != nil {
+		o.globalLimiter.PauseUntil(until)
+	}
+
+	attrs := []any{
+		"project", o.name,
+		"issue_id", issueID,
+		"resume_at", until.Format(time.RFC3339),
+		"reason", reason,
+	}
+	if attempt != nil {
+		attrs = append(attrs, "issue", attempt.Identifier)
+	}
+	if e.RateLimit != nil && e.RateLimit.ResetAt != nil {
+		attrs = append(attrs, "source_reset_at", e.RateLimit.ResetAt.Format(time.RFC3339))
+	}
+	slog.Warn("orchestrator.rate_limit_pause", attrs...)
+}
+
+func (o *Orchestrator) pauseStateLocked(now time.Time, rateLimit *agent.RateLimitEvent) (time.Time, string) {
+	if rateLimit != nil && rateLimit.ResetAt != nil && rateLimit.ResetAt.After(now) {
+		until := rateLimit.ResetAt.UTC()
+		if o.state.PausedUntil != nil && o.state.PausedUntil.After(until) {
+			until = o.state.PausedUntil.UTC()
+		}
+		o.state.PausedUntil = &until
+		o.state.PauseReason = "rate_limit_reset"
+		o.state.RateLimitPauseCount = 0
+		return until, o.state.PauseReason
+	}
+
+	o.state.RateLimitPauseCount++
+	shift := o.state.RateLimitPauseCount - 1
+	if shift > 6 {
+		shift = 6
+	}
+	backoff := rateLimitPauseInitialBackoff * time.Duration(1<<shift)
+	if backoff > rateLimitPauseMaxBackoff {
+		backoff = rateLimitPauseMaxBackoff
+	}
+	until := now.Add(backoff)
+	if o.state.PausedUntil != nil && o.state.PausedUntil.After(until) {
+		until = o.state.PausedUntil.UTC()
+	}
+	o.state.PausedUntil = &until
+	o.state.PauseReason = "rate_limit_backoff"
+	return until, o.state.PauseReason
+}
+
+func (o *Orchestrator) admissionPauseState(now time.Time) (time.Time, string, bool) {
+	var until time.Time
+	var reason string
+	var paused bool
+
+	if o.globalLimiter != nil {
+		if globalUntil, ok := o.globalLimiter.PausedUntil(); ok {
+			until = globalUntil
+			reason = "global_rate_limit"
+			paused = true
+		}
+	}
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if o.state.PausedUntil != nil {
+		if o.state.PausedUntil.After(now) {
+			if !paused || o.state.PausedUntil.After(until) {
+				until = o.state.PausedUntil.UTC()
+				reason = o.state.PauseReason
+				paused = true
+			}
+		} else {
+			o.state.PausedUntil = nil
+			o.state.PauseReason = ""
+			o.state.RateLimitPauseCount = 0
+		}
+	}
+
+	return until, reason, paused
+}
+
+func buildAgentConfig(cfg *config.SymphonyConfig, issueState string) *agent.Config {
+	return &agent.Config{
+		Command:              cfg.CodexCommandForState(issueState),
+		ApprovalPolicy:       cfg.ApprovalPolicy(),
+		MaxTurns:             cfg.MaxTurns(),
+		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
+		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
+		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
+		StallTimeoutMs:       cfg.StallTimeoutMs(),
+		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
+		ThreadSandbox:        cfg.ThreadSandbox(),
+	}
+}
+
+func (o *Orchestrator) hasRunningUrgentLocked(cfg *config.SymphonyConfig) bool {
+	for _, attempt := range o.state.Running {
+		if attempt != nil && attempt.Urgent && countsTowardConcurrency(cfg, attempt.IssueState) {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *Orchestrator) isBlockedByRunningUrgentLocked(cfg *config.SymphonyConfig, issue *types.Issue) bool {
+	return !isUrgentIssue(issue) && o.hasRunningUrgentLocked(cfg)
+}
+
+func (o *Orchestrator) isBlockedByUrgent(cfg *config.SymphonyConfig, issue *types.Issue) bool {
+	if isUrgentIssue(issue) {
+		return false
+	}
+
+	o.state.mu.Lock()
+	localUrgent := o.hasRunningUrgentLocked(cfg)
+	o.state.mu.Unlock()
+	if localUrgent {
+		return true
+	}
+	return o.globalLimiter != nil && o.globalLimiter.HasUrgent()
+}
+
+func (o *Orchestrator) hasGlobalCapacityForState(cfg *config.SymphonyConfig, state string) bool {
+	if !countsTowardConcurrency(cfg, state) {
 		return true
 	}
 	return o.hasGlobalCapacity()
+}
+
+func (o *Orchestrator) hasGlobalCapacityForIssue(cfg *config.SymphonyConfig, issue *types.Issue) bool {
+	if issue == nil || isUrgentIssue(issue) || !shouldAcquireGlobalSlot(cfg, issue) {
+		return true
+	}
+	return o.hasGlobalCapacityForState(cfg, issue.State)
 }
 
 func isCtxErr(err error) bool {
@@ -990,8 +1258,64 @@ func isCtxErr(err error) bool {
 	return strings.Contains(s, "context canceled") || strings.Contains(s, "context deadline exceeded")
 }
 
+func shouldAcquireGlobalSlot(cfg *config.SymphonyConfig, issue *types.Issue) bool {
+	return issue != nil && countsTowardConcurrency(cfg, issue.State)
+}
+
 func (o *Orchestrator) hasGlobalCapacity() bool {
-	return o.globalLimiter == nil || o.globalLimiter.Available() > 0
+	return o.globalLimiter == nil || (!o.globalLimiter.HasUrgent() && o.globalLimiter.Available() > 0)
+}
+
+func (o *Orchestrator) preemptForUrgent(cfg *config.SymphonyConfig, issue *types.Issue) {
+	if !isUrgentIssue(issue) {
+		return
+	}
+
+	preempted := map[string]struct{}{}
+
+	o.state.mu.Lock()
+	for issueID, attempt := range o.state.Running {
+		if issueID == issue.ID || attempt == nil || attempt.Urgent || attempt.Preempted || !countsTowardConcurrency(cfg, attempt.IssueState) {
+			continue
+		}
+		preempted[issueID] = struct{}{}
+	}
+	o.state.mu.Unlock()
+
+	if o.globalLimiter != nil {
+		for _, issueID := range o.globalLimiter.PreemptNonUrgent(issue.ID) {
+			preempted[issueID] = struct{}{}
+		}
+	}
+	for issueID := range preempted {
+		o.preemptIssue(issueID)
+	}
+
+	if len(preempted) > 0 {
+		slog.Info("orchestrator.urgent_preempted", "project", o.name, "issue", issue.Identifier, "count", len(preempted))
+	}
+}
+
+func (o *Orchestrator) preemptIssue(issueID string) {
+	now := time.Now().UTC()
+
+	o.state.mu.Lock()
+	attempt, ok := o.state.Running[issueID]
+	if !ok || attempt == nil || attempt.Urgent || attempt.Preempted {
+		o.state.mu.Unlock()
+		return
+	}
+	attempt.Preempted = true
+	attempt.Status = StatusCanceled
+	o.state.Abandoned[issueID] = &AbandonedEntry{
+		Identifier:  attempt.Identifier,
+		State:       attempt.IssueState,
+		Error:       "preempted_by_urgent",
+		AbandonedAt: now,
+	}
+	o.state.mu.Unlock()
+
+	o.cancelWorker(issueID)
 }
 
 func (o *Orchestrator) isStopping() bool {
@@ -1007,7 +1331,7 @@ func (o *Orchestrator) releaseGlobalSlot(attempt *RunAttempt) {
 	if attempt == nil || !attempt.GlobalSlotHeld || o.globalLimiter == nil {
 		return
 	}
-	o.globalLimiter.Release()
+	o.globalLimiter.ReleaseIssue(attempt.IssueID)
 	attempt.GlobalSlotHeld = false
 }
 

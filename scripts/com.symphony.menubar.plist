@@ -10,6 +10,8 @@
 
   제거:
     launchctl unload ~/Library/LaunchAgents/com.symphony.menubar.plist
+
+  로그는 ~/Library/Logs/Symphony 아래에 기록해 레포 위치 접근을 피한다.
 -->
 <plist version="1.0">
 <dict>
@@ -38,8 +40,8 @@
     <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>__REPO_DIR__/data/menubar.stdout.log</string>
+    <string>__LOG_DIR__/symphony.menubar.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>__REPO_DIR__/data/menubar.stderr.log</string>
+    <string>__LOG_DIR__/symphony.menubar.stderr.log</string>
 </dict>
 </plist>

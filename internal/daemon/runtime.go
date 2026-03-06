@@ -80,7 +80,7 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 			if err != nil {
 				return err
 			}
-			if errs := cfg.Validate(); len(errs) > 0 {
+			if errs := r.validateReloadConfig(cfg); len(errs) > 0 {
 				return fmt.Errorf(strings.Join(errs, "; "))
 			}
 
@@ -102,6 +102,33 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 			slog.Error("daemon.config_watch_failed", "path", r.configPath, "error", err)
 		},
 	})
+}
+
+func (r *Runtime) validateReloadConfig(cfg *config.DaemonConfig) []string {
+	if cfg == nil {
+		return []string{"daemon config is required"}
+	}
+
+	r.mu.Lock()
+	current := r.current
+	r.mu.Unlock()
+
+	if current == nil || current.cfg == nil || !reuseCurrentStatusServerPort(current.cfg, cfg) {
+		return cfg.Validate()
+	}
+
+	cloned := *cfg
+	cloned.StatusServer.Enabled = false
+	return cloned.Validate()
+}
+
+func reuseCurrentStatusServerPort(current, next *config.DaemonConfig) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	return current.StatusServer.Enabled &&
+		next.StatusServer.Enabled &&
+		current.StatusServer.Port == next.StatusServer.Port
 }
 
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {

@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +56,10 @@ type TokenUsage struct {
 	TotalTokens  int64
 }
 
+type RateLimitEvent struct {
+	ResetAt *time.Time
+}
+
 // Event is emitted by the runner to the orchestrator callback.
 type Event struct {
 	Name      string
@@ -63,6 +69,7 @@ type Event struct {
 	TurnID    string
 	PID       string
 	Usage     *TokenUsage
+	RateLimit *RateLimitEvent
 	Message   string
 }
 
@@ -292,8 +299,9 @@ func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, 
 			r.handleTokenUsage(threadID, turnID, params, cb)
 
 		case methodRateLimits:
+			rateLimit := parseRateLimitEvent(params, time.Now().UTC())
 			emit(cb, Event{Name: "rate_limit", Timestamp: time.Now().UTC(),
-				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
+				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, RateLimit: rateLimit})
 
 		default:
 			slog.Debug("agent.unhandled_notification", "method", method)
@@ -436,7 +444,7 @@ func (r *Runner) dispatchLine(line []byte) {
 		return
 	}
 
-	if msg.Notif != nil && isTerminalNotification(msg.Notif.Method) {
+	if msg.Notif != nil && isPriorityNotification(msg.Notif.Method) {
 		r.priorityNotifCh <- msg
 		return
 	}
@@ -498,6 +506,10 @@ func isTerminalNotification(method string) bool {
 	default:
 		return false
 	}
+}
+
+func isPriorityNotification(method string) bool {
+	return isTerminalNotification(method) || method == methodRateLimits
 }
 
 // -- JSON-RPC helpers --
@@ -581,6 +593,119 @@ func normalizeSandboxPolicy(p string) string {
 	return ""
 }
 
+func parseRateLimitEvent(params map[string]any, now time.Time) *RateLimitEvent {
+	resetAt, ok := findRateLimitResetAt(params, now)
+	if !ok {
+		return &RateLimitEvent{}
+	}
+	return &RateLimitEvent{ResetAt: &resetAt}
+}
+
+func findRateLimitResetAt(value any, now time.Time) (time.Time, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		var latest time.Time
+		var found bool
+		for key, raw := range v {
+			if normalized, ok := normalizeRateLimitResetKey(key); ok {
+				if ts, ok := parseRateLimitResetValue(normalized, raw, now); ok {
+					if !found || ts.After(latest) {
+						latest = ts
+						found = true
+					}
+				}
+			}
+			if ts, ok := findRateLimitResetAt(raw, now); ok {
+				if !found || ts.After(latest) {
+					latest = ts
+					found = true
+				}
+			}
+		}
+		return latest, found
+	case []any:
+		var latest time.Time
+		var found bool
+		for _, item := range v {
+			if ts, ok := findRateLimitResetAt(item, now); ok {
+				if !found || ts.After(latest) {
+					latest = ts
+					found = true
+				}
+			}
+		}
+		return latest, found
+	default:
+		return time.Time{}, false
+	}
+}
+
+func normalizeRateLimitResetKey(key string) (string, bool) {
+	normalized := strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(key)))
+	switch normalized {
+	case "reset", "resetat", "resetsat", "resettime", "resettimestamp":
+		return "reset", true
+	case "retryafter", "retryafterseconds":
+		return "retry_after", true
+	case "retryafterms", "retryaftermilliseconds":
+		return "retry_after_ms", true
+	default:
+		return "", false
+	}
+}
+
+func parseRateLimitResetValue(kind string, raw any, now time.Time) (time.Time, bool) {
+	if s, ok := raw.(string); ok {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return time.Time{}, false
+		}
+		switch kind {
+		case "reset":
+			for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+				if ts, err := time.Parse(layout, s); err == nil {
+					return ts.UTC(), true
+				}
+			}
+		case "retry_after":
+			if d, err := time.ParseDuration(s); err == nil {
+				return now.Add(d), true
+			}
+		}
+		if n, err := strconv.ParseFloat(s, 64); err == nil {
+			return parseRateLimitResetNumber(kind, n, now)
+		}
+		return time.Time{}, false
+	}
+
+	if n, ok := asFloat64(raw); ok {
+		return parseRateLimitResetNumber(kind, n, now)
+	}
+
+	return time.Time{}, false
+}
+
+func parseRateLimitResetNumber(kind string, value float64, now time.Time) (time.Time, bool) {
+	if value <= 0 {
+		return time.Time{}, false
+	}
+
+	switch kind {
+	case "retry_after":
+		return now.Add(time.Duration(math.Round(value * float64(time.Second)))), true
+	case "retry_after_ms":
+		return now.Add(time.Duration(math.Round(value * float64(time.Millisecond)))), true
+	default:
+		if value >= 1e12 {
+			return time.UnixMilli(int64(math.Round(value))).UTC(), true
+		}
+		if value >= 1e9 {
+			return time.Unix(int64(math.Round(value)), 0).UTC(), true
+		}
+		return time.Time{}, false
+	}
+}
+
 func normalizeID(v any) int {
 	switch t := v.(type) {
 	case float64:
@@ -603,6 +728,37 @@ func toInt64(v any) int64 {
 		return t
 	}
 	return 0
+}
+
+func asFloat64(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 func trimNewline(b []byte) []byte {

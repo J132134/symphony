@@ -56,6 +56,13 @@ mutation($input: CommentCreateInput!) {
   }
 }`
 
+const attachmentCreateMutation = `
+mutation($input: AttachmentCreateInput!) {
+  attachmentCreate(input: $input) {
+    success
+  }
+}`
+
 const issueStateLookupQuery = `
 query($id: String!) {
   issue(id: $id) {
@@ -176,6 +183,33 @@ func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) err
 	payload, _ := data["commentCreate"].(map[string]any)
 	if ok, _ := payload["success"].(bool); !ok {
 		return fmt.Errorf("commentCreate unsuccessful")
+	}
+	return nil
+}
+
+func (c *LinearClient) AddLink(ctx context.Context, issueID, title, targetURL string) error {
+	if strings.TrimSpace(issueID) == "" {
+		return fmt.Errorf("issue ID is required")
+	}
+	if strings.TrimSpace(title) == "" {
+		return fmt.Errorf("link title is required")
+	}
+	if strings.TrimSpace(targetURL) == "" {
+		return fmt.Errorf("link url is required")
+	}
+	data, err := c.execute(ctx, attachmentCreateMutation, map[string]any{
+		"input": map[string]any{
+			"issueId": issueID,
+			"title":   title,
+			"url":     targetURL,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	payload, _ := data["attachmentCreate"].(map[string]any)
+	if ok, _ := payload["success"].(bool); !ok {
+		return fmt.Errorf("attachmentCreate unsuccessful")
 	}
 	return nil
 }

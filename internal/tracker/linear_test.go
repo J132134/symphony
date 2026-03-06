@@ -228,3 +228,102 @@ func TestCreateIssueCommentReturnsHTTPStatusError(t *testing.T) {
 		t.Fatalf("CreateIssueComment() error = %v, want HTTP status message", err)
 	}
 }
+
+func TestAddLink(t *testing.T) {
+	t.Parallel()
+
+	var authHeader string
+	var capturedBody string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	if err := client.AddLink(context.Background(), "issue-1", "PR", "https://github.com/acme/repo/pull/new/test"); err != nil {
+		t.Fatalf("AddLink() error = %v", err)
+	}
+	if authHeader != "token" {
+		t.Fatalf("Authorization header = %q, want %q", authHeader, "token")
+	}
+	for _, want := range []string{
+		"attachmentCreate",
+		`"issueId":"issue-1"`,
+		`"title":"PR"`,
+		`"url":"https://github.com/acme/repo/pull/new/test"`,
+	} {
+		if !strings.Contains(capturedBody, want) {
+			t.Fatalf("request body missing %q: %s", want, capturedBody)
+		}
+	}
+}
+
+func TestAddLinkRejectsMissingFields(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		issue string
+		title string
+		url   string
+		want  string
+	}{
+		{name: "missing issue id", title: "PR", url: "https://example.com", want: "issue ID is required"},
+		{name: "missing title", issue: "issue-1", url: "https://example.com", want: "link title is required"},
+		{name: "missing url", issue: "issue-1", title: "PR", want: "link url is required"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := client.AddLink(context.Background(), tc.issue, tc.title, tc.url)
+			if err == nil {
+				t.Fatal("AddLink() returned nil error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AddLink() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddLinkReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":false}}}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	err = client.AddLink(context.Background(), "issue-1", "PR", "https://example.com")
+	if err == nil {
+		t.Fatal("AddLink() returned nil error for unsuccessful mutation")
+	}
+	if !strings.Contains(err.Error(), "attachmentCreate unsuccessful") {
+		t.Fatalf("AddLink() error = %v, want attachmentCreate unsuccessful", err)
+	}
+}

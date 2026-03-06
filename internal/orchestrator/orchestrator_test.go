@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"symphony/internal/agent"
 	"symphony/internal/config"
 	"symphony/internal/tracker"
 	"symphony/internal/types"
@@ -86,15 +88,20 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
+func TestRunningConcurrentCountExcludesManualHumanReview(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
 
 	o.state.mu.Lock()
 	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
 	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
-	got := o.runningConcurrentCountLocked()
+	got := o.runningConcurrentCountLocked(cfg)
 	o.state.mu.Unlock()
 
 	if got != 1 {
@@ -102,7 +109,31 @@ func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
 	}
 }
 
-func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
+func TestRunningConcurrentCountIncludesClaudeHumanReview(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
+	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
+	got := o.runningConcurrentCountLocked(cfg)
+	o.state.mu.Unlock()
+
+	if got != 2 {
+		t.Fatalf("runningConcurrentCountLocked() = %d, want 2", got)
+	}
+}
+
+func TestCanDispatchIgnoresManualHumanReviewForConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
@@ -125,6 +156,77 @@ func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
 	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
 	if !o.canDispatch(cfg, issue) {
 		t.Fatal("human review issue should not consume a concurrent slot")
+	}
+}
+
+func TestCanDispatchSkipsManualHumanReviewState(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "In Progress", "Human Review"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-1", Identifier: "J-40", State: "Human Review"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("manual human review issue should not dispatch")
+	}
+}
+
+func TestCanDispatchAllowsUrgentWhenConcurrencyLimitReached(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 1
+	o.state.Running["issue-1"] = &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-10",
+		IssueState: "In Progress",
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("urgent issue should bypass the project concurrency limit")
+	}
+}
+
+func TestCanDispatchBlocksNonUrgentWhileUrgentRunning(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.Running["issue-urgent"] = &RunAttempt{
+		IssueID:    "issue-urgent",
+		Identifier: "J-39",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-12", State: "In Progress"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("non-urgent issue should stay paused while an urgent issue is running")
 	}
 }
 
@@ -153,7 +255,7 @@ func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
 	}
 }
 
-func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
+func TestHasGlobalCapacityForStateIgnoresManualHumanReview(t *testing.T) {
 	t.Parallel()
 
 	limiter := NewSessionLimiter(1)
@@ -162,12 +264,378 @@ func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
 	}
 
 	o := New("", 0, "alpha", limiter)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
 
-	if o.hasGlobalCapacityForState("In Progress") {
+	if o.hasGlobalCapacityForState(cfg, "In Progress") {
 		t.Fatal("non-review issue should respect the global limiter")
 	}
-	if !o.hasGlobalCapacityForState("Human Review") {
+	if !o.hasGlobalCapacityForState(cfg, "Human Review") {
 		t.Fatal("human review issue should bypass the global limiter")
+	}
+}
+
+func TestHasGlobalCapacityForStateIncludesClaudeHumanReview(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(1)
+	if !limiter.TryAcquire() {
+		t.Fatal("expected limiter warm-up acquire to succeed")
+	}
+
+	o := New("", 0, "alpha", limiter)
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	if o.hasGlobalCapacityForState(cfg, "Human Review") {
+		t.Fatal("claude human review issue should respect the global limiter")
+	}
+}
+
+func TestShouldAcquireGlobalSlotIncludesUrgentIssues(t *testing.T) {
+	t.Parallel()
+
+	urgent := &types.Issue{ID: "issue-1", State: "In Progress", Priority: intPtr(urgentPriority)}
+	if !shouldAcquireGlobalSlot(nil, urgent) {
+		t.Fatal("urgent issue should still count as a running global session")
+	}
+
+	normal := &types.Issue{ID: "issue-2", State: "In Progress"}
+	if !shouldAcquireGlobalSlot(nil, normal) {
+		t.Fatal("non-urgent in-progress issue should still acquire a global slot")
+	}
+}
+
+func TestPreemptForUrgentMarksRunningIssuesAndCancels(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	var cancelled []string
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-10",
+		IssueState: "In Progress",
+	}
+	o.state.Running["issue-2"] = &RunAttempt{
+		IssueID:    "issue-2",
+		Identifier: "J-11",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.mu.Unlock()
+
+	o.mu.Lock()
+	o.workerCancels["issue-1"] = func() { cancelled = append(cancelled, "issue-1") }
+	o.workerCancels["issue-2"] = func() { cancelled = append(cancelled, "issue-2") }
+	o.mu.Unlock()
+
+	o.preemptForUrgent(nil, &types.Issue{ID: "issue-99", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)})
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if !o.state.Running["issue-1"].Preempted {
+		t.Fatal("non-urgent issue should be marked preempted")
+	}
+	if o.state.Running["issue-2"].Preempted {
+		t.Fatal("urgent issue should not be preempted by another urgent dispatch")
+	}
+	if got := len(cancelled); got != 1 || cancelled[0] != "issue-1" {
+		t.Fatalf("cancelled = %v, want only issue-1", cancelled)
+	}
+	if _, ok := o.state.Abandoned["issue-1"]; !ok {
+		t.Fatal("preempted issue should be tracked as abandoned for resume")
+	}
+}
+
+func TestPreemptForUrgentPreemptsAcrossGlobalLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(2)
+	o := New("", 0, "alpha", limiter)
+
+	var cancelled []string
+	if !limiter.TryAcquireIssue("issue-remote", false, func() { cancelled = append(cancelled, "issue-remote") }) {
+		t.Fatal("remote issue acquire should succeed")
+	}
+
+	o.preemptForUrgent(nil, &types.Issue{ID: "issue-99", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)})
+
+	if len(cancelled) != 1 || cancelled[0] != "issue-remote" {
+		t.Fatalf("cancelled = %v, want only issue-remote", cancelled)
+	}
+}
+
+func TestReconcileCancelsManualHumanReviewIssue(t *testing.T) {
+	t.Parallel()
+
+	server := newLinearIssueStateServer(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
+	})
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	o := New("", 0, "alpha", nil)
+	o.cfg = config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states":   []any{"Todo", "In Progress", "Human Review"},
+			"terminal_states": []any{"Done"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+	o.tracker = client
+
+	cancelled := make(chan struct{}, 1)
+	o.mu.Lock()
+	o.workerCancels["issue-1"] = func() {
+		select {
+		case cancelled <- struct{}{}:
+		default:
+		}
+	}
+	o.mu.Unlock()
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", Identifier: "J-40", IssueState: "In Progress"}
+	o.state.mu.Unlock()
+
+	o.reconcile(context.Background())
+
+	select {
+	case <-cancelled:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("manual human review issue should be cancelled by reconcile")
+	}
+}
+
+func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
+	t.Parallel()
+
+	server := newLinearIssueStateServer(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
+	})
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "In Progress", "Human Review"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-40",
+		Attempt:    2,
+		DueAt:      time.Now(),
+	}
+
+	o.state.mu.Lock()
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.Claimed[entry.IssueID]; ok {
+		t.Fatal("manual human review retry should release claim")
+	}
+	if len(o.state.Running) != 0 {
+		t.Fatalf("manual human review retry should not dispatch, got %d running", len(o.state.Running))
+	}
+}
+
+func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	resetAt := time.Now().UTC().Add(2 * time.Minute)
+	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-20", IssueState: "In Progress"}
+	o.handleAgentEvent(attempt.IssueID, attempt, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: time.Now().UTC(),
+		RateLimit: &agent.RateLimitEvent{ResetAt: &resetAt},
+	})
+
+	if until, reason, paused := o.admissionPauseState(time.Now().UTC()); !paused {
+		t.Fatal("expected orchestrator to enter paused state")
+	} else {
+		if reason != "rate_limit_reset" {
+			t.Fatalf("pause reason = %q, want rate_limit_reset", reason)
+		}
+		if until.Before(resetAt.Add(-time.Second)) {
+			t.Fatalf("pause until = %v, want near %v", until, resetAt)
+		}
+	}
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-21", State: "In Progress"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("dispatch should be blocked while rate limit pause is active")
+	}
+
+	expired := time.Now().UTC().Add(-time.Second)
+	o.state.mu.Lock()
+	o.state.PausedUntil = &expired
+	o.state.mu.Unlock()
+
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("dispatch should resume once the pause expires")
+	}
+}
+
+func TestHandleAgentEventRateLimitPausesGlobalLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(2)
+	o := New("", 0, "alpha", limiter)
+
+	resetAt := time.Now().UTC().Add(45 * time.Second)
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: time.Now().UTC(),
+		RateLimit: &agent.RateLimitEvent{ResetAt: &resetAt},
+	})
+
+	if _, ok := limiter.PausedUntil(); !ok {
+		t.Fatal("expected shared limiter to be paused")
+	}
+	if limiter.TryAcquire() {
+		t.Fatal("shared limiter should reject new sessions while paused")
+	}
+}
+
+func TestHandleAgentEventRateLimitWithoutResetUsesBackoff(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	now := time.Now().UTC()
+
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: now,
+		RateLimit: &agent.RateLimitEvent{},
+	})
+
+	until, reason, paused := o.admissionPauseState(now)
+	if !paused {
+		t.Fatal("expected backoff pause to activate")
+	}
+	if reason != "rate_limit_backoff" {
+		t.Fatalf("pause reason = %q, want rate_limit_backoff", reason)
+	}
+	if until.Before(now.Add(29*time.Second)) || until.After(now.Add(31*time.Second)) {
+		t.Fatalf("first backoff until = %v, want about %v", until, now.Add(30*time.Second))
+	}
+
+	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
+		Name:      "rate_limit",
+		Timestamp: now.Add(time.Second),
+		RateLimit: &agent.RateLimitEvent{},
+	})
+
+	until, _, paused = o.admissionPauseState(now.Add(time.Second))
+	if !paused {
+		t.Fatal("expected pause to remain active after repeated rate limit")
+	}
+	if until.Before(now.Add(60 * time.Second)) {
+		t.Fatalf("second backoff until = %v, want at least %v", until, now.Add(60*time.Second))
+	}
+}
+
+func TestOnRetryTimerDuringRateLimitPauseReschedulesAtResume(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-20",
+		Attempt:    2,
+		DueAt:      time.Now(),
+	}
+	pausedUntil := time.Now().UTC().Add(90 * time.Second)
+
+	o.state.mu.Lock()
+	o.state.PausedUntil = &pausedUntil
+	o.state.PauseReason = "rate_limit_reset"
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), config.New(nil), entry.IssueID)
+	stopRetryTimer(t, o, entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	rescheduled, ok := o.state.RetryQueue[entry.IssueID]
+	if !ok {
+		t.Fatal("retry entry should be rescheduled while paused")
+	}
+	if rescheduled.Error != "rate limit pause" {
+		t.Fatalf("retry error = %q, want rate limit pause", rescheduled.Error)
+	}
+	if rescheduled.DueAt.Before(pausedUntil.Add(-time.Second)) {
+		t.Fatalf("retry due_at = %v, want near %v", rescheduled.DueAt, pausedUntil)
+	}
+	if len(o.state.Running) != 0 {
+		t.Fatalf("no issue should be redispatched during pause, got %d running", len(o.state.Running))
+	}
+}
+
+func TestBuildAgentConfigUsesStateSpecificCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	if got := buildAgentConfig(cfg, "Human Review").Command; got != "claude" {
+		t.Fatalf("buildAgentConfig(Human Review).Command = %q, want claude", got)
+	}
+	if got := buildAgentConfig(cfg, "In Progress").Command; got != "codex app-server" {
+		t.Fatalf("buildAgentConfig(In Progress).Command = %q, want codex app-server", got)
 	}
 }
 
@@ -205,6 +673,57 @@ func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
 			o.state.PollIntervalIdleMs == 2500 &&
 			o.state.MaxConcurrentAgents == 4
 	})
+}
+
+func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	writeWorkflowFile(t, workflowPath, 1000, 2000)
+
+	o := New(workflowPath, 0, "alpha", nil)
+	o.workflowWatchDebounce = 20 * time.Millisecond
+	if err := o.reloadWorkflow(); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.watchWorkflow(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	writeInvalidWorkflowFile(t, workflowPath)
+	time.Sleep(100 * time.Millisecond)
+
+	o.state.mu.Lock()
+	if o.state.PollIntervalMs != 1000 {
+		t.Fatalf("PollIntervalMs = %d, want 1000", o.state.PollIntervalMs)
+	}
+	if o.state.PollIntervalIdleMs != 2000 {
+		t.Fatalf("PollIntervalIdleMs = %d, want 2000", o.state.PollIntervalIdleMs)
+	}
+	if o.state.MaxConcurrentAgents != 4 {
+		t.Fatalf("MaxConcurrentAgents = %d, want 4", o.state.MaxConcurrentAgents)
+	}
+	o.state.mu.Unlock()
+
+	o.mu.Lock()
+	cfg := o.cfg
+	o.mu.Unlock()
+	if cfg == nil {
+		t.Fatal("expected previous config to be retained")
+	}
+	if got := cfg.PollIntervalMs(); got != 1000 {
+		t.Fatalf("cfg.PollIntervalMs() = %d, want 1000", got)
+	}
 }
 
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
@@ -264,7 +783,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 		"**Tokens:** 42,100 (in: 28,000 / out: 14,100)",
 		"- Modified: foo.txt",
 		"- Last commit: `feat: add foo (",
-		"- PR: https://github.com/J132134/symphony/pull/new/j-29-test",
+		"- PR: https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test",
 		"**Branch:** `j-29-test`",
 	} {
 		if !strings.Contains(body, want) {
@@ -273,6 +792,12 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	}
 	if got := recorder.lastState(); got != "Human Review" {
 		t.Fatalf("state transition = %q, want Human Review", got)
+	}
+	if recorder.linkCount() != 1 {
+		t.Fatalf("link count = %d, want 1", recorder.linkCount())
+	}
+	if got := recorder.lastLink(); got != "https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test" {
+		t.Fatalf("link url = %q, want PR url", got)
 	}
 
 	o.state.mu.Lock()
@@ -343,6 +868,9 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	if got := recorder.lastState(); got != "Rework" {
 		t.Fatalf("state transition = %q, want Rework", got)
 	}
+	if recorder.linkCount() != 0 {
+		t.Fatalf("link count = %d, want 0", recorder.linkCount())
+	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -351,6 +879,45 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	}
 	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
 		t.Fatal("final failure should release the claimed issue")
+	}
+}
+
+func TestResolvePRLinkURLPrefersExistingGitHubPR(t *testing.T) {
+	t.Parallel()
+
+	summary := workspaceSummary{
+		Branch:    "j-36-test",
+		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
+		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+	}
+
+	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
+		if owner != "example" || repo != "nonexistent-symphony-test" || branch != "j-36-test" {
+			t.Fatalf("unexpected lookup args: %s %s %s", owner, repo, branch)
+		}
+		return "https://github.com/example/nonexistent-symphony-test/pull/123"
+	})
+
+	if got != "https://github.com/example/nonexistent-symphony-test/pull/123" {
+		t.Fatalf("resolvePRLinkURL() = %q", got)
+	}
+}
+
+func TestResolvePRLinkURLFallsBackToSummaryPRURL(t *testing.T) {
+	t.Parallel()
+
+	summary := workspaceSummary{
+		Branch:    "j-36-test",
+		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
+		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+	}
+
+	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
+		return ""
+	})
+
+	if got != summary.PRURL {
+		t.Fatalf("resolvePRLinkURL() = %q, want %q", got, summary.PRURL)
 	}
 }
 
@@ -403,6 +970,170 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	}
 }
 
+func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_attempts": 3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-39",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		Status:     StatusCanceled,
+		Preempted:  true,
+	}
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, context.Canceled)
+	stopRetryTimer(t, o, attempt.IssueID)
+
+	if recorder.commentCount() != 0 {
+		t.Fatalf("comment count = %d, want 0", recorder.commentCount())
+	}
+	if recorder.lastState() != "" {
+		t.Fatalf("unexpected state transition = %q", recorder.lastState())
+	}
+	if recorder.linkCount() != 0 {
+		t.Fatalf("link count = %d, want 0", recorder.linkCount())
+	}
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+		t.Fatal("preempted issue should be re-queued")
+	}
+	if o.state.CompletedCount != 0 {
+		t.Fatalf("completed count = %d, want 0", o.state.CompletedCount)
+	}
+}
+
+func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.Running["issue-urgent"] = &RunAttempt{
+		IssueID:    "issue-urgent",
+		Identifier: "J-39",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-12",
+		Attempt:    1,
+		DueAt:      time.Now(),
+	}
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("non-urgent issue should remain queued while urgent work is running")
+	}
+	if entry.Error != "urgent in progress" {
+		t.Fatalf("retry error = %q, want urgent in progress", entry.Error)
+	}
+	if len(o.state.Running) != 1 {
+		t.Fatalf("running count = %d, want only the urgent issue", len(o.state.Running))
+	}
+}
+
+func TestOnRetryTimerDefersNonUrgentWhileGlobalUrgentRuns(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	limiter := NewSessionLimiter(2)
+	if !limiter.ForceAcquireIssue("issue-urgent", true, nil) {
+		t.Fatal("urgent acquire should succeed")
+	}
+
+	o := New("", 0, "alpha", limiter)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-12",
+		Attempt:    1,
+		DueAt:      time.Now(),
+	}
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("non-urgent issue should remain queued while a global urgent issue is running")
+	}
+	if entry.Error != "urgent in progress" {
+		t.Fatalf("retry error = %q, want urgent in progress", entry.Error)
+	}
+}
+
 func TestBuildContinuationPromptIncludesTurnContext(t *testing.T) {
 	t.Parallel()
 
@@ -444,6 +1175,7 @@ func TestIsRetryAbandonComment(t *testing.T) {
 type linearRecorder struct {
 	mu         sync.Mutex
 	comments   []string
+	links      []string
 	stateNames []string
 }
 
@@ -457,6 +1189,12 @@ func (r *linearRecorder) addState(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stateNames = append(r.stateNames, name)
+}
+
+func (r *linearRecorder) addLink(url string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.links = append(r.links, url)
 }
 
 func (r *linearRecorder) commentCount() int {
@@ -483,6 +1221,21 @@ func (r *linearRecorder) lastState() string {
 	return r.stateNames[len(r.stateNames)-1]
 }
 
+func (r *linearRecorder) linkCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.links)
+}
+
+func (r *linearRecorder) lastLink() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.links) == 0 {
+		return ""
+	}
+	return r.links[len(r.links)-1]
+}
+
 func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	t.Helper()
 
@@ -504,6 +1257,10 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 			input, _ := req.Variables["input"].(map[string]any)
 			recorder.addComment(asString(input["body"]))
 			_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+		case strings.Contains(req.Query, "attachmentCreate"):
+			input, _ := req.Variables["input"].(map[string]any)
+			recorder.addLink(asString(input["url"]))
+			_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
 		case strings.Contains(req.Query, "issue(id: $id)"):
 			_, _ = w.Write([]byte(`{"data":{"issue":{"team":{"states":{"nodes":[{"id":"state-human-review","name":"Human Review"},{"id":"state-rework","name":"Rework"}]}}}}}`))
 		case strings.Contains(req.Query, "issueUpdate"):
@@ -524,6 +1281,87 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	return recorder, server
 }
 
+func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "issues(filter: { id: { in: $ids } })"):
+			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"nodes":%s}}}`, encodeIssueStateNodes(t, issues))
+		case strings.Contains(req.Query, "state: { name: { in: $states } }"):
+			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":%s}}}`, encodeCandidateIssueNodes(t, issues))
+		default:
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+	}))
+}
+
+func encodeIssueStateNodes(t *testing.T, issues []*types.Issue) string {
+	t.Helper()
+
+	nodes := make([]map[string]any, 0, len(issues))
+	for _, issue := range issues {
+		nodes = append(nodes, map[string]any{
+			"id":         issue.ID,
+			"identifier": issue.Identifier,
+			"state": map[string]any{
+				"name": issue.State,
+			},
+		})
+	}
+	raw, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatalf("marshal issue state nodes: %v", err)
+	}
+	return string(raw)
+}
+
+func encodeCandidateIssueNodes(t *testing.T, issues []*types.Issue) string {
+	t.Helper()
+
+	nodes := make([]map[string]any, 0, len(issues))
+	for _, issue := range issues {
+		nodes = append(nodes, map[string]any{
+			"id":          issue.ID,
+			"identifier":  issue.Identifier,
+			"title":       "",
+			"description": "",
+			"priority":    nil,
+			"state": map[string]any{
+				"name": issue.State,
+			},
+			"branchName": nil,
+			"url":        nil,
+			"comments": map[string]any{
+				"nodes": []any{},
+			},
+			"labels": map[string]any{
+				"nodes": []any{},
+			},
+			"relations": map[string]any{
+				"nodes": []any{},
+			},
+			"createdAt": time.Now().UTC().Format(time.RFC3339),
+			"updatedAt": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	raw, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatalf("marshal candidate issue nodes: %v", err)
+	}
+	return string(raw)
+}
+
 func initGitWorkspace(t *testing.T) string {
 	t.Helper()
 
@@ -532,7 +1370,7 @@ func initGitWorkspace(t *testing.T) string {
 	runGit(t, dir, "config", "user.name", "Test User")
 	runGit(t, dir, "config", "user.email", "test@example.com")
 	runGit(t, dir, "checkout", "-b", "j-29-test")
-	runGit(t, dir, "remote", "add", "origin", "https://github.com/J132134/symphony.git")
+	runGit(t, dir, "remote", "add", "origin", "https://github.com/example/nonexistent-symphony-test.git")
 
 	path := filepath.Join(dir, "foo.txt")
 	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
@@ -564,6 +1402,10 @@ func stopRetryTimer(t *testing.T, o *Orchestrator, issueID string) {
 	entry.timer.Stop()
 }
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
@@ -571,11 +1413,14 @@ func asString(v any) string {
 
 func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
 	t.Helper()
+	port := randomFreePort(t)
 	content := []byte(
 		"---\n" +
 			"tracker:\n" +
 			"  api_key: test-key\n" +
 			"  project_slug: test-project\n" +
+			"server:\n" +
+			"  port: " + itoa(port) + "\n" +
 			"polling:\n" +
 			"  interval_ms: " + itoa(intervalMs) + "\n" +
 			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
@@ -601,6 +1446,48 @@ func waitForOrchestrator(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
+}
+
+func writeInvalidWorkflowFile(t *testing.T, path string) {
+	t.Helper()
+	port := randomFreePort(t)
+
+	content := `---
+tracker:
+  api_key: test-key
+  project_slug: test-project
+server:
+  port: ` + itoa(port) + `
+polling:
+  interval_ms: 1000
+  idle_interval_ms: 2000
+workspace:
+  root: ""
+agent:
+  max_concurrent_agents: 4
+  max_turns: 3
+---
+# Workflow
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write invalid workflow: %v", err)
+	}
+}
+
+func randomFreePort(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type %T", ln.Addr())
+	}
+	return addr.Port
 }
 
 func itoa(v int) string {

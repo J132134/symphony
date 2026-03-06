@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -44,6 +45,7 @@ type DaemonConfig struct {
 	ConfigPath    string
 
 	maxTotalConcurrentSessionsConfigured bool
+	autoUpdateRepoDirConfigured          bool
 }
 
 func LoadDaemonConfig(path string) (*DaemonConfig, error) {
@@ -54,6 +56,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 		path = filepath.Join(home, ".config", "symphony", "config.yaml")
 	}
+	configDir := filepath.Dir(path)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -80,7 +83,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 			}
 			name, _ := pm["name"].(string)
 			wf, _ := pm["workflow"].(string)
-			wf = resolvePath(wf)
+			wf = resolvePath(configDir, wf)
 			cfg.Projects = append(cfg.Projects, ProjectConfig{Name: name, Workflow: wf})
 		}
 	}
@@ -94,8 +97,9 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		if mins, ok := au["interval_minutes"]; ok {
 			cfg.AutoUpdate.IntervalMinutes = toInt(mins, 30)
 		}
-		if rd, ok := au["repo_dir"].(string); ok && rd != "" {
-			cfg.AutoUpdate.RepoDir = resolvePath(rd)
+		if rd, ok := au["repo_dir"].(string); ok {
+			cfg.AutoUpdate.RepoDir = resolvePath(configDir, rd)
+			cfg.autoUpdateRepoDirConfigured = true
 		}
 	}
 
@@ -147,19 +151,29 @@ func (c *DaemonConfig) Validate() []string {
 	names := map[string]int{}
 	for _, p := range c.Projects {
 		names[p.Name]++
-		if p.Name == "" {
+		if strings.TrimSpace(p.Name) == "" {
 			errs = append(errs, "each project must have a name")
 		}
-		if p.Workflow == "" {
+		if strings.TrimSpace(p.Workflow) == "" {
 			errs = append(errs, fmt.Sprintf("project '%s': workflow path is required", p.Name))
-		} else if _, err := os.Stat(p.Workflow); err != nil {
-			errs = append(errs, fmt.Sprintf("project '%s': workflow not found: %s", p.Name, p.Workflow))
+		} else {
+			errs = append(errs, validateReadableFile(p.Workflow, fmt.Sprintf("project '%s': workflow", p.Name))...)
 		}
 	}
 	for name, count := range names {
 		if count > 1 {
 			errs = append(errs, fmt.Sprintf("duplicate project name: %s", name))
 		}
+	}
+	if c.AutoUpdate.Enabled {
+		if c.autoUpdateRepoDirConfigured && strings.TrimSpace(c.AutoUpdate.RepoDir) == "" {
+			errs = append(errs, "auto_update.repo_dir must be non-empty when auto_update.enabled is true")
+		} else if strings.TrimSpace(c.AutoUpdate.RepoDir) != "" {
+			errs = append(errs, validateGitRepoDir(c.AutoUpdate.RepoDir, "auto_update.repo_dir")...)
+		}
+	}
+	if c.StatusServer.Enabled {
+		errs = append(errs, validateTCPPortAvailable(c.StatusServer.Port, "status_server.port")...)
 	}
 	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
 		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
@@ -199,13 +213,19 @@ func DefaultMaxTotalConcurrentSessions() int {
 	}
 }
 
-func resolvePath(v string) string {
+func resolvePath(baseDir, v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
 	if len(v) > 0 && v[0] == '$' {
 		v = os.Getenv(v[1:])
 	}
 	if len(v) > 0 && v[0] == '~' {
 		home, _ := os.UserHomeDir()
 		v = home + v[1:]
+	}
+	if !filepath.IsAbs(v) && strings.TrimSpace(baseDir) != "" {
+		v = filepath.Join(baseDir, v)
 	}
 	abs, err := filepath.Abs(v)
 	if err != nil {
