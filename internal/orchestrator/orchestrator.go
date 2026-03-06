@@ -243,7 +243,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	tr := o.tracker
 	o.mu.Unlock()
 
-	if cfg == nil || tr == nil || len(cfg.Validate()) > 0 {
+	if cfg == nil || tr == nil {
 		return
 	}
 
@@ -941,6 +941,10 @@ func (o *Orchestrator) reloadWorkflow() error {
 		return err
 	}
 	cfg := config.New(wf.Config)
+	if errs := cfg.Validate(); len(errs) > 0 {
+		return fmt.Errorf("config: %s", strings.Join(errs, "; "))
+	}
+
 	o.mu.Lock()
 	o.wf = wf
 	o.cfg = cfg

@@ -70,3 +70,125 @@ func TestDaemonConfigValidateRejectsInvalidConfiguredSessionLimit(t *testing.T) 
 		t.Fatal("Validate() returned no errors for invalid session limit")
 	}
 }
+
+func TestLoadDaemonConfigPreservesEmptyWorkflowForValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "projects:\n  - name: alpha\n    workflow: \"\"\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "workflow path is required")
+}
+
+func TestLoadDaemonConfigPreservesEmptyRepoDirForValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "projects:\n  - name: alpha\n    workflow: " + workflowPath + "\nauto_update:\n  enabled: true\n  repo_dir: \"\"\nstatus_server:\n  enabled: false\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "auto_update.repo_dir")
+	requireErrorContaining(t, errs, "non-empty")
+}
+
+func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowDir := filepath.Join(dir, "workflow-dir")
+	if err := os.Mkdir(workflowDir, 0o755); err != nil {
+		t.Fatalf("mkdir workflow dir: %v", err)
+	}
+
+	repoDir := filepath.Join(dir, "not-a-repo")
+	if err := os.Mkdir(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo dir: %v", err)
+	}
+
+	ln, port := listenOnRandomPort(t)
+	defer ln.Close()
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{
+			Name:     "alpha",
+			Workflow: workflowDir,
+		}},
+		AutoUpdate: AutoUpdateConfig{
+			Enabled: true,
+			RepoDir: repoDir,
+		},
+		StatusServer: StatusServerConfig{
+			Enabled: true,
+			Port:    port,
+		},
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "workflow")
+	requireErrorContaining(t, errs, "readable file")
+	requireErrorContaining(t, errs, "auto_update.repo_dir")
+	requireErrorContaining(t, errs, "git repository")
+	requireErrorContaining(t, errs, "status_server.port")
+	requireErrorContaining(t, errs, "already in use")
+}
+
+func TestDaemonConfigValidateRejectsUnreadableWorkflowAndPortRange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o600); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+	if err := os.Chmod(workflowPath, 0); err != nil {
+		t.Fatalf("chmod workflow: %v", err)
+	}
+	defer func() {
+		_ = os.Chmod(workflowPath, 0o600)
+	}()
+
+	if f, err := os.Open(workflowPath); err == nil {
+		_ = f.Close()
+		t.Skip("current environment can still read chmod 000 files")
+	}
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{
+			Name:     "alpha",
+			Workflow: workflowPath,
+		}},
+		StatusServer: StatusServerConfig{
+			Enabled: true,
+			Port:    70000,
+		},
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "workflow")
+	requireErrorContaining(t, errs, "not readable")
+	requireErrorContaining(t, errs, "status_server.port must be between 1 and 65535")
+}
