@@ -68,7 +68,7 @@ func cmdRun(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	o := orchestrator.New(workflowPath, 0, "")
+	o := orchestrator.New(workflowPath, 0, "", nil)
 
 	if portStr := opts["--port"]; portStr != "" {
 		var port int
@@ -152,7 +152,7 @@ func cmdDaemon(args []string) {
 	for i, p := range cfg.Projects {
 		names[i] = p.Name
 	}
-	slog.Info("symphony.daemon.starting", "projects", names)
+	slog.Info("symphony.daemon.starting", "projects", names, "max_total_concurrent_sessions", cfg.MaxTotalConcurrentSessions())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

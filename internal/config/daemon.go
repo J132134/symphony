@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,11 +25,18 @@ type StatusServerConfig struct {
 	Port    int
 }
 
+type DaemonAgentConfig struct {
+	MaxTotalConcurrentSessions int
+}
+
 type DaemonConfig struct {
 	Projects     []ProjectConfig
 	AutoUpdate   AutoUpdateConfig
+	Agent        DaemonAgentConfig
 	StatusServer StatusServerConfig
 	ConfigPath   string
+
+	maxTotalConcurrentSessionsConfigured bool
 }
 
 func LoadDaemonConfig(path string) (*DaemonConfig, error) {
@@ -84,6 +92,15 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 	}
 
+	// agent
+	cfg.Agent = DaemonAgentConfig{MaxTotalConcurrentSessions: DefaultMaxTotalConcurrentSessions()}
+	if ag, ok := raw["agent"].(map[string]any); ok {
+		if limit, ok := ag["max_total_concurrent_sessions"]; ok {
+			cfg.Agent.MaxTotalConcurrentSessions = toInt(limit, cfg.Agent.MaxTotalConcurrentSessions)
+			cfg.maxTotalConcurrentSessionsConfigured = true
+		}
+	}
+
 	// status_server
 	cfg.StatusServer = StatusServerConfig{Enabled: true, Port: 7777}
 	if ss, ok := raw["status_server"].(map[string]any); ok {
@@ -120,7 +137,33 @@ func (c *DaemonConfig) Validate() []string {
 			errs = append(errs, fmt.Sprintf("duplicate project name: %s", name))
 		}
 	}
+	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
+		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
+	}
 	return errs
+}
+
+func (c *DaemonConfig) MaxTotalConcurrentSessions() int {
+	if c == nil || c.Agent.MaxTotalConcurrentSessions <= 0 {
+		return DefaultMaxTotalConcurrentSessions()
+	}
+	return c.Agent.MaxTotalConcurrentSessions
+}
+
+func DefaultMaxTotalConcurrentSessions() int {
+	cpus := runtime.NumCPU()
+	switch {
+	case cpus <= 2:
+		return 1
+	case cpus <= 4:
+		return 2
+	default:
+		limit := cpus / 2
+		if limit > 8 {
+			return 8
+		}
+		return limit
+	}
 }
 
 func resolvePath(v string) string {
