@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/orchestrator"
@@ -19,6 +20,7 @@ type projectRunner struct {
 }
 
 func (pr *projectRunner) run(ctx context.Context) {
+	backoff := 5 * time.Second
 	for ctx.Err() == nil {
 		o := orchestrator.New(pr.proj.Workflow, 0, pr.proj.Name)
 
@@ -27,11 +29,7 @@ func (pr *projectRunner) run(ctx context.Context) {
 		pr.mu.Unlock()
 
 		slog.Info("daemon.project_starting", "project", pr.proj.Name)
-		if err := o.Run(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("daemon.project_crashed", "project", pr.proj.Name, "error", err)
-		} else {
-			slog.Info("daemon.project_stopped", "project", pr.proj.Name)
-		}
+		err := o.Run(ctx)
 
 		pr.mu.Lock()
 		pr.orch = nil
@@ -39,6 +37,21 @@ func (pr *projectRunner) run(ctx context.Context) {
 
 		if ctx.Err() != nil {
 			return
+		}
+
+		if err != nil {
+			slog.Error("daemon.project_crashed", "project", pr.proj.Name, "error", err, "retry_in", backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 5*time.Minute {
+				backoff *= 2
+			}
+		} else {
+			slog.Info("daemon.project_stopped", "project", pr.proj.Name)
+			backoff = 5 * time.Second
 		}
 	}
 }
