@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"symphony/internal/types"
 )
 
 type RunStatus string
@@ -43,6 +45,7 @@ type RunAttempt struct {
 	IssueID        string
 	Identifier     string
 	Attempt        int
+	FailureCount   int
 	WorkspacePath  string
 	StartedAt      time.Time
 	Status         RunStatus
@@ -55,12 +58,42 @@ type RunAttempt struct {
 }
 
 type RetryEntry struct {
-	IssueID    string
-	Identifier string
-	Attempt    int
-	DueAt      time.Time
-	Error      string
-	timer      *time.Timer
+	IssueID      string
+	Identifier   string
+	Attempt      int
+	FailureCount int
+	DueAt        time.Time
+	Error        string
+	timer        *time.Timer
+}
+
+type AbandonedEntry struct {
+	Identifier   string
+	State        string
+	FailureCount int
+	Error        string
+	AbandonedAt  time.Time
+}
+
+func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {
+	if e == nil {
+		return time.Time{}
+	}
+	resumeAfter := e.AbandonedAt
+	if issue == nil {
+		return resumeAfter
+	}
+	comment := issue.LastComment
+	if comment == nil || !isRetryAbandonComment(comment.Body) {
+		return resumeAfter
+	}
+	if comment.UpdatedAt != nil && comment.UpdatedAt.After(resumeAfter) {
+		return *comment.UpdatedAt
+	}
+	if comment.CreatedAt != nil && comment.CreatedAt.After(resumeAfter) {
+		return *comment.CreatedAt
+	}
+	return resumeAfter
 }
 
 // State holds all orchestrator runtime state.
@@ -75,6 +108,7 @@ type State struct {
 	Running    map[string]*RunAttempt
 	Claimed    map[string]struct{}
 	RetryQueue map[string]*RetryEntry
+	Abandoned  map[string]*AbandonedEntry
 
 	CompletedCount int
 	Totals         TokenUsage
@@ -92,6 +126,7 @@ func NewState() *State {
 		Running:             make(map[string]*RunAttempt),
 		Claimed:             make(map[string]struct{}),
 		RetryQueue:          make(map[string]*RetryEntry),
+		Abandoned:           make(map[string]*AbandonedEntry),
 	}
 }
 
