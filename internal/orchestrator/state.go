@@ -10,6 +10,7 @@ import (
 )
 
 type RunStatus string
+type RetryKind string
 
 const (
 	StatusPreparingWorkspace  RunStatus = "preparing_workspace"
@@ -25,7 +26,16 @@ const (
 	StatusCanceled            RunStatus = "canceled_by_reconciliation"
 )
 
+const (
+	RetryKindFailure  RetryKind = "failure"
+	RetryKindCapacity RetryKind = "capacity"
+)
+
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
+
+func isRetryAbandonComment(body string) bool {
+	return strings.Contains(body, retryAbandonCommentMarker)
+}
 
 type TokenUsage struct {
 	InputTokens  int64
@@ -63,8 +73,10 @@ type RunAttempt struct {
 type RetryEntry struct {
 	IssueID      string
 	Identifier   string
+	Kind         RetryKind
 	Attempt      int
 	FailureCount int
+	DeferCount   int
 	DueAt        time.Time
 	Error        string
 	timer        *time.Timer
@@ -76,10 +88,6 @@ type AbandonedEntry struct {
 	FailureCount int
 	Error        string
 	AbandonedAt  time.Time
-}
-
-func isRetryAbandonComment(body string) bool {
-	return strings.Contains(body, retryAbandonCommentMarker)
 }
 
 func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {

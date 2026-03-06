@@ -23,6 +23,7 @@ import (
 )
 
 const humanReviewState = "human review"
+const capacityRetryDelayMs = 5_000
 
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
@@ -243,7 +244,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	tr := o.tracker
 	o.mu.Unlock()
 
-	if cfg == nil || tr == nil {
+	if cfg == nil || tr == nil || len(cfg.Validate()) > 0 {
 		return
 	}
 
@@ -273,7 +274,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 			break
 		}
 		if o.canDispatch(cfg, issue) {
-			if !o.dispatch(ctx, cfg, issue, 1) {
+			if !o.dispatch(ctx, cfg, issue, 1, 0) {
 				break
 			}
 		}
@@ -359,7 +360,7 @@ func sortCandidates(issues []*types.Issue) {
 
 // -- dispatch --
 
-func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
+func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum, failureCount int) bool {
 	globalSlotHeld := countsTowardConcurrency(issue.State) && o.globalLimiter != nil
 	if globalSlotHeld && !o.globalLimiter.TryAcquire() {
 		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
@@ -373,6 +374,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		IssueID:        issue.ID,
 		Identifier:     issue.Identifier,
 		Attempt:        attemptNum,
+		FailureCount:   failureCount,
 		StartedAt:      time.Now().UTC(),
 		Status:         StatusPreparingWorkspace,
 		IssueState:     issue.State,
@@ -450,16 +452,14 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	if err == nil {
-		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "", false)
+		o.releaseClaim(issueID)
 	} else {
 		if attempt.Attempt >= cfg.MaxAttempts() {
-			o.state.mu.Lock()
-			delete(o.state.Claimed, issueID)
-			o.state.mu.Unlock()
+			o.releaseClaim(issueID)
 			slog.Info("orchestrator.worker_failed_final", "project", o.name, "issue_id", issueID, "attempt", attempt.Attempt)
 			return
 		}
-		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, err.Error(), true)
+		o.scheduleFailureRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt+1, attempt.FailureCount+1, err.Error())
 	}
 }
 
@@ -498,7 +498,6 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 	// 3. Render prompt.
 	attempt.Status = StatusBuildingPrompt
-	initialTurnContext := o.loadTurnContext(issue, wsMgr, ws)
 	prompt, err := workflow.Render(wf, workflow.IssueContext{
 		ID:          issue.ID,
 		Identifier:  issue.Identifier,
@@ -509,7 +508,6 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 		Labels:      issue.Labels,
 		URL:         issue.URL,
 		BranchName:  issue.BranchName,
-		TurnContext: initialTurnContext,
 	}, attempt.Attempt)
 	if err != nil {
 		attempt.Status = StatusFailed
@@ -520,15 +518,15 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
 	agentCfg := &agent.Config{
-		Command:              cfg.CodexCommand(),
-		ApprovalPolicy:       cfg.ApprovalPolicy(),
-		MaxTurns:             cfg.MaxTurns(),
-		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
+		Command:           cfg.CodexCommand(),
+		ApprovalPolicy:    cfg.ApprovalPolicy(),
+		MaxTurns:          cfg.MaxTurns(),
+		TurnTimeoutMs:     cfg.TurnTimeoutMs(),
 		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
 		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
 		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
-		ThreadSandbox:        cfg.ThreadSandbox(),
+		TurnSandboxPolicy: cfg.TurnSandboxPolicy(),
+		ThreadSandbox:     cfg.ThreadSandbox(),
 	}
 
 	// 5. Handshake.
@@ -551,13 +549,8 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 		turnPrompt := prompt
 		if turnNum > 1 {
-			turnPrompt = buildContinuationPrompt(
-				issue.Identifier,
-				issue.Title,
-				turnNum,
-				cfg.MaxTurns(),
-				o.loadTurnContext(issue, wsMgr, ws),
-			)
+			turnPrompt = fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
+				issue.Identifier, issue.Title, turnNum, cfg.MaxTurns())
 		}
 
 		result := runner.RunTurn(ctx, threadID, turnPrompt, issue.Identifier, issue.Title, agentCfg,
@@ -591,34 +584,6 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	}
 	attempt.Status = StatusSucceeded
 	return nil
-}
-
-func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Manager, ws *workspace.Workspace) string {
-	if wsMgr == nil || ws == nil {
-		return ""
-	}
-	turnContext, err := wsMgr.GetTurnContext(ws)
-	if err != nil {
-		slog.Warn("orchestrator.turn_context_unavailable", "issue", issue.Identifier, "error", err)
-		return ""
-	}
-	return turnContext
-}
-
-func buildContinuationPrompt(identifier, title string, turnNum, maxTurns int, turnContext string) string {
-	if strings.TrimSpace(turnContext) == "" {
-		return fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
-			identifier, title, turnNum, maxTurns)
-	}
-
-	return fmt.Sprintf(
-		"Continue working on %s: %s.\n\nProgress so far:\n%s\n\nThis is turn %d of %d. Continue where you left off without repeating completed work.",
-		identifier,
-		title,
-		turnContext,
-		turnNum,
-		maxTurns,
-	)
 }
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
@@ -748,7 +713,22 @@ func (o *Orchestrator) cancelWorker(issueID string) {
 
 // -- retry --
 
-func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum int, errMsg string, abnormal bool) {
+func (o *Orchestrator) scheduleFailureRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum, failureCount int, errMsg string) {
+	o.scheduleRetry(ctx, cfg, RetryKindFailure, issueID, identifier, attemptNum, failureCount, 0, errMsg)
+}
+
+func (o *Orchestrator) scheduleCapacityRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum, failureCount, deferCount int, errMsg string) {
+	o.scheduleRetry(ctx, cfg, RetryKindCapacity, issueID, identifier, attemptNum, failureCount, deferCount, errMsg)
+}
+
+func (o *Orchestrator) rescheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, entry *RetryEntry, errMsg string) {
+	if entry == nil {
+		return
+	}
+	o.scheduleRetry(ctx, cfg, entry.Kind, entry.IssueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount, errMsg)
+}
+
+func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, kind RetryKind, issueID, identifier string, attemptNum, failureCount, deferCount int, errMsg string) {
 	o.state.mu.Lock()
 	if existing, ok := o.state.RetryQueue[issueID]; ok && existing.timer != nil {
 		existing.timer.Stop()
@@ -756,19 +736,26 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 	o.state.mu.Unlock()
 
 	var delayMs int
-	if abnormal {
+	switch kind {
+	case RetryKindFailure:
 		max := float64(cfg.MaxRetryBackoffMs())
-		delayMs = int(math.Min(float64(10_000)*math.Pow(2, float64(attemptNum-1)), max))
-	} else {
-		delayMs = 1_000
+		backoffAttempt := maxInt(failureCount, 1)
+		delayMs = int(math.Min(float64(10_000)*math.Pow(2, float64(backoffAttempt-1)), max))
+	case RetryKindCapacity:
+		delayMs = capacityRetryDelayMs
+	default:
+		delayMs = capacityRetryDelayMs
 	}
 
 	entry := &RetryEntry{
-		IssueID:    issueID,
-		Identifier: identifier,
-		Attempt:    attemptNum,
-		DueAt:      time.Now().Add(time.Duration(delayMs) * time.Millisecond),
-		Error:      errMsg,
+		IssueID:      issueID,
+		Identifier:   identifier,
+		Kind:         kind,
+		Attempt:      attemptNum,
+		FailureCount: failureCount,
+		DeferCount:   deferCount,
+		DueAt:        time.Now().Add(time.Duration(delayMs) * time.Millisecond),
+		Error:        errMsg,
 	}
 	entry.timer = time.AfterFunc(time.Duration(delayMs)*time.Millisecond, func() {
 		o.onRetryTimer(ctx, cfg, issueID)
@@ -780,7 +767,7 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 	o.state.mu.Unlock()
 
 	slog.Info("orchestrator.retry_scheduled", "project", o.name,
-		"issue_id", issueID, "attempt", attemptNum, "delay_ms", delayMs)
+		"issue_id", issueID, "kind", kind, "attempt", attemptNum, "failure_count", failureCount, "defer_count", deferCount, "delay_ms", delayMs)
 }
 
 func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyConfig, issueID string) {
@@ -812,6 +799,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	tr := o.tracker
 	o.mu.Unlock()
 	if tr == nil {
+		o.releaseClaim(issueID)
 		return
 	}
 
@@ -819,7 +807,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	if err != nil {
 		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.retry_fetch_failed", "issue_id", issueID, "error", err)
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "poll failed", true)
+		o.rescheduleRetry(ctx, cfg, entry, "poll failed")
 		return
 	}
 	o.state.RecordTrackerSuccess(time.Now().UTC())
@@ -854,7 +842,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	o.state.mu.Unlock()
 
 	if slots <= 0 || !o.hasGlobalCapacityForState(issue.State) {
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
+		o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, "no slots")
 		return
 	}
 
@@ -862,8 +850,8 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	delete(o.state.Claimed, issueID)
 	o.state.mu.Unlock()
 
-	if !o.dispatch(ctx, cfg, issue, entry.Attempt) {
-		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no global slots", true)
+	if !o.dispatch(ctx, cfg, issue, entry.Attempt, entry.FailureCount) {
+		o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, "no global slots")
 	}
 }
 
@@ -941,10 +929,6 @@ func (o *Orchestrator) reloadWorkflow() error {
 		return err
 	}
 	cfg := config.New(wf.Config)
-	if errs := cfg.Validate(); len(errs) > 0 {
-		return fmt.Errorf("config: %s", strings.Join(errs, "; "))
-	}
-
 	o.mu.Lock()
 	o.wf = wf
 	o.cfg = cfg
@@ -963,6 +947,13 @@ func normStates(states []string) map[string]bool {
 		m[config.NormalizeState(s)] = true
 	}
 	return m
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (o *Orchestrator) runningConcurrentCountLocked() int {
@@ -1013,6 +1004,12 @@ func (o *Orchestrator) releaseGlobalSlot(attempt *RunAttempt) {
 	}
 	o.globalLimiter.Release()
 	attempt.GlobalSlotHeld = false
+}
+
+func (o *Orchestrator) releaseClaim(issueID string) {
+	o.state.mu.Lock()
+	delete(o.state.Claimed, issueID)
+	o.state.mu.Unlock()
 }
 
 func (o *Orchestrator) isDraining() bool {

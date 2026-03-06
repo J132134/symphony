@@ -11,7 +11,6 @@ import (
 	"symphony/internal/config"
 	"symphony/internal/orchestrator"
 	"symphony/internal/status"
-	"symphony/internal/version"
 )
 
 // projectRunner manages the lifecycle of one Orchestrator with auto-restart.
@@ -362,78 +361,53 @@ func (m *Manager) allIdle() bool {
 
 func (m *Manager) GetSummary() status.Summary {
 	runners := m.runnersSnapshot()
-	build := version.Current()
-	summary := status.Summary{
-		Status:    "idle",
-		Version:   build.Version,
-		GitHash:   build.GitHash,
-		Dirty:     build.Dirty,
-		Projects:  make([]status.ProjectSummary, 0, len(runners)),
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	projectNames := make([]string, 0, len(runners))
+	states := make(map[string]*orchestrator.State, len(runners))
 	projectMap := make(map[string]status.ProjectSummary, len(runners))
-	var hasError bool
-	var hasNetworkIssue bool
 
 	for _, pr := range runners {
 		st, lastErr := pr.snapshot()
-		project := status.ProjectSummary{
-			Name:             pr.proj.Name,
-			Status:           "idle",
-			TrackerConnected: true,
-		}
-		projectNames = append(projectNames, pr.proj.Name)
-
 		if st == nil {
+			project := status.ProjectSummary{
+				Name:             pr.proj.Name,
+				Status:           "idle",
+				TrackerConnected: true,
+			}
 			if lastErr != "" {
 				project.Status = "error"
 				project.LastError = lastErr
-				hasError = true
 			}
 			projectMap[pr.proj.Name] = project
 			continue
 		}
+		states[pr.proj.Name] = st
+	}
 
-		st.Lock()
-		project.SubprocessCount = len(st.Running)
-		project.RetryCount = len(st.RetryQueue)
-		for _, attempt := range st.Running {
-			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
-			summary.RunningIssueIDs = append(summary.RunningIssueIDs, attempt.Identifier)
-		}
-		sort.Strings(project.RunningIssueIDs)
-		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
-		if !project.TrackerConnected {
-			project.Status = "network_lost"
-			hasNetworkIssue = true
-		} else if project.RetryCount > 0 {
-			project.Status = "error"
+	summary := status.BuildSummary(states)
+	for _, project := range summary.Projects {
+		projectMap[project.Name] = project
+	}
+
+	projectNames := make([]string, 0, len(projectMap))
+	var hasError bool
+	var hasNetworkIssue bool
+	var hasRunning bool
+	for name, project := range projectMap {
+		projectNames = append(projectNames, name)
+		switch project.Status {
+		case "error":
 			hasError = true
-			for _, retry := range st.RetryQueue {
-				if retry.Error != "" {
-					project.LastError = retry.Error
-					break
-				}
-			}
-		} else if project.SubprocessCount > 0 {
-			project.Status = "running"
+		case "network_lost":
+			hasNetworkIssue = true
+		case "running":
+			hasRunning = true
 		}
-		st.Unlock()
-
-		summary.SubprocessCount += project.SubprocessCount
-		summary.RetryCount += project.RetryCount
-		projectMap[pr.proj.Name] = project
 	}
 
 	sort.Strings(projectNames)
+	summary.Projects = make([]status.ProjectSummary, 0, len(projectNames))
 	for _, name := range projectNames {
-		project := projectMap[name]
-		summary.Projects = append(summary.Projects, project)
+		summary.Projects = append(summary.Projects, projectMap[name])
 	}
-
-	sort.Strings(summary.RunningIssueIDs)
 	summary.ProjectCount = len(summary.Projects)
 
 	switch {
@@ -441,11 +415,12 @@ func (m *Manager) GetSummary() status.Summary {
 		summary.Status = "error"
 	case hasNetworkIssue:
 		summary.Status = "network_lost"
-	case summary.SubprocessCount > 0:
+	case hasRunning:
 		summary.Status = "running"
 	default:
 		summary.Status = "idle"
 	}
+
 	return summary
 }
 

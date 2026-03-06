@@ -4,6 +4,7 @@ package menubar
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type app struct {
 	countItem   *systray.MenuItem
 	issuesItem  *systray.MenuItem
 	refreshItem *systray.MenuItem
+	openItem    *systray.MenuItem
 	quitItem    *systray.MenuItem
 }
 
@@ -67,6 +69,7 @@ func (a *app) onReady() {
 	a.issuesItem.Disable()
 	systray.AddSeparator()
 	a.refreshItem = systray.AddMenuItem("Refresh now", "")
+	a.openItem = systray.AddMenuItem("Open dashboard", "")
 	a.quitItem = systray.AddMenuItem("Quit", "")
 
 	go a.refreshLoop()
@@ -120,6 +123,8 @@ func (a *app) handleMenuClicks() {
 		case <-a.refreshItem.ClickedCh:
 			_ = a.client.Refresh()
 			a.refreshOnce()
+		case <-a.openItem.ClickedCh:
+			_ = exec.Command("open", a.client.DashboardURL()).Start()
 		case <-a.quitItem.ClickedCh:
 			systray.Quit()
 			return
@@ -147,6 +152,16 @@ func (a *app) render() {
 		issues = strings.Join(summary.RunningIssueIDs, ", ")
 	}
 
+	systray.SetTitle(icon)
+	systray.SetTooltip(buildTooltip(summary, stateLabel, versionLabel, issues, lastErr))
+
+	a.stateItem.SetTitle("Status: " + stateLabel)
+	a.versionItem.SetTitle("Version: " + versionLabel)
+	a.countItem.SetTitle(fmt.Sprintf("Subprocesses: %d", summary.SubprocessCount))
+	a.issuesItem.SetTitle("Issues: " + issues)
+}
+
+func buildTooltip(summary status.Summary, stateLabel, versionLabel, issues string, lastErr error) string {
 	tooltipLines := []string{
 		fmt.Sprintf("Status: %s", stateLabel),
 		fmt.Sprintf("Version: %s", versionLabel),
@@ -155,6 +170,12 @@ func (a *app) render() {
 	}
 	if summary.RetryCount > 0 {
 		tooltipLines = append(tooltipLines, fmt.Sprintf("Retries: %d", summary.RetryCount))
+		if summary.FailureRetryCount > 0 {
+			tooltipLines = append(tooltipLines, fmt.Sprintf("Failure Retries: %d", summary.FailureRetryCount))
+		}
+		if summary.CapacityWaitCount > 0 {
+			tooltipLines = append(tooltipLines, fmt.Sprintf("Capacity Waits: %d", summary.CapacityWaitCount))
+		}
 	}
 	if summary.UpdatedAt != "" {
 		tooltipLines = append(tooltipLines, fmt.Sprintf("Updated: %s", summary.UpdatedAt))
@@ -162,14 +183,7 @@ func (a *app) render() {
 	if lastErr != nil {
 		tooltipLines = append(tooltipLines, fmt.Sprintf("Error: %s", lastErr.Error()))
 	}
-
-	systray.SetTitle(icon)
-	systray.SetTooltip(strings.Join(tooltipLines, "\n"))
-
-	a.stateItem.SetTitle("Status: " + stateLabel)
-	a.versionItem.SetTitle("Version: " + versionLabel)
-	a.countItem.SetTitle(fmt.Sprintf("Subprocesses: %d", summary.SubprocessCount))
-	a.issuesItem.SetTitle("Issues: " + issues)
+	return strings.Join(tooltipLines, "\n")
 }
 
 func menuBarStatus(status string, lastErr error, spinIndex int) (icon string, label string) {

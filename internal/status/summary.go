@@ -16,6 +16,8 @@ type Summary struct {
 	SubprocessCount int              `json:"subprocess_count"`
 	RunningIssueIDs []string         `json:"running_issue_ids"`
 	RetryCount      int              `json:"retry_count"`
+	FailureRetryCount int            `json:"failure_retry_count"`
+	CapacityWaitCount int            `json:"capacity_wait_count"`
 	ProjectCount    int              `json:"project_count"`
 	Projects        []ProjectSummary `json:"projects"`
 	UpdatedAt       string           `json:"updated_at"`
@@ -31,6 +33,8 @@ type ProjectSummary struct {
 	SubprocessCount    int      `json:"subprocess_count"`
 	RunningIssueIDs    []string `json:"running_issue_ids"`
 	RetryCount         int      `json:"retry_count"`
+	FailureRetryCount  int      `json:"failure_retry_count"`
+	CapacityWaitCount  int      `json:"capacity_wait_count"`
 	TrackerConnected   bool     `json:"tracker_connected"`
 	LastTrackerSuccess string   `json:"last_tracker_success,omitempty"`
 	LastTrackerError   string   `json:"last_tracker_error,omitempty"`
@@ -50,6 +54,7 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 
 	var hasNetworkIssue bool
 	var hasError bool
+	var hasRunning bool
 
 	projectNames := make([]string, 0, len(states))
 	for name := range states {
@@ -80,27 +85,30 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		if !project.TrackerConnected {
 			hasNetworkIssue = true
 		}
-		if project.RetryCount > 0 {
-			for _, retry := range st.RetryQueue {
-				if retry.Error != "" {
-					project.LastError = retry.Error
-					break
-				}
-			}
-		}
+		project.FailureRetryCount, project.CapacityWaitCount = countRetriesByKind(st.RetryQueue)
+		retryStatus, retryError := summarizeRetries(st.RetryQueue)
+		project.LastError = retryError
 		st.Unlock()
 
 		if !project.TrackerConnected {
 			project.Status = "network_lost"
-		} else if project.RetryCount > 0 {
-			project.Status = "error"
-			hasError = true
+		} else if retryStatus != "" {
+			project.Status = retryStatus
 		} else if project.SubprocessCount > 0 {
 			project.Status = "running"
 		}
 
+		switch project.Status {
+		case "error":
+			hasError = true
+		case "running":
+			hasRunning = true
+		}
+
 		summary.SubprocessCount += project.SubprocessCount
 		summary.RetryCount += project.RetryCount
+		summary.FailureRetryCount += project.FailureRetryCount
+		summary.CapacityWaitCount += project.CapacityWaitCount
 		summary.Projects = append(summary.Projects, project)
 	}
 
@@ -112,11 +120,33 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		summary.Status = "error"
 	case hasNetworkIssue:
 		summary.Status = "network_lost"
-	case summary.SubprocessCount > 0:
+	case hasRunning:
 		summary.Status = "running"
 	default:
 		summary.Status = "idle"
 	}
 
 	return summary
+}
+
+func summarizeRetries(retries map[string]*orchestrator.RetryEntry) (status string, lastError string) {
+	if len(retries) == 0 {
+		return "", ""
+	}
+
+	status = "running"
+	for _, retry := range retries {
+		if retry == nil {
+			continue
+		}
+		if retry.Kind == orchestrator.RetryKindCapacity {
+			continue
+		}
+		status = "error"
+		if retry.Error != "" {
+			lastError = retry.Error
+			break
+		}
+	}
+	return status, lastError
 }

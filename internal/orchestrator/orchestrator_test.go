@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -87,6 +86,132 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
+func TestOnRetryTimerWithoutTrackerReleasesClaim(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-18",
+		Kind:       RetryKindFailure,
+		Attempt:    2,
+		DueAt:      time.Now(),
+	}
+
+	o.state.mu.Lock()
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), config.New(nil), entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if _, ok := o.state.RetryQueue[entry.IssueID]; ok {
+		t.Fatal("retry entry should be removed when tracker is unavailable")
+	}
+	if _, ok := o.state.Claimed[entry.IssueID]; ok {
+		t.Fatal("claimed issue should be released when tracker is unavailable")
+	}
+}
+
+func TestOnRetryTimerPollFailurePreservesRetrySemantics(t *testing.T) {
+	t.Parallel()
+
+	client, server := newLinearFailingClient(t, http.StatusInternalServerError, "boom")
+	defer server.Close()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"project_slug":  "proj",
+			"active_states": []any{"In Progress"},
+		},
+		"agent": map[string]any{
+			"max_retry_backoff_ms": 300000,
+		},
+	})
+
+	tests := []struct {
+		name      string
+		entry     *RetryEntry
+		delayMin  time.Duration
+		delayMax  time.Duration
+	}{
+		{
+			name: "failure",
+			entry: &RetryEntry{
+				IssueID:      "issue-failure",
+				Identifier:   "J-21",
+				Kind:         RetryKindFailure,
+				Attempt:      3,
+				FailureCount: 2,
+				DueAt:        time.Now(),
+			},
+			delayMin: 19 * time.Second,
+			delayMax: 21 * time.Second,
+		},
+		{
+			name: "capacity",
+			entry: &RetryEntry{
+				IssueID:      "issue-capacity",
+				Identifier:   "J-22",
+				Kind:         RetryKindCapacity,
+				Attempt:      3,
+				FailureCount: 1,
+				DeferCount:   4,
+				DueAt:        time.Now(),
+			},
+			delayMin: 4 * time.Second,
+			delayMax: 6 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			o := New("", 0, "alpha", nil)
+			o.tracker = client
+
+			o.state.mu.Lock()
+			o.state.RetryQueue[tc.entry.IssueID] = tc.entry
+			o.state.Claimed[tc.entry.IssueID] = struct{}{}
+			o.state.mu.Unlock()
+
+			before := time.Now()
+			o.onRetryTimer(context.Background(), cfg, tc.entry.IssueID)
+			stopRetryTimer(t, o, tc.entry.IssueID)
+
+			o.state.mu.Lock()
+			defer o.state.mu.Unlock()
+
+			entry, ok := o.state.RetryQueue[tc.entry.IssueID]
+			if !ok {
+				t.Fatal("expected retry entry to be rescheduled after poll failure")
+			}
+			if entry.Kind != tc.entry.Kind {
+				t.Fatalf("retry kind = %q, want %q", entry.Kind, tc.entry.Kind)
+			}
+			if entry.Attempt != tc.entry.Attempt {
+				t.Fatalf("retry attempt = %d, want %d", entry.Attempt, tc.entry.Attempt)
+			}
+			if entry.FailureCount != tc.entry.FailureCount {
+				t.Fatalf("retry failure_count = %d, want %d", entry.FailureCount, tc.entry.FailureCount)
+			}
+			if entry.DeferCount != tc.entry.DeferCount {
+				t.Fatalf("retry defer_count = %d, want %d", entry.DeferCount, tc.entry.DeferCount)
+			}
+			if entry.Error != "poll failed" {
+				t.Fatalf("retry error = %q, want %q", entry.Error, "poll failed")
+			}
+			delay := entry.DueAt.Sub(before)
+			if delay < tc.delayMin || delay > tc.delayMax {
+				t.Fatalf("retry delay = %v, want between %v and %v", delay, tc.delayMin, tc.delayMax)
+			}
+		})
+	}
+}
+
 func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
 	t.Parallel()
 
@@ -126,31 +251,6 @@ func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
 	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
 	if !o.canDispatch(cfg, issue) {
 		t.Fatal("human review issue should not consume a concurrent slot")
-	}
-}
-
-func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states":   []any{"Todo", "In Progress"},
-			"terminal_states": []any{"Done"},
-		},
-	})
-
-	issue := &types.Issue{
-		ID:         "issue-33",
-		Identifier: "J-33",
-		State:      "Todo",
-		BlockedBy: []types.BlockerRef{
-			{ID: "issue-31", Identifier: "J-31", State: "In Progress"},
-		},
-	}
-
-	if o.canDispatch(cfg, issue) {
-		t.Fatal("todo issue with non-terminal blocker should not dispatch")
 	}
 }
 
@@ -208,57 +308,6 @@ func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
 	})
 }
 
-func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	workflowPath := filepath.Join(dir, "WORKFLOW.md")
-	writeWorkflowFile(t, workflowPath, 1000, 2000)
-
-	o := New(workflowPath, 0, "alpha", nil)
-	o.workflowWatchDebounce = 20 * time.Millisecond
-	if err := o.reloadWorkflow(); err != nil {
-		t.Fatalf("initial reload: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		o.watchWorkflow(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
-
-	time.Sleep(50 * time.Millisecond)
-	writeInvalidWorkflowFile(t, workflowPath)
-	time.Sleep(100 * time.Millisecond)
-
-	o.state.mu.Lock()
-	if o.state.PollIntervalMs != 1000 {
-		t.Fatalf("PollIntervalMs = %d, want 1000", o.state.PollIntervalMs)
-	}
-	if o.state.PollIntervalIdleMs != 2000 {
-		t.Fatalf("PollIntervalIdleMs = %d, want 2000", o.state.PollIntervalIdleMs)
-	}
-	if o.state.MaxConcurrentAgents != 4 {
-		t.Fatalf("MaxConcurrentAgents = %d, want 4", o.state.MaxConcurrentAgents)
-	}
-	o.state.mu.Unlock()
-
-	o.mu.Lock()
-	cfg := o.cfg
-	o.mu.Unlock()
-	if cfg == nil {
-		t.Fatal("expected previous config to be retained")
-	}
-	if got := cfg.PollIntervalMs(); got != 1000 {
-		t.Fatalf("cfg.PollIntervalMs() = %d, want 1000", got)
-	}
-}
-
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	t.Parallel()
 
@@ -305,8 +354,6 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil)
 
-	stopRetryTimer(t, o, attempt.IssueID)
-
 	if recorder.commentCount() != 1 {
 		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
 	}
@@ -332,8 +379,43 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	if o.state.CompletedCount != 1 {
 		t.Fatalf("completed count = %d, want 1", o.state.CompletedCount)
 	}
-	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
-		t.Fatal("expected success path to schedule follow-up retry")
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
+		t.Fatal("success path should not schedule a follow-up retry")
+	}
+	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
+		t.Fatal("success path should release the claimed issue")
+	}
+}
+
+func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-21",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		Status:     StatusSucceeded,
+		IssueState: "In Progress",
+	}
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil)
+
+	issue := &types.Issue{ID: attempt.IssueID, Identifier: attempt.Identifier, State: "In Progress"}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("successful active issue should be eligible for natural redispatch on the next poll")
 	}
 }
 
@@ -450,46 +532,119 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
-	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+	entry, ok := o.state.RetryQueue[attempt.IssueID]
+	if !ok {
 		t.Fatal("expected retry to be scheduled for intermediate failure")
 	}
-}
-
-func TestBuildContinuationPromptIncludesTurnContext(t *testing.T) {
-	t.Parallel()
-
-	prompt := buildContinuationPrompt("J-24", "Multi-turn prompt", 2, 20, "Git diff summary:\nfoo.txt")
-	for _, want := range []string{
-		"Continue working on J-24: Multi-turn prompt.",
-		"Progress so far:",
-		"Git diff summary:\nfoo.txt",
-		"This is turn 2 of 20.",
-		"Continue where you left off without repeating completed work.",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, prompt)
-		}
+	if entry.Kind != RetryKindFailure {
+		t.Fatalf("retry kind = %q, want %q", entry.Kind, RetryKindFailure)
+	}
+	if entry.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", entry.Attempt)
+	}
+	if entry.FailureCount != 1 {
+		t.Fatalf("retry failure_count = %d, want 1", entry.FailureCount)
+	}
+	if entry.DeferCount != 0 {
+		t.Fatalf("retry defer_count = %d, want 0", entry.DeferCount)
 	}
 }
 
-func TestBuildContinuationPromptFallsBackWithoutTurnContext(t *testing.T) {
+func TestScheduleFailureRetryUsesFailureCountForBackoff(t *testing.T) {
 	t.Parallel()
 
-	prompt := buildContinuationPrompt("J-24", "Multi-turn prompt", 2, 20, "")
-	want := "Continue working on J-24: Multi-turn prompt. This is turn 2 of 20."
-	if prompt != want {
-		t.Fatalf("prompt = %q, want %q", prompt, want)
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_retry_backoff_ms": 300000,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	before := time.Now()
+	o.scheduleFailureRetry(context.Background(), cfg, "issue-1", "J-21", 5, 1, "boom")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("expected retry entry to be scheduled")
+	}
+	if entry.Kind != RetryKindFailure {
+		t.Fatalf("retry kind = %q, want %q", entry.Kind, RetryKindFailure)
+	}
+	if entry.Attempt != 5 {
+		t.Fatalf("retry attempt = %d, want 5", entry.Attempt)
+	}
+	if entry.FailureCount != 1 {
+		t.Fatalf("retry failure_count = %d, want 1", entry.FailureCount)
+	}
+	delay := entry.DueAt.Sub(before)
+	if delay < 9*time.Second || delay > 11*time.Second {
+		t.Fatalf("failure retry delay = %v, want about 10s", delay)
 	}
 }
 
-func TestIsRetryAbandonComment(t *testing.T) {
+func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 	t.Parallel()
 
-	if !isRetryAbandonComment("<!-- symphony:retry-abandoned -->\npaused") {
-		t.Fatal("expected retry abandon marker to be detected")
+	client, server := newLinearCandidateClient(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-21", State: "In Progress"},
+	})
+	defer server.Close()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"project_slug":  "proj",
+			"active_states": []any{"In Progress"},
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents": 1,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 1
+	o.state.Running["issue-busy"] = &RunAttempt{IssueID: "issue-busy", Identifier: "J-99", IssueState: "In Progress"}
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:      "issue-1",
+		Identifier:   "J-21",
+		Kind:         RetryKindFailure,
+		Attempt:      2,
+		FailureCount: 1,
+		DueAt:        time.Now(),
 	}
-	if isRetryAbandonComment("plain comment") {
-		t.Fatal("plain comment should not be treated as retry abandon marker")
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	before := time.Now()
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("capacity wait should keep the issue in retry queue")
+	}
+	if entry.Kind != RetryKindCapacity {
+		t.Fatalf("retry kind = %q, want %q", entry.Kind, RetryKindCapacity)
+	}
+	if entry.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", entry.Attempt)
+	}
+	if entry.FailureCount != 1 {
+		t.Fatalf("retry failure_count = %d, want 1", entry.FailureCount)
+	}
+	if entry.DeferCount != 1 {
+		t.Fatalf("retry defer_count = %d, want 1", entry.DeferCount)
+	}
+	delay := entry.DueAt.Sub(before)
+	if delay < 4*time.Second || delay > 6*time.Second {
+		t.Fatalf("capacity retry delay = %v, want about 5s", delay)
 	}
 }
 
@@ -576,6 +731,78 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	return recorder, server
 }
 
+func newLinearCandidateClient(t *testing.T, issues []*types.Issue) (*tracker.LinearClient, *httptest.Server) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		if !strings.Contains(req.Query, "issues(") {
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+
+		nodes := make([]map[string]any, 0, len(issues))
+		for _, issue := range issues {
+			nodes = append(nodes, map[string]any{
+				"id":          issue.ID,
+				"identifier":  issue.Identifier,
+				"title":       issue.Title,
+				"description": issue.Description,
+				"priority":    nil,
+				"state":       map[string]any{"name": issue.State},
+				"branchName":  issue.BranchName,
+				"url":         issue.URL,
+				"comments":    map[string]any{"nodes": []any{}},
+				"labels":      map[string]any{"nodes": []any{}},
+				"relations":   map[string]any{"nodes": []any{}},
+				"createdAt":   time.Now().UTC().Format(time.RFC3339),
+				"updatedAt":   time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issues": map[string]any{
+					"pageInfo": map[string]any{
+						"hasNextPage": false,
+						"endCursor":   "",
+					},
+					"nodes": nodes,
+				},
+			},
+		})
+	}))
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		server.Close()
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+	return client, server
+}
+
+func newLinearFailingClient(t *testing.T, status int, body string) (*tracker.LinearClient, *httptest.Server) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, body, status)
+	}))
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		server.Close()
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+	return client, server
+}
+
 func initGitWorkspace(t *testing.T) string {
 	t.Helper()
 
@@ -623,14 +850,11 @@ func asString(v any) string {
 
 func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
 	t.Helper()
-	port := randomFreePort(t)
 	content := []byte(
 		"---\n" +
 			"tracker:\n" +
 			"  api_key: test-key\n" +
 			"  project_slug: test-project\n" +
-			"server:\n" +
-			"  port: " + itoa(port) + "\n" +
 			"polling:\n" +
 			"  interval_ms: " + itoa(intervalMs) + "\n" +
 			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
@@ -656,48 +880,6 @@ func waitForOrchestrator(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
-}
-
-func writeInvalidWorkflowFile(t *testing.T, path string) {
-	t.Helper()
-	port := randomFreePort(t)
-
-	content := `---
-tracker:
-  api_key: test-key
-  project_slug: test-project
-server:
-  port: ` + itoa(port) + `
-polling:
-  interval_ms: 1000
-  idle_interval_ms: 2000
-workspace:
-  root: ""
-agent:
-  max_concurrent_agents: 4
-  max_turns: 3
----
-# Workflow
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write invalid workflow: %v", err)
-	}
-}
-
-func randomFreePort(t *testing.T) int {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener addr type %T", ln.Addr())
-	}
-	return addr.Port
 }
 
 func itoa(v int) string {

@@ -84,6 +84,12 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	if summary.SubprocessCount != 1 {
 		t.Fatalf("subprocess_count = %d, want 1", summary.SubprocessCount)
 	}
+	if summary.FailureRetryCount != 0 {
+		t.Fatalf("failure_retry_count = %d, want 0", summary.FailureRetryCount)
+	}
+	if summary.CapacityWaitCount != 0 {
+		t.Fatalf("capacity_wait_count = %d, want 0", summary.CapacityWaitCount)
+	}
 	if len(summary.RunningIssueIDs) != 1 || summary.RunningIssueIDs[0] != "J-17" {
 		t.Fatalf("running_issue_ids = %#v, want [J-17]", summary.RunningIssueIDs)
 	}
@@ -92,6 +98,59 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 	if summary.Projects[2].LastError != "workflow load failed" {
 		t.Fatalf("last_error = %q, want workflow load failed", summary.Projects[2].LastError)
+	}
+}
+
+func TestManagerGetSummaryTreatsCapacityRetryAsRunning(t *testing.T) {
+	t.Parallel()
+
+	capacityOnly := orchestrator.New("", 0, "alpha", nil)
+	st := capacityOnly.GetState()
+	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+	st.RecordTrackerSuccess(now)
+	st.RetryQueue["1"] = &orchestrator.RetryEntry{
+		Identifier:   "J-21",
+		Kind:         orchestrator.RetryKindCapacity,
+		Attempt:      2,
+		FailureCount: 1,
+		DeferCount:   3,
+		Error:        "no slots",
+	}
+
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{},
+		runners: map[string]*projectRunner{
+			"alpha": {proj: config.ProjectConfig{Name: "alpha"}, orch: capacityOnly},
+		},
+	}
+
+	summary := mgr.GetSummary()
+	if summary.Status != "running" {
+		t.Fatalf("status = %q, want running", summary.Status)
+	}
+	if summary.RetryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", summary.RetryCount)
+	}
+	if summary.FailureRetryCount != 0 {
+		t.Fatalf("failure_retry_count = %d, want 0", summary.FailureRetryCount)
+	}
+	if summary.CapacityWaitCount != 1 {
+		t.Fatalf("capacity_wait_count = %d, want 1", summary.CapacityWaitCount)
+	}
+	if len(summary.Projects) != 1 {
+		t.Fatalf("project count = %d, want 1", len(summary.Projects))
+	}
+	if summary.Projects[0].Status != "running" {
+		t.Fatalf("project status = %q, want running", summary.Projects[0].Status)
+	}
+	if summary.Projects[0].FailureRetryCount != 0 {
+		t.Fatalf("project failure_retry_count = %d, want 0", summary.Projects[0].FailureRetryCount)
+	}
+	if summary.Projects[0].CapacityWaitCount != 1 {
+		t.Fatalf("project capacity_wait_count = %d, want 1", summary.Projects[0].CapacityWaitCount)
+	}
+	if summary.Projects[0].LastError != "" {
+		t.Fatalf("last_error = %q, want empty", summary.Projects[0].LastError)
 	}
 }
 
