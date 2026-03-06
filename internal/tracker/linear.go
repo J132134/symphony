@@ -30,6 +30,13 @@ query($projectSlug: String!, $states: [String!], $after: String) {
       id identifier title description priority
       state { name }
       branchName url
+      comments(last: 1, orderBy: updatedAt) {
+        nodes {
+          body
+          createdAt
+          updatedAt
+        }
+      }
       labels { nodes { name } }
       relations {
         nodes { type relatedIssue { id identifier state { name } } }
@@ -147,9 +154,9 @@ func (c *LinearClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) 
 	return result, nil
 }
 
-func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) error {
+func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body string) error {
 	if strings.TrimSpace(issueID) == "" {
-		return fmt.Errorf("issue id is required")
+		return fmt.Errorf("issue ID is required")
 	}
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("comment body is required")
@@ -165,9 +172,13 @@ func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) err
 	}
 	payload, _ := data["commentCreate"].(map[string]any)
 	if ok, _ := payload["success"].(bool); !ok {
-		return fmt.Errorf("commentCreate returned success=false")
+		return fmt.Errorf("commentCreate unsuccessful")
 	}
 	return nil
+}
+
+func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) error {
+	return c.CreateIssueComment(ctx, issueID, body)
 }
 
 func (c *LinearClient) UpdateIssueState(ctx context.Context, issueID, stateName string) error {
@@ -338,6 +349,20 @@ func normalizeIssue(node map[string]any) *types.Issue {
 		URL:         strVal(node["url"]),
 		Labels:      labels,
 		BlockedBy:   blockedBy,
+	}
+	if cd, ok := node["comments"].(map[string]any); ok {
+		for _, n := range castSlice(cd["nodes"]) {
+			nm, ok := n.(map[string]any)
+			if !ok {
+				continue
+			}
+			iss.LastComment = &types.Comment{
+				Body:      strVal(nm["body"]),
+				CreatedAt: parseISO(strVal(nm["createdAt"])),
+				UpdatedAt: parseISO(strVal(nm["updatedAt"])),
+			}
+			break
+		}
 	}
 	if pri, ok := node["priority"].(float64); ok && pri > 0 {
 		p := int(pri)

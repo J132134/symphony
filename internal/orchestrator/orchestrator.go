@@ -15,6 +15,7 @@ import (
 
 	"symphony/internal/agent"
 	"symphony/internal/config"
+	"symphony/internal/filewatch"
 	"symphony/internal/tracker"
 	"symphony/internal/types"
 	"symphony/internal/workflow"
@@ -38,20 +39,22 @@ type Orchestrator struct {
 	// workerCancels maps issue_id → context cancel for the running worker.
 	workerCancels map[string]context.CancelFunc
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	workflowWatchDebounce time.Duration
+	stopCh                chan struct{}
+	doneCh                chan struct{}
 }
 
 // New creates an Orchestrator. Call Run to start it.
 func New(workflowPath string, port int, name string, globalLimiter *SessionLimiter) *Orchestrator {
 	return &Orchestrator{
-		workflowPath:  workflowPath,
-		name:          name,
-		globalLimiter: globalLimiter,
-		state:         NewState(),
-		workerCancels: make(map[string]context.CancelFunc),
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
+		workflowPath:          workflowPath,
+		name:                  name,
+		globalLimiter:         globalLimiter,
+		state:                 NewState(),
+		workerCancels:         make(map[string]context.CancelFunc),
+		workflowWatchDebounce: filewatch.DefaultDebounce,
+		stopCh:                make(chan struct{}),
+		doneCh:                make(chan struct{}),
 	}
 }
 
@@ -877,35 +880,19 @@ func (o *Orchestrator) startupCleanup(ctx context.Context) {
 }
 
 func (o *Orchestrator) watchWorkflow(ctx context.Context) {
-	path := o.workflowPath
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-	lastMod := info.ModTime()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-o.stopCh:
-			return
-		case <-ticker.C:
-			info, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(lastMod) {
-				lastMod = info.ModTime()
-				if err := o.reloadWorkflow(); err != nil {
-					slog.Error("orchestrator.workflow_reload_failed", "error", err)
-				} else {
-					slog.Info("orchestrator.workflow_reloaded", "project", o.name)
-				}
-			}
-		}
+	if err := filewatch.Run(ctx, o.stopCh, o.workflowPath, o.workflowWatchDebounce, filewatch.Callbacks{
+		Reload: o.reloadWorkflow,
+		OnReloaded: func() {
+			slog.Info("orchestrator.workflow_reloaded", "project", o.name, "path", o.workflowPath)
+		},
+		OnReloadError: func(err error) {
+			slog.Error("orchestrator.workflow_reload_failed", "project", o.name, "path", o.workflowPath, "error", err)
+		},
+		OnWatchError: func(err error) {
+			slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
+		},
+	}); err != nil && ctx.Err() == nil && !o.isStopping() {
+		slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
 	}
 }
 
