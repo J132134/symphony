@@ -15,11 +15,14 @@ import (
 
 	"symphony/internal/agent"
 	"symphony/internal/config"
+	"symphony/internal/filewatch"
 	"symphony/internal/tracker"
 	"symphony/internal/types"
 	"symphony/internal/workflow"
 	"symphony/internal/workspace"
 )
+
+const humanReviewState = "human review"
 
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
@@ -38,20 +41,22 @@ type Orchestrator struct {
 	// workerCancels maps issue_id → context cancel for the running worker.
 	workerCancels map[string]context.CancelFunc
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	workflowWatchDebounce time.Duration
+	stopCh                chan struct{}
+	doneCh                chan struct{}
 }
 
 // New creates an Orchestrator. Call Run to start it.
 func New(workflowPath string, port int, name string, globalLimiter *SessionLimiter) *Orchestrator {
 	return &Orchestrator{
-		workflowPath:  workflowPath,
-		name:          name,
-		globalLimiter: globalLimiter,
-		state:         NewState(),
-		workerCancels: make(map[string]context.CancelFunc),
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
+		workflowPath:          workflowPath,
+		name:                  name,
+		globalLimiter:         globalLimiter,
+		state:                 NewState(),
+		workerCancels:         make(map[string]context.CancelFunc),
+		workflowWatchDebounce: filewatch.DefaultDebounce,
+		stopCh:                make(chan struct{}),
+		doneCh:                make(chan struct{}),
 	}
 }
 
@@ -258,13 +263,13 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 
 		o.state.mu.Lock()
-		slots := o.state.MaxConcurrentAgents - len(o.state.Running)
+		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
 		o.state.mu.Unlock()
 
 		if slots <= 0 {
 			break
 		}
-		if !o.hasGlobalCapacity() {
+		if !o.hasGlobalCapacityForState(issue.State) {
 			break
 		}
 		if o.canDispatch(cfg, issue) {
@@ -301,7 +306,7 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if _, ok := o.state.RetryQueue[issue.ID]; ok {
 		return false
 	}
-	if len(o.state.Running) >= o.state.MaxConcurrentAgents {
+	if o.runningConcurrentCountLocked() >= o.state.MaxConcurrentAgents {
 		return false
 	}
 
@@ -355,7 +360,8 @@ func sortCandidates(issues []*types.Issue) {
 // -- dispatch --
 
 func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
-	if o.globalLimiter != nil && !o.globalLimiter.TryAcquire() {
+	globalSlotHeld := countsTowardConcurrency(issue.State) && o.globalLimiter != nil
+	if globalSlotHeld && !o.globalLimiter.TryAcquire() {
 		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
 		return false
 	}
@@ -370,7 +376,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		StartedAt:      time.Now().UTC(),
 		Status:         StatusPreparingWorkspace,
 		IssueState:     issue.State,
-		GlobalSlotHeld: o.globalLimiter != nil,
+		GlobalSlotHeld: globalSlotHeld,
 		cancel:         cancel,
 	}
 
@@ -514,15 +520,15 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
 	agentCfg := &agent.Config{
-		Command:           cfg.CodexCommand(),
-		ApprovalPolicy:    cfg.ApprovalPolicy(),
-		MaxTurns:          cfg.MaxTurns(),
-		TurnTimeoutMs:     cfg.TurnTimeoutMs(),
+		Command:              cfg.CodexCommand(),
+		ApprovalPolicy:       cfg.ApprovalPolicy(),
+		MaxTurns:             cfg.MaxTurns(),
+		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
 		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
 		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
 		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy: cfg.TurnSandboxPolicy(),
-		ThreadSandbox:     cfg.ThreadSandbox(),
+		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
+		ThreadSandbox:        cfg.ThreadSandbox(),
 	}
 
 	// 5. Handshake.
@@ -844,10 +850,10 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	o.state.mu.Lock()
-	slots := o.state.MaxConcurrentAgents - len(o.state.Running)
+	slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
 	o.state.mu.Unlock()
 
-	if slots <= 0 || !o.hasGlobalCapacity() {
+	if slots <= 0 || !o.hasGlobalCapacityForState(issue.State) {
 		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
 		return
 	}
@@ -913,35 +919,19 @@ func (o *Orchestrator) startupCleanup(ctx context.Context) {
 }
 
 func (o *Orchestrator) watchWorkflow(ctx context.Context) {
-	path := o.workflowPath
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-	lastMod := info.ModTime()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-o.stopCh:
-			return
-		case <-ticker.C:
-			info, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(lastMod) {
-				lastMod = info.ModTime()
-				if err := o.reloadWorkflow(); err != nil {
-					slog.Error("orchestrator.workflow_reload_failed", "error", err)
-				} else {
-					slog.Info("orchestrator.workflow_reloaded", "project", o.name)
-				}
-			}
-		}
+	if err := filewatch.Run(ctx, o.stopCh, o.workflowPath, o.workflowWatchDebounce, filewatch.Callbacks{
+		Reload: o.reloadWorkflow,
+		OnReloaded: func() {
+			slog.Info("orchestrator.workflow_reloaded", "project", o.name, "path", o.workflowPath)
+		},
+		OnReloadError: func(err error) {
+			slog.Error("orchestrator.workflow_reload_failed", "project", o.name, "path", o.workflowPath, "error", err)
+		},
+		OnWatchError: func(err error) {
+			slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
+		},
+	}); err != nil && ctx.Err() == nil && !o.isStopping() {
+		slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
 	}
 }
 
@@ -969,6 +959,27 @@ func normStates(states []string) map[string]bool {
 		m[config.NormalizeState(s)] = true
 	}
 	return m
+}
+
+func (o *Orchestrator) runningConcurrentCountLocked() int {
+	count := 0
+	for _, attempt := range o.state.Running {
+		if countsTowardConcurrency(attempt.IssueState) {
+			count++
+		}
+	}
+	return count
+}
+
+func countsTowardConcurrency(state string) bool {
+	return config.NormalizeState(state) != humanReviewState
+}
+
+func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {
+	if !countsTowardConcurrency(state) {
+		return true
+	}
+	return o.hasGlobalCapacity()
 }
 
 func isCtxErr(err error) bool {

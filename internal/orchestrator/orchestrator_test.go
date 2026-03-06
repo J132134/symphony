@@ -568,3 +568,41 @@ func asString(v any) string {
 	s, _ := v.(string)
 	return s
 }
+
+func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
+	t.Helper()
+	content := []byte(
+		"---\n" +
+			"tracker:\n" +
+			"  api_key: test-key\n" +
+			"  project_slug: test-project\n" +
+			"polling:\n" +
+			"  interval_ms: " + itoa(intervalMs) + "\n" +
+			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
+			"agent:\n" +
+			"  max_concurrent_agents: 4\n" +
+			"workspace:\n" +
+			"  root: /tmp/symphony\n" +
+			"---\n" +
+			"# Workflow\n",
+	)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+}
+
+func waitForOrchestrator(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func itoa(v int) string {
+	return fmt.Sprintf("%d", v)
+}
