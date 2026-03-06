@@ -85,6 +85,42 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
+func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	writeWorkflowFile(t, workflowPath, 1000, 2000)
+
+	o := New(workflowPath, 0, "alpha", nil)
+	o.workflowWatchDebounce = 20 * time.Millisecond
+	if err := o.reloadWorkflow(); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.watchWorkflow(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	writeWorkflowFile(t, workflowPath, 1500, 2500)
+
+	waitForOrchestrator(t, func() bool {
+		o.state.mu.Lock()
+		defer o.state.mu.Unlock()
+		return o.state.PollIntervalMs == 1500 &&
+			o.state.PollIntervalIdleMs == 2500 &&
+			o.state.MaxConcurrentAgents == 4
+	})
+}
+
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	t.Parallel()
 
@@ -407,4 +443,42 @@ func stopRetryTimer(t *testing.T, o *Orchestrator, issueID string) {
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
+	t.Helper()
+	content := []byte(
+		"---\n" +
+			"tracker:\n" +
+			"  api_key: test-key\n" +
+			"  project_slug: test-project\n" +
+			"polling:\n" +
+			"  interval_ms: " + itoa(intervalMs) + "\n" +
+			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
+			"agent:\n" +
+			"  max_concurrent_agents: 4\n" +
+			"workspace:\n" +
+			"  root: /tmp/symphony\n" +
+			"---\n" +
+			"# Workflow\n",
+	)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+}
+
+func waitForOrchestrator(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
+func itoa(v int) string {
+	return fmt.Sprintf("%d", v)
 }

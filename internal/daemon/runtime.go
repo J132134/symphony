@@ -2,50 +2,18 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"symphony/internal/config"
+	"symphony/internal/filewatch"
 	"symphony/internal/status"
 )
 
-const defaultConfigWatchInterval = 5 * time.Second
-
-type fileStamp struct {
-	exists  bool
-	modTime time.Time
-	size    int64
-}
-
-func (s fileStamp) changed(next fileStamp) bool {
-	if s.exists != next.exists || s.size != next.size {
-		return true
-	}
-	if !s.exists {
-		return false
-	}
-	return !s.modTime.Equal(next.modTime)
-}
-
-func readFileStamp(path string) (fileStamp, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fileStamp{}, nil
-		}
-		return fileStamp{}, err
-	}
-	return fileStamp{
-		exists:  true,
-		modTime: info.ModTime(),
-		size:    info.Size(),
-	}, nil
-}
+const defaultConfigWatchDebounce = filewatch.DefaultDebounce
 
 type managedRuntime struct {
 	cfg      *config.DaemonConfig
@@ -69,7 +37,7 @@ type configApplier interface {
 // Runtime supervises the daemon app and hot-reloads it when config.yaml changes.
 type Runtime struct {
 	configPath    string
-	watchInterval time.Duration
+	watchDebounce time.Duration
 
 	loadConfig   func(string) (*config.DaemonConfig, error)
 	startRuntime func(context.Context, *config.DaemonConfig) (*managedRuntime, error)
@@ -81,7 +49,7 @@ type Runtime struct {
 func NewRuntime(configPath string) *Runtime {
 	return &Runtime{
 		configPath:    configPath,
-		watchInterval: defaultConfigWatchInterval,
+		watchDebounce: defaultConfigWatchDebounce,
 		loadConfig:    config.LoadDaemonConfig,
 		startRuntime:  startManagedRuntime,
 	}
@@ -97,8 +65,8 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 	if r.configPath == "" {
 		return fmt.Errorf("daemon config path is required")
 	}
-	if r.watchInterval <= 0 {
-		r.watchInterval = defaultConfigWatchInterval
+	if r.watchDebounce <= 0 {
+		r.watchDebounce = defaultConfigWatchDebounce
 	}
 
 	if err := r.swap(ctx, initialCfg); err != nil {
@@ -106,56 +74,34 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 	}
 	defer r.stopCurrent()
 
-	lastSeen, err := readFileStamp(r.configPath)
-	if err != nil {
-		return fmt.Errorf("stat daemon config: %w", err)
-	}
-
-	ticker := time.NewTicker(r.watchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			next, err := readFileStamp(r.configPath)
-			if err != nil {
-				slog.Error("daemon.config_watch_failed", "path", r.configPath, "error", err)
-				continue
-			}
-			if !lastSeen.changed(next) {
-				continue
-			}
-			lastSeen = next
-
-			if !next.exists {
-				slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", "config file not found")
-				continue
-			}
-
+	return filewatch.Run(ctx, nil, r.configPath, r.watchDebounce, filewatch.Callbacks{
+		Reload: func() error {
 			cfg, err := r.loadConfig(r.configPath)
 			if err != nil {
-				slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", err)
-				continue
+				return err
 			}
 			if errs := cfg.Validate(); len(errs) > 0 {
-				slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", strings.Join(errs, "; "))
-				continue
+				return fmt.Errorf(strings.Join(errs, "; "))
 			}
 
 			slog.Info("daemon.config_reloading", "path", r.configPath, "projects", projectNames(cfg))
 			if r.reloadProjects(cfg) {
 				slog.Info("daemon.config_reloaded", "path", r.configPath, "projects", projectNames(cfg), "mode", "incremental")
-				continue
+				return nil
 			}
 			if err := r.swap(ctx, cfg); err != nil {
-				slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", err)
-				continue
+				return err
 			}
 			slog.Info("daemon.config_reloaded", "path", r.configPath, "projects", projectNames(cfg), "mode", "full_swap")
-		}
-	}
+			return nil
+		},
+		OnReloadError: func(err error) {
+			slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", err)
+		},
+		OnWatchError: func(err error) {
+			slog.Error("daemon.config_watch_failed", "path", r.configPath, "error", err)
+		},
+	})
 }
 
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {

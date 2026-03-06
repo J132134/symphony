@@ -42,7 +42,7 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 
 	runtime := &Runtime{
 		configPath:    configPath,
-		watchInterval: 10 * time.Millisecond,
+		watchDebounce: 10 * time.Millisecond,
 		loadConfig: func(path string) (*config.DaemonConfig, error) {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -157,7 +157,7 @@ func TestRuntimeAppliesProjectOnlyReloadIncrementally(t *testing.T) {
 
 	runtime := &Runtime{
 		configPath:    configPath,
-		watchInterval: 10 * time.Millisecond,
+		watchDebounce: 10 * time.Millisecond,
 		loadConfig: func(path string) (*config.DaemonConfig, error) {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -237,45 +237,8 @@ func TestRuntimeAppliesProjectOnlyReloadIncrementally(t *testing.T) {
 	}
 }
 
-func TestReadFileStampDetectsChanges(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-
-	stamp1, err := readFileStamp(path)
-	if err != nil {
-		t.Fatalf("read missing stamp: %v", err)
-	}
-	if stamp1.exists {
-		t.Fatal("missing file should report exists=false")
-	}
-
-	writeConfigToken(t, path, "alpha")
-	stamp2, err := readFileStamp(path)
-	if err != nil {
-		t.Fatalf("read existing stamp: %v", err)
-	}
-	if !stamp1.changed(stamp2) {
-		t.Fatal("expected create to change file stamp")
-	}
-	if stamp2.changed(stamp2) {
-		t.Fatal("same file stamp should not report change")
-	}
-
-	writeConfigToken(t, path, "beta!!")
-	stamp3, err := readFileStamp(path)
-	if err != nil {
-		t.Fatalf("read updated stamp: %v", err)
-	}
-	if !stamp2.changed(stamp3) {
-		t.Fatal("expected content update to change file stamp")
-	}
-}
-
 func writeConfigToken(t *testing.T, path, token string) {
 	t.Helper()
-	time.Sleep(20 * time.Millisecond)
 	if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
