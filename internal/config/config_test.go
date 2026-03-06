@@ -41,6 +41,12 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 		"agent": map[string]any{
 			"max_attempts": 5,
 		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
 	})
 
 	if cfg.TrackerPostComments() {
@@ -57,6 +63,12 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 	}
 	if got := cfg.MaxAttempts(); got != 5 {
 		t.Fatalf("MaxAttempts = %d, want 5", got)
+	}
+	if got := cfg.CodexCommandForState("Human Review"); got != "claude" {
+		t.Fatalf("CodexCommandForState(Human Review) = %q, want claude", got)
+	}
+	if got := cfg.CodexCommandForState("In Progress"); got != "codex app-server" {
+		t.Fatalf("CodexCommandForState(In Progress) = %q, want codex app-server", got)
 	}
 }
 
@@ -144,7 +156,6 @@ func TestSymphonyConfigValidateRejectsUncreatableWorkspaceRoot(t *testing.T) {
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "workspace.root")
 }
-
 
 func requireErrorContaining(t *testing.T, errs []string, want string) {
 	t.Helper()

@@ -172,6 +172,26 @@ func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
 	}
 }
 
+func TestBuildAgentConfigUsesStateSpecificCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.New(map[string]any{
+		"codex": map[string]any{
+			"command": "codex app-server",
+			"state_commands": map[string]any{
+				"Human Review": "claude",
+			},
+		},
+	})
+
+	if got := buildAgentConfig(cfg, "Human Review").Command; got != "claude" {
+		t.Fatalf("buildAgentConfig(Human Review).Command = %q, want claude", got)
+	}
+	if got := buildAgentConfig(cfg, "In Progress").Command; got != "codex app-server" {
+		t.Fatalf("buildAgentConfig(In Progress).Command = %q, want codex app-server", got)
+	}
+}
+
 func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
 	t.Parallel()
 

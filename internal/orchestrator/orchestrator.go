@@ -519,17 +519,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
-	agentCfg := &agent.Config{
-		Command:              cfg.CodexCommand(),
-		ApprovalPolicy:       cfg.ApprovalPolicy(),
-		MaxTurns:             cfg.MaxTurns(),
-		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
-		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
-		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
-		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
-		ThreadSandbox:        cfg.ThreadSandbox(),
-	}
+	agentCfg := buildAgentConfig(cfg, issue.State)
 
 	// 5. Handshake.
 	attempt.Status = StatusInitializingSession
@@ -977,6 +967,20 @@ func (o *Orchestrator) runningConcurrentCountLocked() int {
 
 func countsTowardConcurrency(state string) bool {
 	return config.NormalizeState(state) != humanReviewState
+}
+
+func buildAgentConfig(cfg *config.SymphonyConfig, issueState string) *agent.Config {
+	return &agent.Config{
+		Command:              cfg.CodexCommandForState(issueState),
+		ApprovalPolicy:       cfg.ApprovalPolicy(),
+		MaxTurns:             cfg.MaxTurns(),
+		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
+		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
+		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
+		StallTimeoutMs:       cfg.StallTimeoutMs(),
+		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
+		ThreadSandbox:        cfg.ThreadSandbox(),
+	}
 }
 
 func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {
