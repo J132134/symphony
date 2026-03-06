@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Symphony 오케스트레이터 데몬 launchd 에이전트.
+  멀티 프로젝트 모드로 Linear 이슈를 폴링하고 Codex 에이전트를 디스패치한다.
+
+  설치:
+    cp scripts/com.symphony.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.symphony.daemon.plist
+
+  중지 (재시작 없이):
+    launchctl stop com.symphony.daemon
+
+  제거:
+    launchctl unload ~/Library/LaunchAgents/com.symphony.daemon.plist
+
+  exit(0) = 정상 종료 → launchd가 재시작하지 않음
+  exit(42) = 자동 업데이트 → launchd가 재시작함 (KeepAlive SuccessfulExit: false)
+  crash  = 자동 복구 (ThrottleInterval 10s)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.symphony.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/aaron.hj/.local/bin/uv</string>
+        <string>run</string>
+        <string>symphony</string>
+        <string>daemon</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/aaron.hj/Projects/symphony</string>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/aaron.hj/Projects/symphony/data/symphony.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aaron.hj/Projects/symphony/data/symphony.stderr.log</string>
+</dict>
+</plist>
