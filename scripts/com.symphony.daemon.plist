@@ -30,6 +30,12 @@
     <key>Label</key>
     <string>com.symphony.daemon</string>
 
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LINEAR_API_KEY</key>
+        <string></string>
+    </dict>
+
     <key>ProgramArguments</key>
     <array>
         <string>/Users/aaron.hj/.local/bin/symphony</string>
