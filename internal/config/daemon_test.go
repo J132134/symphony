@@ -3,6 +3,7 @@ package config
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -277,6 +278,47 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 	requireErrorContaining(t, errs, "git repository")
 	requireErrorContaining(t, errs, "status_server.port")
 	requireErrorContaining(t, errs, "already in use")
+}
+
+func TestDaemonConfigValidateRejectsSubdirectoryInsideGitRepoForAutoUpdate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	repoDir := filepath.Join(dir, "repo")
+	if err := os.Mkdir(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo dir: %v", err)
+	}
+	if out, err := exec.Command("git", "init", repoDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	nestedDir := filepath.Join(repoDir, "nested")
+	if err := os.Mkdir(nestedDir, 0o755); err != nil {
+		t.Fatalf("mkdir nested dir: %v", err)
+	}
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{
+			Name:     "alpha",
+			Workflow: workflowPath,
+		}},
+		AutoUpdate: AutoUpdateConfig{
+			Enabled: true,
+			RepoDir: nestedDir,
+		},
+		StatusServer: StatusServerConfig{
+			Enabled: false,
+		},
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "auto_update.repo_dir")
+	requireErrorContaining(t, errs, "git repository")
 }
 
 func TestDaemonConfigValidateRejectsUnreadableWorkflowAndPortRange(t *testing.T) {
