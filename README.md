@@ -161,16 +161,13 @@ codex:
   command: claude
 ```
 
-## HTTP 대시보드
+## HTTP 상태 API
 
 `--port` 옵션 또는 `server.port` 설정 시 활성화된다.
 
 | 엔드포인트 | 설명 |
 |---|---|
-| `GET /` | 실시간 HTML 대시보드 (10초 자동 갱신) |
 | `GET /api/v1/summary` | 메뉴바 UI용 데몬 요약 상태(JSON) |
-| `GET /api/v1/state` | 현재 실행 상태 JSON |
-| `GET /api/v1/{issue_identifier}` | 특정 이슈 상세 정보 |
 | `POST /api/v1/refresh` | 즉시 폴링+조정 트리거 |
 
 `symphony menubar`는 macOS 메뉴바에서 데몬 상태를 보여준다. 정상 실행 중에는 회전하는 원형 인디케이터를, 에러가 있으면 경고 아이콘을, status server 또는 tracker 연결이 끊기면 일시정지 아이콘을 표시한다. 마우스 오버 툴팁과 메뉴 항목에서 현재 git hash, 실행 중인 서브프로세스 수, 이슈 ID 목록을 확인할 수 있다.

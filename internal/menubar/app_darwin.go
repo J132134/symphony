@@ -4,7 +4,6 @@ package menubar
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +30,6 @@ type app struct {
 	countItem   *systray.MenuItem
 	issuesItem  *systray.MenuItem
 	refreshItem *systray.MenuItem
-	openItem    *systray.MenuItem
 	quitItem    *systray.MenuItem
 }
 
@@ -69,7 +67,6 @@ func (a *app) onReady() {
 	a.issuesItem.Disable()
 	systray.AddSeparator()
 	a.refreshItem = systray.AddMenuItem("Refresh now", "")
-	a.openItem = systray.AddMenuItem("Open dashboard", "")
 	a.quitItem = systray.AddMenuItem("Quit", "")
 
 	go a.refreshLoop()
@@ -123,8 +120,6 @@ func (a *app) handleMenuClicks() {
 		case <-a.refreshItem.ClickedCh:
 			_ = a.client.Refresh()
 			a.refreshOnce()
-		case <-a.openItem.ClickedCh:
-			_ = exec.Command("open", a.client.DashboardURL()).Start()
 		case <-a.quitItem.ClickedCh:
 			systray.Quit()
 			return
