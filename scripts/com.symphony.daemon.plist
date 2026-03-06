@@ -22,7 +22,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>LINEAR_API_KEY</key>
-        <string></string>
+        <string>__LINEAR_API_KEY__</string>
         <key>PATH</key>
         <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
