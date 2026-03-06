@@ -51,8 +51,8 @@ func main() {
 
 func cmdRun(args []string) {
 	opts := parseFlags(args, map[string]string{
-		"--workflow": "WORKFLOW.md",
-		"--port":     "",
+		"--workflow":  "WORKFLOW.md",
+		"--port":      "",
 		"--log-level": "INFO",
 	})
 
@@ -157,26 +157,11 @@ func cmdDaemon(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	mgr := daemon.NewManager(cfg)
-
-	if cfg.StatusServer.Enabled {
-		srv := status.New(mgr, cfg.StatusServer.Port)
-		go func() {
-			if err := srv.Run(ctx); err != nil {
-				slog.Error("status_server.error", "error", err)
-			}
-		}()
+	runtime := daemon.NewRuntime(cfg.ConfigPath)
+	if err := runtime.Run(ctx, cfg); err != nil {
+		slog.Error("daemon.runtime_error", "error", err)
+		os.Exit(1)
 	}
-
-	if cfg.AutoUpdate.Enabled {
-		stopUpdate := make(chan struct{})
-		go func() {
-			daemon.RunUpdateLoop(mgr, cfg.AutoUpdate.IntervalMinutes, cfg.AutoUpdate.RepoDir, stopUpdate)
-		}()
-		defer close(stopUpdate)
-	}
-
-	mgr.Run(ctx)
 }
 
 // -- helpers --

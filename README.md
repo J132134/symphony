@@ -99,6 +99,8 @@ symphony daemon
 symphony daemon --config /path/to/config.yaml
 ```
 
+`symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록, 상태 서버, auto update 루프를 같은 프로세스 안에서 재기동하고, 유효하지 않으면 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
+
 ## 에이전트 선택
 
 `codex.command` 첫 번째 단어가 `claude` 또는 `claude-code`이면 Claude Code가 사용되고, 그 외에는 Codex가 사용된다.
