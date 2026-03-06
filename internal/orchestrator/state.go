@@ -10,6 +10,7 @@ import (
 )
 
 type RunStatus string
+type RetryKind string
 
 const (
 	StatusPreparingWorkspace  RunStatus = "preparing_workspace"
@@ -23,6 +24,11 @@ const (
 	StatusTimedOut            RunStatus = "timed_out"
 	StatusStalled             RunStatus = "stalled"
 	StatusCanceled            RunStatus = "canceled_by_reconciliation"
+)
+
+const (
+	RetryKindFailure  RetryKind = "failure"
+	RetryKindCapacity RetryKind = "capacity"
 )
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
@@ -65,8 +71,10 @@ type RunAttempt struct {
 type RetryEntry struct {
 	IssueID      string
 	Identifier   string
+	Kind         RetryKind
 	Attempt      int
 	FailureCount int
+	DeferCount   int
 	DueAt        time.Time
 	Error        string
 	timer        *time.Timer
