@@ -49,7 +49,6 @@ agent:
 codex:
   command: codex app-server
   state_commands:
-    Human Review: claude
   approval_policy: never
   thread_sandbox: workspace-write
   turn_timeout_ms: 3600000
