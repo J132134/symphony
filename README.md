@@ -66,6 +66,7 @@ workspace:
 agent:
   max_concurrent_agents: 3
   max_turns: 10
+  max_retry_attempts: 5
 
 codex:
   command: codex app-server
@@ -215,6 +216,7 @@ hooks:
 | `workspace.root` | `~/.symphony/workspaces` |
 | `agent.max_concurrent_agents` | `10` |
 | `agent.max_turns` | `3` |
+| `agent.max_retry_attempts` | `0` (disabled) |
 | `agent.max_retry_backoff_ms` | `300000` (5분) |
 | `codex.command` | `codex app-server` |
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
@@ -264,6 +266,8 @@ after_run hook 실행
 | 비정상 종료 attempt 2 | 20초 |
 | 비정상 종료 attempt 3 | 40초 |
 | 비정상 종료 attempt 4+ | 최대 5분 |
+
+`agent.max_retry_attempts`가 0보다 크면 비정상 종료 연속 실패 횟수가 값을 초과하는 시점에 재시도를 중단하고 Linear 이슈에 코멘트를 남긴다. 이후 이슈 state가 바뀌거나 이슈가 수정되면 다시 dispatch될 수 있다.
 
 ### Reconciliation (매 폴링 tick마다)
 

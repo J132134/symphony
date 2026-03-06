@@ -10,6 +10,12 @@ type BlockerRef struct {
 	State      string
 }
 
+type Comment struct {
+	Body      string
+	CreatedAt *time.Time
+	UpdatedAt *time.Time
+}
+
 type Issue struct {
 	ID          string
 	Identifier  string
@@ -21,6 +27,7 @@ type Issue struct {
 	URL         string
 	Labels      []string
 	BlockedBy   []BlockerRef
+	LastComment *Comment
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }

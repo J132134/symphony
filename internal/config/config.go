@@ -199,6 +199,9 @@ func (c *SymphonyConfig) MaxConcurrentAgents() int {
 func (c *SymphonyConfig) MaxTurns() int {
 	return c.getInt("agent.max_turns", 3)
 }
+func (c *SymphonyConfig) MaxRetryAttempts() int {
+	return c.getInt("agent.max_retry_attempts", 0)
+}
 func (c *SymphonyConfig) MaxRetryBackoffMs() int {
 	return c.getInt("agent.max_retry_backoff_ms", 300_000)
 }
@@ -282,6 +285,9 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	if c.CodexCommand() == "" {
 		errs = append(errs, "codex.command must be non-empty")
+	}
+	if c.MaxRetryAttempts() < 0 {
+		errs = append(errs, "agent.max_retry_attempts must be >= 0")
 	}
 	return errs
 }
