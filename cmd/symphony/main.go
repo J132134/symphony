@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/daemon"
+	"symphony/internal/menubar"
 	"symphony/internal/orchestrator"
 	"symphony/internal/status"
 	"symphony/internal/workflow"
@@ -38,6 +40,8 @@ func main() {
 		cmdValidate(args[1:])
 	case "daemon":
 		cmdDaemon(args[1:])
+	case "menubar":
+		cmdMenubar(args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -164,6 +168,27 @@ func cmdDaemon(args []string) {
 	}
 }
 
+// -- menubar --
+
+func cmdMenubar(args []string) {
+	opts := parseFlags(args, map[string]string{
+		"--url":  "http://127.0.0.1:7777",
+		"--poll": "5s",
+	})
+
+	poll, err := time.ParseDuration(opts["--poll"])
+	if err != nil || poll <= 0 {
+		poll = 5 * time.Second
+	}
+
+	if err := menubar.Run(menubar.Options{
+		BaseURL:      opts["--url"],
+		PollInterval: poll,
+	}); err != nil {
+		fatalf("menubar: %v", err)
+	}
+}
+
 // -- helpers --
 
 func parseFlags(args []string, defaults map[string]string) map[string]string {
@@ -215,6 +240,7 @@ Usage:
   symphony run      [--workflow WORKFLOW.md] [--port PORT] [--log-level LEVEL]
   symphony validate [--workflow WORKFLOW.md]
   symphony daemon   [--config CONFIG_PATH]  [--log-level LEVEL]
+  symphony menubar  [--url http://127.0.0.1:7777] [--poll 5s]
   symphony help
 `)
 }
