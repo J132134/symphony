@@ -17,6 +17,7 @@ install: build
 install-launchagents:
 	@mkdir -p $(HOME)/Library/LaunchAgents data
 	sed -e 's|__HOME__|$(HOME)|g' -e 's|__REPO_DIR__|$(CURDIR)|g' \
+		-e 's|__LINEAR_API_KEY__|$(LINEAR_API_KEY)|g' \
 		scripts/com.symphony.daemon.plist > $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist
 	sed -e 's|__HOME__|$(HOME)|g' -e 's|__REPO_DIR__|$(CURDIR)|g' \
 		scripts/com.symphony.menubar.plist > $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist
