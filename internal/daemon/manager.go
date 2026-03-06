@@ -3,35 +3,77 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/orchestrator"
 	"symphony/internal/status"
-	"symphony/internal/version"
+	"symphony/internal/tracker"
+	"symphony/internal/workflow"
 )
+
+type managedOrchestrator interface {
+	Run(context.Context) error
+	BeginDrain()
+	DrainAndStop()
+	IsIdle() bool
+	GetState() *orchestrator.State
+	TriggerRefresh(context.Context)
+}
+
+type runnerHealthState string
+
+const (
+	runnerHealthHealthy     runnerHealthState = "healthy"
+	runnerHealthProbing     runnerHealthState = "probing"
+	runnerHealthQuarantined runnerHealthState = "quarantined"
+)
+
+type projectRunnerSnapshot struct {
+	State         *orchestrator.State
+	LastErr       string
+	Health        string
+	CrashCount    int
+	QuarantinedAt string
+}
 
 // projectRunner manages the lifecycle of one Orchestrator with auto-restart.
 type projectRunner struct {
-	proj    config.ProjectConfig
-	limiter *orchestrator.SessionLimiter
+	proj      config.ProjectConfig
+	limiter   *orchestrator.SessionLimiter
+	healthCfg config.ProjectHealthConfig
+	now       func() time.Time
+	after     func(time.Duration) <-chan time.Time
+	newOrch   func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator
+	probe     func(context.Context, config.ProjectConfig) error
 
-	mu       sync.Mutex
-	orch     *orchestrator.Orchestrator
-	cancel   context.CancelFunc
-	done     chan struct{}
-	stopping bool
-	draining bool
-	lastErr  string
+	mu            sync.Mutex
+	orch          managedOrchestrator
+	cancel        context.CancelFunc
+	done          chan struct{}
+	stopping      bool
+	draining      bool
+	lastErr       string
+	healthState   runnerHealthState
+	crashTimes    []time.Time
+	quarantinedAt *time.Time
 }
 
-func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter) *projectRunner {
+func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter, healthCfg config.ProjectHealthConfig) *projectRunner {
 	return &projectRunner{
-		proj:    proj,
-		limiter: limiter,
+		proj:        proj,
+		limiter:     limiter,
+		healthCfg:   healthCfg,
+		now:         time.Now,
+		after:       time.After,
+		newOrch:     newManagedOrchestrator,
+		probe:       probeProjectHealth,
+		healthState: runnerHealthHealthy,
 	}
 }
 
@@ -58,7 +100,11 @@ func (pr *projectRunner) run(ctx context.Context) {
 			return
 		}
 
-		o := orchestrator.New(pr.proj.Workflow, 0, pr.proj.Name, pr.limiter)
+		if err := pr.waitUntilHealthy(ctx); err != nil {
+			return
+		}
+
+		o := pr.newOrch(pr.proj, pr.limiter)
 
 		pr.mu.Lock()
 		pr.orch = o
@@ -86,16 +132,33 @@ func (pr *projectRunner) run(ctx context.Context) {
 		}
 
 		if err != nil {
-			slog.Error("daemon.project_crashed", "project", pr.proj.Name, "error", err, "retry_in", backoff)
+			crashCount, quarantined := pr.recordCrash(err)
+			if quarantined {
+				slog.Error("daemon.project_quarantined",
+					"project", pr.proj.Name,
+					"error", err,
+					"crash_count", crashCount,
+					"restart_budget_count", pr.healthCfg.RestartBudgetCount,
+				)
+				backoff = 5 * time.Second
+				continue
+			}
+			slog.Error("daemon.project_crashed",
+				"project", pr.proj.Name,
+				"error", err,
+				"retry_in", backoff,
+				"crash_count", crashCount,
+			)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-pr.after(backoff):
 			}
 			if backoff < 5*time.Minute {
 				backoff *= 2
 			}
 		} else {
+			pr.markHealthy()
 			slog.Info("daemon.project_stopped", "project", pr.proj.Name)
 			backoff = 5 * time.Second
 		}
@@ -163,10 +226,161 @@ func (pr *projectRunner) snapshot() (*orchestrator.State, string) {
 	return pr.orch.GetState(), pr.lastErr
 }
 
+func (pr *projectRunner) projectSnapshot() projectRunnerSnapshot {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+
+	nowFn := pr.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	pr.trimCrashTimesLocked(nowFn().UTC())
+
+	snapshot := projectRunnerSnapshot{
+		LastErr:    pr.lastErr,
+		Health:     pr.healthStringLocked(),
+		CrashCount: len(pr.crashTimes),
+	}
+	if pr.orch != nil {
+		snapshot.State = pr.orch.GetState()
+	}
+	if pr.quarantinedAt != nil {
+		snapshot.QuarantinedAt = pr.quarantinedAt.Format(time.RFC3339)
+	}
+	return snapshot
+}
+
 func (pr *projectRunner) isStopping() bool {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	return pr.stopping
+}
+
+func (pr *projectRunner) waitUntilHealthy(ctx context.Context) error {
+	for ctx.Err() == nil {
+		pr.mu.Lock()
+		health := pr.healthState
+		pr.mu.Unlock()
+		if health != runnerHealthQuarantined && health != runnerHealthProbing {
+			return nil
+		}
+
+		pr.mu.Lock()
+		pr.healthState = runnerHealthProbing
+		pr.mu.Unlock()
+
+		if err := pr.probe(ctx, pr.proj); err == nil {
+			pr.clearQuarantine()
+			slog.Info("daemon.project_recovered", "project", pr.proj.Name)
+			return nil
+		} else {
+			pr.mu.Lock()
+			pr.healthState = runnerHealthQuarantined
+			pr.lastErr = err.Error()
+			pr.mu.Unlock()
+			slog.Warn("daemon.project_quarantine_probe_failed", "project", pr.proj.Name, "error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pr.after(time.Duration(pr.healthCfg.ProbeIntervalSeconds) * time.Second):
+		}
+	}
+	return ctx.Err()
+}
+
+func (pr *projectRunner) recordCrash(err error) (int, bool) {
+	now := pr.now().UTC()
+
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+
+	pr.trimCrashTimesLocked(now)
+	pr.crashTimes = append(pr.crashTimes, now)
+	pr.lastErr = err.Error()
+
+	if len(pr.crashTimes) >= pr.healthCfg.RestartBudgetCount {
+		pr.healthState = runnerHealthQuarantined
+		pr.quarantinedAt = &now
+		return len(pr.crashTimes), true
+	}
+
+	pr.healthState = runnerHealthHealthy
+	return len(pr.crashTimes), false
+}
+
+func (pr *projectRunner) markHealthy() {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.healthState != runnerHealthQuarantined {
+		pr.healthState = runnerHealthHealthy
+	}
+}
+
+func (pr *projectRunner) clearQuarantine() {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	pr.healthState = runnerHealthHealthy
+	pr.crashTimes = nil
+	pr.quarantinedAt = nil
+	pr.lastErr = ""
+}
+
+func (pr *projectRunner) trimCrashTimesLocked(now time.Time) {
+	if len(pr.crashTimes) == 0 {
+		return
+	}
+
+	windowMinutes := pr.healthCfg.RestartBudgetWindowMinutes
+	if windowMinutes <= 0 {
+		windowMinutes = 15
+	}
+	cutoff := now.Add(-time.Duration(windowMinutes) * time.Minute)
+	keep := pr.crashTimes[:0]
+	for _, crashAt := range pr.crashTimes {
+		if !crashAt.Before(cutoff) {
+			keep = append(keep, crashAt)
+		}
+	}
+	pr.crashTimes = keep
+}
+
+func (pr *projectRunner) healthStringLocked() string {
+	if pr.healthState == "" {
+		return string(runnerHealthHealthy)
+	}
+	return string(pr.healthState)
+}
+
+func newManagedOrchestrator(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter) managedOrchestrator {
+	return orchestrator.New(proj.Workflow, 0, proj.Name, limiter)
+}
+
+func probeProjectHealth(ctx context.Context, proj config.ProjectConfig) error {
+	wf, err := workflow.Load(proj.Workflow)
+	if err != nil {
+		return fmt.Errorf("load workflow: %w", err)
+	}
+
+	cfg := config.New(wf.Config)
+	if errs := cfg.Validate(); len(errs) > 0 {
+		return fmt.Errorf("config: %s", strings.Join(errs, "; "))
+	}
+
+	tr, err := tracker.NewLinearClient(
+		cfg.TrackerAPIKey(),
+		cfg.TrackerEndpoint(),
+		cfg.TrackerProjectSlug(),
+		cfg.ActiveStates(),
+	)
+	if err != nil {
+		return fmt.Errorf("tracker: %w", err)
+	}
+	if err := tr.Ping(ctx); err != nil {
+		return fmt.Errorf("tracker ping: %w", err)
+	}
+	return nil
 }
 
 // Manager coordinates multiple Orchestrators.
@@ -267,7 +481,7 @@ func (m *Manager) ApplyConfig(cfg *config.DaemonConfig) {
 			toStop = append(toStop, runner)
 		}
 
-		nextRunner := newProjectRunner(proj, m.limiter)
+		nextRunner := newProjectRunner(proj, m.limiter, cfg.ProjectHealth)
 		if restartRequested {
 			nextRunner.beginDrain()
 		}
@@ -338,6 +552,71 @@ func (m *Manager) GetAllStates() map[string]*orchestrator.State {
 	return result
 }
 
+func (m *Manager) GetProjects() []status.ProjectSummary {
+	runners := m.runnersSnapshot()
+	projects := make([]status.ProjectSummary, 0, len(runners))
+
+	for _, pr := range runners {
+		snapshot := pr.projectSnapshot()
+		project := status.ProjectSummary{
+			Name:             pr.proj.Name,
+			Status:           "idle",
+			Health:           snapshot.Health,
+			CrashCount:       snapshot.CrashCount,
+			QuarantinedAt:    snapshot.QuarantinedAt,
+			TrackerConnected: true,
+			LastError:        snapshot.LastErr,
+		}
+
+		if snapshot.State == nil {
+			if project.Health == "quarantined" || project.Health == "probing" {
+				project.Status = "quarantined"
+			} else if snapshot.LastErr != "" {
+				project.Status = "error"
+			}
+			projects = append(projects, project)
+			continue
+		}
+
+		st := snapshot.State
+		st.Lock()
+		project.SubprocessCount = len(st.Running)
+		project.RetryCount = len(st.RetryQueue)
+		for _, attempt := range st.Running {
+			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
+		}
+		sort.Strings(project.RunningIssueIDs)
+		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		if project.RetryCount > 0 && project.LastError == "" {
+			for _, retry := range st.RetryQueue {
+				if retry.Error != "" {
+					project.LastError = retry.Error
+					break
+				}
+			}
+		}
+		st.Unlock()
+
+		switch {
+		case project.Health == "quarantined" || project.Health == "probing":
+			project.Status = "quarantined"
+		case !project.TrackerConnected:
+			project.Status = "network_lost"
+		case project.RetryCount > 0 || project.LastError != "":
+			project.Status = "error"
+		case project.SubprocessCount > 0:
+			project.Status = "running"
+		}
+
+		projects = append(projects, project)
+	}
+
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Name < projects[j].Name
+	})
+	return projects
+}
+
 func (m *Manager) waitForIdle(ready chan struct{}) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -361,92 +640,7 @@ func (m *Manager) allIdle() bool {
 }
 
 func (m *Manager) GetSummary() status.Summary {
-	runners := m.runnersSnapshot()
-	build := version.Current()
-	summary := status.Summary{
-		Status:    "idle",
-		Version:   build.Version,
-		GitHash:   build.GitHash,
-		Dirty:     build.Dirty,
-		Projects:  make([]status.ProjectSummary, 0, len(runners)),
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	projectNames := make([]string, 0, len(runners))
-	projectMap := make(map[string]status.ProjectSummary, len(runners))
-	var hasError bool
-	var hasNetworkIssue bool
-
-	for _, pr := range runners {
-		st, lastErr := pr.snapshot()
-		project := status.ProjectSummary{
-			Name:             pr.proj.Name,
-			Status:           "idle",
-			TrackerConnected: true,
-		}
-		projectNames = append(projectNames, pr.proj.Name)
-
-		if st == nil {
-			if lastErr != "" {
-				project.Status = "error"
-				project.LastError = lastErr
-				hasError = true
-			}
-			projectMap[pr.proj.Name] = project
-			continue
-		}
-
-		st.Lock()
-		project.SubprocessCount = len(st.Running)
-		project.RetryCount = len(st.RetryQueue)
-		for _, attempt := range st.Running {
-			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
-			summary.RunningIssueIDs = append(summary.RunningIssueIDs, attempt.Identifier)
-		}
-		sort.Strings(project.RunningIssueIDs)
-		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
-		if !project.TrackerConnected {
-			project.Status = "network_lost"
-			hasNetworkIssue = true
-		} else if project.RetryCount > 0 {
-			project.Status = "error"
-			hasError = true
-			for _, retry := range st.RetryQueue {
-				if retry.Error != "" {
-					project.LastError = retry.Error
-					break
-				}
-			}
-		} else if project.SubprocessCount > 0 {
-			project.Status = "running"
-		}
-		st.Unlock()
-
-		summary.SubprocessCount += project.SubprocessCount
-		summary.RetryCount += project.RetryCount
-		projectMap[pr.proj.Name] = project
-	}
-
-	sort.Strings(projectNames)
-	for _, name := range projectNames {
-		project := projectMap[name]
-		summary.Projects = append(summary.Projects, project)
-	}
-
-	sort.Strings(summary.RunningIssueIDs)
-	summary.ProjectCount = len(summary.Projects)
-
-	switch {
-	case hasError:
-		summary.Status = "error"
-	case hasNetworkIssue:
-		summary.Status = "network_lost"
-	case summary.SubprocessCount > 0:
-		summary.Status = "running"
-	default:
-		summary.Status = "idle"
-	}
-	return summary
+	return status.BuildSummaryFromProjects(m.GetProjects())
 }
 
 func (m *Manager) runnersSnapshot() []*projectRunner {
