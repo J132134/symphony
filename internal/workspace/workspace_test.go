@@ -66,6 +66,9 @@ func TestGetTurnContextReturnsErrorWhenGitMetadataUnavailable(t *testing.T) {
 	if err := os.MkdirAll(ws.Path, 0o755); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(ws.Path, ".git"), []byte("gitdir: "+filepath.Join(ws.Path, ".missing")+"\n"), 0o644); err != nil {
+		t.Fatalf("write fake git file: %v", err)
+	}
 
 	_, err = manager.GetTurnContext(ws)
 	if err == nil {
