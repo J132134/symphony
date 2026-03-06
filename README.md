@@ -161,6 +161,17 @@ codex:
   command: claude
 ```
 
+특정 상태에만 다른 에이전트를 쓰고 싶다면 `codex.state_commands`로 override할 수 있다.
+
+```yaml
+codex:
+  command: codex app-server
+  state_commands:
+    Human Review: claude
+```
+
+위 설정은 기본 작업은 Codex로 유지하면서 `Human Review` 상태에 들어간 이슈만 Claude로 실행한다.
+
 ## HTTP 상태 API
 
 `--port` 옵션 또는 `server.port` 설정 시 활성화된다.

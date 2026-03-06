@@ -48,6 +48,8 @@ agent:
 
 codex:
   command: codex app-server
+  state_commands:
+    Human Review: claude
   approval_policy: never
   thread_sandbox: workspace-write
   turn_timeout_ms: 3600000
@@ -101,8 +103,8 @@ This is an unattended orchestration session. Never ask a human to perform follow
 
 - `Todo` → immediately transition to `In Progress` before any work
 - `In Progress` → implementation actively underway
-- `Human Review` → PR attached and validated; waiting on human approval
-- `Merging` → approved; run `gh pr merge --squash --auto` and move to `Done`
+- `Human Review` → PR attached and validated; Claude reviews the latest PR state and decides whether to rework or merge
+- `Merging` → Claude review completed; run `gh pr merge --squash --auto` and move to `Done`
 - `Rework` → reviewer requested changes; full reset from `origin/main`
 - `Done` → terminal; do nothing
 
@@ -112,7 +114,7 @@ This is an unattended orchestration session. Never ask a human to perform follow
 2. Route to matching flow:
    - `Todo` → move to `In Progress` first, then create workpad, then execute.
    - `In Progress` → find existing workpad comment and continue.
-   - `Human Review` → read the workpad's last Notes entry; if it already records a "리뷰 대기 중" (or equivalent waiting) note and there is no new review feedback or comment since that timestamp → **end the turn immediately without adding any note**. If feedback exists, move to `Rework`.
+   - `Human Review` → read the workpad's last Notes entry, inspect PR reviews/comments/checks, and let Claude decide the next state. If a previous "리뷰 대기 중" note is still current and no new review comment/check result has arrived since that timestamp → **end the turn immediately without adding any note**. If blocking feedback exists, move to `Rework`. If review is satisfied, move to `Merging`.
    - `Merging` → run `gh pr merge --squash --auto`, then move to `Done`.
    - `Rework` → full reset flow.
    - `Done` → shut down.
@@ -163,11 +165,14 @@ Workpad template:
 
 ## Step 3: Human Review / Merging
 
-- `Human Review`: do not change code; poll for feedback.
+- `Human Review`: 절대 코드를 수정하지 마시오. Claude 에이전트를 사용해서 수정 사항을 리뷰만 합니다.
   1. Read the workpad's last Notes entry.
-  2. If it already records a "리뷰 대기 중" (or equivalent waiting) note **and** no new review comment has been posted since that note's timestamp → **end the turn immediately without adding any note**.
-  3. If new feedback exists → update workpad and move to `Rework`.
-  4. If approved and moved to `Merging` → `gh pr merge --squash --auto` → move to `Done`.
+  2. 워크패드를 읽고 코덱스가 어떤 행동을 했는지 파악합니다.
+  3. PR review summary, inline comment, check 결과를 확인하고 요구사항 충족 여부를 판단합니다.
+  4. If it already records a "리뷰 대기 중" (or equivalent waiting) note **and** no new review comment or check result has appeared since that note's timestamp → **end the turn immediately without adding any note**.
+  5. 요구사항과 다르게 구현되었거나 수정된 코드에 문제가 있다면 코멘트를 남기고 `Rework`로 이동시킵니다.
+  6. 정확하게 이해했고 코덱스가 제대로 수행한 것을 확인했다면 `Merging`으로 이동합니다.
+  7. If approved and moved to `Merging` → `gh pr merge --squash --auto` → move to `Done`.
 
 ## Step 4: Rework
 
