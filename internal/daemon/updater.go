@@ -12,7 +12,6 @@ import (
 const RestartExitCode = 42
 
 // CheckForUpdates checks for a new version and restarts if updated.
-// Supports two modes: uv tool install (upgrades the binary) and git dev (pull + uv sync).
 func CheckForUpdates(mgr *Manager, repoDir string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -20,14 +19,7 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 		}
 	}()
 
-	var updated bool
-	if isUVToolInstall() {
-		updated = tryUVToolUpgrade()
-	} else {
-		updated = tryGitUpdate(repoDir)
-	}
-
-	if !updated {
+	if !tryGitUpdate(repoDir) {
 		return
 	}
 
@@ -38,47 +30,8 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 	os.Exit(RestartExitCode)
 }
 
-func isUVToolInstall() bool {
-	exe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	markers := []string{".local/share/uv/tools", ".uv/tools", "uv/tools"}
-	for _, m := range markers {
-		if strings.Contains(exe, m) {
-			return true
-		}
-	}
-	return false
-}
-
-func getBinaryMtime() time.Time {
-	path, err := exec.LookPath("symphony")
-	if err != nil {
-		return time.Time{}
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
-}
-
-func tryUVToolUpgrade() bool {
-	before := getBinaryMtime()
-	cmd := exec.Command("uv", "tool", "upgrade", "symphony")
-	out, err := cmd.CombinedOutput()
-	slog.Info("updater.uv_tool_upgrade", "output", truncateStr(string(out), 200), "error", err)
-	if err != nil {
-		return false
-	}
-	after := getBinaryMtime()
-	return !after.IsZero() && after != before
-}
-
 func getGitHash(dir string) string {
-	args := []string{"rev-parse", "HEAD"}
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", "rev-parse", "HEAD")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -90,21 +43,21 @@ func getGitHash(dir string) string {
 }
 
 func tryGitUpdate(repoDir string) bool {
+	if repoDir == "" {
+		return false
+	}
+
 	before := getGitHash(repoDir)
 
 	fetch := exec.Command("git", "fetch", "--quiet")
-	if repoDir != "" {
-		fetch.Dir = repoDir
-	}
+	fetch.Dir = repoDir
 	if out, err := fetch.CombinedOutput(); err != nil {
 		slog.Warn("updater.git_fetch_failed", "stderr", string(out))
 		return false
 	}
 
 	pull := exec.Command("git", "pull", "--ff-only")
-	if repoDir != "" {
-		pull.Dir = repoDir
-	}
+	pull.Dir = repoDir
 	if out, err := pull.CombinedOutput(); err != nil {
 		slog.Warn("updater.git_pull_failed", "stderr", string(out))
 		return false
@@ -115,17 +68,25 @@ func tryGitUpdate(repoDir string) bool {
 		return false
 	}
 
-	sync := exec.Command("uv", "sync")
-	if repoDir != "" {
-		sync.Dir = repoDir
+	exe, err := os.Executable()
+	if err != nil {
+		slog.Error("updater.executable_path_failed", "error", err)
+		return false
 	}
-	_ = sync.Run()
+	installDir := filepath.Dir(exe)
+	build := exec.Command("make", "install", "INSTALL_DIR="+installDir)
+	build.Dir = repoDir
+	out, err := build.CombinedOutput()
+	if err != nil {
+		slog.Error("updater.make_install_failed", "output", truncateStr(string(out), 500), "error", err)
+		return false
+	}
 
 	slog.Info("updater.git_updated", "before", before, "after", after)
 	return true
 }
 
-// RunUpdateLoop runs CheckForUpdates every intervalMinutes until ctx is cancelled.
+// RunUpdateLoop runs CheckForUpdates every intervalMinutes until stop is closed.
 func RunUpdateLoop(mgr *Manager, intervalMinutes int, repoDir string, stop <-chan struct{}) {
 	if intervalMinutes <= 0 {
 		intervalMinutes = 30
@@ -148,13 +109,4 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return s[:n]
-}
-
-// WorkingDir returns the directory of the current executable (for git mode).
-func WorkingDir() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return filepath.Dir(exe)
 }
