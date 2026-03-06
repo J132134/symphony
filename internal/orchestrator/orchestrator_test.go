@@ -16,6 +16,7 @@ import (
 
 	"symphony/internal/config"
 	"symphony/internal/tracker"
+	"symphony/internal/types"
 )
 
 func TestOnWorkerDoneDuringDrainDoesNotScheduleRetry(t *testing.T) {
@@ -82,6 +83,66 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 	if len(o.state.Running) != 0 {
 		t.Fatalf("no issue should be redispatched during drain, got %d running", len(o.state.Running))
+	}
+}
+
+func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Human Review"}
+	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
+	got := o.runningConcurrentCountLocked()
+	o.state.mu.Unlock()
+
+	if got != 1 {
+		t.Fatalf("runningConcurrentCountLocked() = %d, want 1", got)
+	}
+}
+
+func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 1
+	o.state.Running["issue-review"] = &RunAttempt{
+		IssueID:    "issue-review",
+		Identifier: "J-10",
+		IssueState: "Human Review",
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "In Progress", "Human Review"},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("human review issue should not consume a concurrent slot")
+	}
+}
+
+func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(1)
+	if !limiter.TryAcquire() {
+		t.Fatal("expected limiter warm-up acquire to succeed")
+	}
+
+	o := New("", 0, "alpha", limiter)
+
+	if o.hasGlobalCapacityForState("In Progress") {
+		t.Fatal("non-review issue should respect the global limiter")
+	}
+	if !o.hasGlobalCapacityForState("Human Review") {
+		t.Fatal("human review issue should bypass the global limiter")
 	}
 }
 
