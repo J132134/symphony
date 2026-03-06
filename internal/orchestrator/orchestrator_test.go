@@ -264,7 +264,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 		"**Tokens:** 42,100 (in: 28,000 / out: 14,100)",
 		"- Modified: foo.txt",
 		"- Last commit: `feat: add foo (",
-		"- PR: https://github.com/J132134/symphony/pull/new/j-29-test",
+		"- PR: https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test",
 		"**Branch:** `j-29-test`",
 	} {
 		if !strings.Contains(body, want) {
@@ -273,6 +273,12 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	}
 	if got := recorder.lastState(); got != "Human Review" {
 		t.Fatalf("state transition = %q, want Human Review", got)
+	}
+	if recorder.linkCount() != 1 {
+		t.Fatalf("link count = %d, want 1", recorder.linkCount())
+	}
+	if got := recorder.lastLink(); got != "https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test" {
+		t.Fatalf("link url = %q, want PR url", got)
 	}
 
 	o.state.mu.Lock()
@@ -343,6 +349,9 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	if got := recorder.lastState(); got != "Rework" {
 		t.Fatalf("state transition = %q, want Rework", got)
 	}
+	if recorder.linkCount() != 0 {
+		t.Fatalf("link count = %d, want 0", recorder.linkCount())
+	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -351,6 +360,45 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	}
 	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
 		t.Fatal("final failure should release the claimed issue")
+	}
+}
+
+func TestResolvePRLinkURLPrefersExistingGitHubPR(t *testing.T) {
+	t.Parallel()
+
+	summary := workspaceSummary{
+		Branch:    "j-36-test",
+		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
+		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+	}
+
+	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
+		if owner != "example" || repo != "nonexistent-symphony-test" || branch != "j-36-test" {
+			t.Fatalf("unexpected lookup args: %s %s %s", owner, repo, branch)
+		}
+		return "https://github.com/example/nonexistent-symphony-test/pull/123"
+	})
+
+	if got != "https://github.com/example/nonexistent-symphony-test/pull/123" {
+		t.Fatalf("resolvePRLinkURL() = %q", got)
+	}
+}
+
+func TestResolvePRLinkURLFallsBackToSummaryPRURL(t *testing.T) {
+	t.Parallel()
+
+	summary := workspaceSummary{
+		Branch:    "j-36-test",
+		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
+		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+	}
+
+	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
+		return ""
+	})
+
+	if got != summary.PRURL {
+		t.Fatalf("resolvePRLinkURL() = %q, want %q", got, summary.PRURL)
 	}
 }
 
@@ -444,6 +492,7 @@ func TestIsRetryAbandonComment(t *testing.T) {
 type linearRecorder struct {
 	mu         sync.Mutex
 	comments   []string
+	links      []string
 	stateNames []string
 }
 
@@ -457,6 +506,12 @@ func (r *linearRecorder) addState(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stateNames = append(r.stateNames, name)
+}
+
+func (r *linearRecorder) addLink(url string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.links = append(r.links, url)
 }
 
 func (r *linearRecorder) commentCount() int {
@@ -483,6 +538,21 @@ func (r *linearRecorder) lastState() string {
 	return r.stateNames[len(r.stateNames)-1]
 }
 
+func (r *linearRecorder) linkCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.links)
+}
+
+func (r *linearRecorder) lastLink() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.links) == 0 {
+		return ""
+	}
+	return r.links[len(r.links)-1]
+}
+
 func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	t.Helper()
 
@@ -504,6 +574,10 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 			input, _ := req.Variables["input"].(map[string]any)
 			recorder.addComment(asString(input["body"]))
 			_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+		case strings.Contains(req.Query, "attachmentCreate"):
+			input, _ := req.Variables["input"].(map[string]any)
+			recorder.addLink(asString(input["url"]))
+			_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
 		case strings.Contains(req.Query, "issue(id: $id)"):
 			_, _ = w.Write([]byte(`{"data":{"issue":{"team":{"states":{"nodes":[{"id":"state-human-review","name":"Human Review"},{"id":"state-rework","name":"Rework"}]}}}}}`))
 		case strings.Contains(req.Query, "issueUpdate"):
@@ -532,7 +606,7 @@ func initGitWorkspace(t *testing.T) string {
 	runGit(t, dir, "config", "user.name", "Test User")
 	runGit(t, dir, "config", "user.email", "test@example.com")
 	runGit(t, dir, "checkout", "-b", "j-29-test")
-	runGit(t, dir, "remote", "add", "origin", "https://github.com/J132134/symphony.git")
+	runGit(t, dir, "remote", "add", "origin", "https://github.com/example/nonexistent-symphony-test.git")
 
 	path := filepath.Join(dir, "foo.txt")
 	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {

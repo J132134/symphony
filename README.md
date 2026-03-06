@@ -195,7 +195,7 @@ hooks:
 
 ## Linear 피드백
 
-기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남긴다. 코멘트 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
+기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, `tracker.on_success_state`가 `Human Review`일 때는 PR 링크를 Add link에도 함께 등록한다. GitHub에서 브랜치 기준 기존 PR을 찾을 수 있으면 실제 PR URL을 사용하고, 찾지 못하면 설정된 `tracker.pr_url_template`(또는 기본 `pull/new/<branch>`)로 폴백한다. 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남기며, 코멘트/링크/상태 전환 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
 
 ```yaml
 tracker:
