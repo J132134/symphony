@@ -21,17 +21,40 @@ type projectRunner struct {
 
 	mu       sync.Mutex
 	orch     *orchestrator.Orchestrator
-	lastErr  string
+	cancel   context.CancelFunc
+	done     chan struct{}
+	stopping bool
 	draining bool
+	lastErr  string
+}
+
+func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter) *projectRunner {
+	return &projectRunner{
+		proj:    proj,
+		limiter: limiter,
+	}
+}
+
+func (pr *projectRunner) start(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+
+	pr.mu.Lock()
+	pr.cancel = cancel
+	pr.done = done
+	pr.stopping = false
+	pr.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		pr.run(ctx)
+	}()
 }
 
 func (pr *projectRunner) run(ctx context.Context) {
 	backoff := 5 * time.Second
 	for ctx.Err() == nil {
-		pr.mu.Lock()
-		draining := pr.draining
-		pr.mu.Unlock()
-		if draining {
+		if pr.isStopping() {
 			return
 		}
 
@@ -40,7 +63,12 @@ func (pr *projectRunner) run(ctx context.Context) {
 		pr.mu.Lock()
 		pr.orch = o
 		pr.lastErr = ""
+		draining := pr.draining
 		pr.mu.Unlock()
+
+		if draining {
+			o.BeginDrain()
+		}
 
 		slog.Info("daemon.project_starting", "project", pr.proj.Name)
 		err := o.Run(ctx)
@@ -50,15 +78,10 @@ func (pr *projectRunner) run(ctx context.Context) {
 		if err != nil && ctx.Err() == nil {
 			pr.lastErr = err.Error()
 		}
-		pr.mu.Unlock()
-
-		if ctx.Err() != nil {
-			return
-		}
-		pr.mu.Lock()
 		draining = pr.draining
 		pr.mu.Unlock()
-		if draining {
+
+		if ctx.Err() != nil || pr.isStopping() || draining {
 			return
 		}
 
@@ -91,20 +114,32 @@ func (pr *projectRunner) beginDrain() {
 
 func (pr *projectRunner) stop() {
 	pr.mu.Lock()
+	cancel := pr.cancel
 	o := pr.orch
+	done := pr.done
+	pr.stopping = true
+	pr.draining = true
+	pr.cancel = nil
+	pr.done = nil
 	pr.mu.Unlock()
+
 	if o != nil {
-		o.Stop()
+		o.DrainAndStop()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
 	}
 }
 
 func (pr *projectRunner) isIdle() bool {
 	pr.mu.Lock()
 	o := pr.orch
-	draining := pr.draining
 	pr.mu.Unlock()
 	if o == nil {
-		return draining
+		return true
 	}
 	return o.IsIdle()
 }
@@ -128,11 +163,18 @@ func (pr *projectRunner) snapshot() (*orchestrator.State, string) {
 	return pr.orch.GetState(), pr.lastErr
 }
 
+func (pr *projectRunner) isStopping() bool {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	return pr.stopping
+}
+
 // Manager coordinates multiple Orchestrators.
 type Manager struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	cfg     *config.DaemonConfig
-	runners []*projectRunner
+	runners map[string]*projectRunner
+	ctx     context.Context
 	cancel  context.CancelFunc
 	limiter *orchestrator.SessionLimiter
 
@@ -143,6 +185,7 @@ type Manager struct {
 func NewManager(cfg *config.DaemonConfig) *Manager {
 	return &Manager{
 		cfg:     cfg,
+		runners: make(map[string]*projectRunner, len(cfg.Projects)),
 		limiter: orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions()),
 	}
 }
@@ -150,44 +193,98 @@ func NewManager(cfg *config.DaemonConfig) *Manager {
 // Run starts all projects and blocks until ctx is cancelled.
 func (m *Manager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
-	m.mu.Lock()
-	m.cancel = cancel
-	m.mu.Unlock()
 	defer cancel()
 
-	runners := make([]*projectRunner, len(m.cfg.Projects))
-	for i, proj := range m.cfg.Projects {
-		pr := &projectRunner{proj: proj, limiter: m.limiter}
-		runners[i] = pr
-		go pr.run(ctx)
-	}
 	m.mu.Lock()
-	m.runners = runners
-	restartRequested := m.restartRequested
+	m.ctx = ctx
+	m.cancel = cancel
+	cfg := m.cfg
 	m.mu.Unlock()
-	if restartRequested {
-		for _, pr := range runners {
-			pr.beginDrain()
-		}
-	}
 
-	slog.Info("daemon.started", "projects", len(m.cfg.Projects), "max_total_concurrent_sessions", m.cfg.MaxTotalConcurrentSessions())
+	m.ApplyConfig(cfg)
+
+	slog.Info("daemon.started", "projects", len(cfg.Projects), "max_total_concurrent_sessions", cfg.MaxTotalConcurrentSessions())
 	<-ctx.Done()
 
 	slog.Info("daemon.shutting_down")
-	for _, pr := range runners {
+	for _, pr := range m.runnersSnapshot() {
 		pr.stop()
 	}
+
+	m.mu.Lock()
+	m.ctx = nil
+	m.cancel = nil
+	m.mu.Unlock()
 	slog.Info("daemon.stopped")
 }
 
 // Shutdown triggers a graceful stop (for auto-update).
 func (m *Manager) Shutdown() {
-	m.mu.Lock()
+	m.mu.RLock()
 	cancel := m.cancel
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+// ApplyConfig incrementally reconciles the managed runners with the latest config.
+func (m *Manager) ApplyConfig(cfg *config.DaemonConfig) {
+	if cfg == nil {
+		return
+	}
+
+	nextProjects := make(map[string]config.ProjectConfig, len(cfg.Projects))
+	for _, proj := range cfg.Projects {
+		nextProjects[proj.Name] = proj
+	}
+
+	var toStart []*projectRunner
+	var toStop []*projectRunner
+
+	m.mu.Lock()
+	if m.runners == nil {
+		m.runners = make(map[string]*projectRunner, len(cfg.Projects))
+	}
+	runCtx := m.ctx
+	restartRequested := m.restartRequested
+
+	for name, runner := range m.runners {
+		if _, ok := nextProjects[name]; ok {
+			continue
+		}
+		delete(m.runners, name)
+		toStop = append(toStop, runner)
+	}
+
+	for _, proj := range cfg.Projects {
+		runner, ok := m.runners[proj.Name]
+		if ok && projectConfigEqual(runner.proj, proj) {
+			continue
+		}
+		if ok {
+			delete(m.runners, proj.Name)
+			toStop = append(toStop, runner)
+		}
+
+		nextRunner := newProjectRunner(proj, m.limiter)
+		if restartRequested {
+			nextRunner.beginDrain()
+		}
+		m.runners[proj.Name] = nextRunner
+		if runCtx != nil {
+			toStart = append(toStart, nextRunner)
+		}
+	}
+
+	m.cfg = cfg
+	m.mu.Unlock()
+
+	for _, runner := range toStop {
+		runner.stop()
+	}
+	for _, runner := range toStart {
+		runner.start(runCtx)
 	}
 }
 
@@ -198,9 +295,14 @@ func (m *Manager) RequestRestartWhenIdle() <-chan struct{} {
 		m.mu.Unlock()
 		return ch
 	}
+
 	m.restartRequested = true
 	m.restartReady = make(chan struct{})
-	runners := append([]*projectRunner(nil), m.runners...)
+
+	runners := make([]*projectRunner, 0, len(m.runners))
+	for _, runner := range m.runners {
+		runners = append(runners, runner)
+	}
 	ch := m.restartReady
 	m.mu.Unlock()
 
@@ -214,7 +316,7 @@ func (m *Manager) RequestRestartWhenIdle() <-chan struct{} {
 
 // TriggerRefresh asks each running orchestrator to poll immediately.
 func (m *Manager) TriggerRefresh(ctx context.Context) {
-	for _, pr := range m.runners {
+	for _, pr := range m.runnersSnapshot() {
 		pr.mu.Lock()
 		orch := pr.orch
 		pr.mu.Unlock()
@@ -226,10 +328,7 @@ func (m *Manager) TriggerRefresh(ctx context.Context) {
 
 // GetAllStates returns state for all running projects.
 func (m *Manager) GetAllStates() map[string]*orchestrator.State {
-	m.mu.Lock()
-	runners := append([]*projectRunner(nil), m.runners...)
-	m.mu.Unlock()
-
+	runners := m.runnersSnapshot()
 	result := make(map[string]*orchestrator.State, len(runners))
 	for _, pr := range runners {
 		if st := pr.getState(); st != nil {
@@ -253,11 +352,7 @@ func (m *Manager) waitForIdle(ready chan struct{}) {
 }
 
 func (m *Manager) allIdle() bool {
-	m.mu.Lock()
-	runners := append([]*projectRunner(nil), m.runners...)
-	m.mu.Unlock()
-
-	for _, pr := range runners {
+	for _, pr := range m.runnersSnapshot() {
 		if !pr.isIdle() {
 			return false
 		}
@@ -266,22 +361,23 @@ func (m *Manager) allIdle() bool {
 }
 
 func (m *Manager) GetSummary() status.Summary {
+	runners := m.runnersSnapshot()
 	build := version.Current()
 	summary := status.Summary{
 		Status:    "idle",
 		Version:   build.Version,
 		GitHash:   build.GitHash,
 		Dirty:     build.Dirty,
-		Projects:  make([]status.ProjectSummary, 0, len(m.runners)),
+		Projects:  make([]status.ProjectSummary, 0, len(runners)),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	projectNames := make([]string, 0, len(m.runners))
-	projectMap := make(map[string]status.ProjectSummary, len(m.runners))
+	projectNames := make([]string, 0, len(runners))
+	projectMap := make(map[string]status.ProjectSummary, len(runners))
 	var hasError bool
 	var hasNetworkIssue bool
 
-	for _, pr := range m.runners {
+	for _, pr := range runners {
 		st, lastErr := pr.snapshot()
 		project := status.ProjectSummary{
 			Name:             pr.proj.Name,
@@ -351,4 +447,19 @@ func (m *Manager) GetSummary() status.Summary {
 		summary.Status = "idle"
 	}
 	return summary
+}
+
+func (m *Manager) runnersSnapshot() []*projectRunner {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	runners := make([]*projectRunner, 0, len(m.runners))
+	for _, runner := range m.runners {
+		runners = append(runners, runner)
+	}
+	return runners
+}
+
+func projectConfigEqual(a, b config.ProjectConfig) bool {
+	return a.Name == b.Name && a.Workflow == b.Workflow
 }

@@ -48,8 +48,10 @@ func readFileStamp(path string) (fileStamp, error) {
 }
 
 type managedRuntime struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	cfg      *config.DaemonConfig
+	reloader configApplier
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 func (r *managedRuntime) stop() {
@@ -60,13 +62,17 @@ func (r *managedRuntime) stop() {
 	<-r.done
 }
 
+type configApplier interface {
+	ApplyConfig(*config.DaemonConfig)
+}
+
 // Runtime supervises the daemon app and hot-reloads it when config.yaml changes.
 type Runtime struct {
 	configPath    string
 	watchInterval time.Duration
 
-	loadConfig func(string) (*config.DaemonConfig, error)
-	runApp     func(context.Context, *config.DaemonConfig)
+	loadConfig   func(string) (*config.DaemonConfig, error)
+	startRuntime func(context.Context, *config.DaemonConfig) (*managedRuntime, error)
 
 	mu      sync.Mutex
 	current *managedRuntime
@@ -77,7 +83,7 @@ func NewRuntime(configPath string) *Runtime {
 		configPath:    configPath,
 		watchInterval: defaultConfigWatchInterval,
 		loadConfig:    config.LoadDaemonConfig,
-		runApp:        runDaemonApp,
+		startRuntime:  startManagedRuntime,
 	}
 }
 
@@ -139,11 +145,15 @@ func (r *Runtime) Run(ctx context.Context, initialCfg *config.DaemonConfig) erro
 			}
 
 			slog.Info("daemon.config_reloading", "path", r.configPath, "projects", projectNames(cfg))
+			if r.reloadProjects(cfg) {
+				slog.Info("daemon.config_reloaded", "path", r.configPath, "projects", projectNames(cfg), "mode", "incremental")
+				continue
+			}
 			if err := r.swap(ctx, cfg); err != nil {
 				slog.Error("daemon.config_reload_failed", "path", r.configPath, "error", err)
 				continue
 			}
-			slog.Info("daemon.config_reloaded", "path", r.configPath, "projects", projectNames(cfg))
+			slog.Info("daemon.config_reloaded", "path", r.configPath, "projects", projectNames(cfg), "mode", "full_swap")
 		}
 	}
 }
@@ -158,17 +168,30 @@ func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
 		prev.stop()
 	}
 
-	nextCtx, cancel := context.WithCancel(parent)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		r.runApp(nextCtx, cfg)
-	}()
+	next, err := r.startRuntime(parent, cfg)
+	if err != nil {
+		return err
+	}
 
 	r.mu.Lock()
-	r.current = &managedRuntime{cancel: cancel, done: done}
+	r.current = next
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *Runtime) reloadProjects(cfg *config.DaemonConfig) bool {
+	r.mu.Lock()
+	current := r.current
+	if current == nil || current.reloader == nil || !canReloadProjectsIncrementally(current.cfg, cfg) {
+		r.mu.Unlock()
+		return false
+	}
+	current.cfg = cfg
+	reloader := current.reloader
+	r.mu.Unlock()
+
+	reloader.ApplyConfig(cfg)
+	return true
 }
 
 func (r *Runtime) stopCurrent() {
@@ -179,9 +202,23 @@ func (r *Runtime) stopCurrent() {
 	current.stop()
 }
 
-func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig) {
+func startManagedRuntime(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
 	mgr := NewManager(cfg)
+	go func() {
+		defer close(done)
+		runDaemonApp(ctx, cfg, mgr)
+	}()
+	return &managedRuntime{
+		cfg:      cfg,
+		reloader: mgr,
+		cancel:   cancel,
+		done:     done,
+	}, nil
+}
 
+func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 	var wg sync.WaitGroup
 
 	if cfg.StatusServer.Enabled {
@@ -211,6 +248,15 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig) {
 		close(stopUpdate)
 	}
 	wg.Wait()
+}
+
+func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
+	if prev == nil || next == nil {
+		return false
+	}
+	return prev.AutoUpdate == next.AutoUpdate &&
+		prev.Agent == next.Agent &&
+		prev.StatusServer == next.StatusServer
 }
 
 func projectNames(cfg *config.DaemonConfig) []string {
