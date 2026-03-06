@@ -125,6 +125,10 @@ type State struct {
 	LastTrackerSuccessAt *time.Time
 	LastTrackerErrorAt   *time.Time
 	LastTrackerError     string
+
+	PausedUntil         *time.Time
+	PauseReason         string
+	RateLimitPauseCount int
 }
 
 func NewState() *State {
