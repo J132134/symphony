@@ -30,12 +30,8 @@ query($projectSlug: String!, $states: [String!], $after: String) {
       id identifier title description priority
       state { name }
       branchName url
-      comments(last: 1, orderBy: updatedAt) {
-        nodes {
-          body
-          createdAt
-          updatedAt
-        }
+      comments(first: 1) {
+        nodes { body createdAt updatedAt }
       }
       labels { nodes { name } }
       relations {
@@ -154,7 +150,7 @@ func (c *LinearClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) 
 	return result, nil
 }
 
-func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body string) error {
+func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) error {
 	if strings.TrimSpace(issueID) == "" {
 		return fmt.Errorf("issue ID is required")
 	}
@@ -177,8 +173,9 @@ func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body str
 	return nil
 }
 
-func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) error {
-	return c.CreateIssueComment(ctx, issueID, body)
+// CreateIssueComment keeps backward compatibility with older callers/tests.
+func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body string) error {
+	return c.AddComment(ctx, issueID, body)
 }
 
 func (c *LinearClient) UpdateIssueState(ctx context.Context, issueID, stateName string) error {
@@ -350,27 +347,56 @@ func normalizeIssue(node map[string]any) *types.Issue {
 		Labels:      labels,
 		BlockedBy:   blockedBy,
 	}
-	if cd, ok := node["comments"].(map[string]any); ok {
-		for _, n := range castSlice(cd["nodes"]) {
-			nm, ok := n.(map[string]any)
-			if !ok {
-				continue
-			}
-			iss.LastComment = &types.Comment{
-				Body:      strVal(nm["body"]),
-				CreatedAt: parseISO(strVal(nm["createdAt"])),
-				UpdatedAt: parseISO(strVal(nm["updatedAt"])),
-			}
-			break
-		}
-	}
 	if pri, ok := node["priority"].(float64); ok && pri > 0 {
 		p := int(pri)
 		iss.Priority = &p
 	}
 	iss.CreatedAt = parseISO(strVal(node["createdAt"]))
 	iss.UpdatedAt = parseISO(strVal(node["updatedAt"]))
+	iss.LastComment = latestComment(node["comments"])
 	return iss
+}
+
+func latestComment(raw any) *types.Comment {
+	comments, _ := raw.(map[string]any)
+	nodes := castSlice(comments["nodes"])
+	var latest *types.Comment
+	var latestAt time.Time
+
+	for _, rawNode := range nodes {
+		node, ok := rawNode.(map[string]any)
+		if !ok {
+			continue
+		}
+		comment := &types.Comment{
+			Body:      strVal(node["body"]),
+			CreatedAt: parseISO(strVal(node["createdAt"])),
+			UpdatedAt: parseISO(strVal(node["updatedAt"])),
+		}
+		if strings.TrimSpace(comment.Body) == "" {
+			continue
+		}
+		commentAt := latestCommentTime(comment)
+		if latest == nil || commentAt.After(latestAt) {
+			latest = comment
+			latestAt = commentAt
+		}
+	}
+
+	return latest
+}
+
+func latestCommentTime(comment *types.Comment) time.Time {
+	if comment == nil {
+		return time.Time{}
+	}
+	if comment.UpdatedAt != nil {
+		return *comment.UpdatedAt
+	}
+	if comment.CreatedAt != nil {
+		return *comment.CreatedAt
+	}
+	return time.Time{}
 }
 
 func parseISO(s string) *time.Time {

@@ -498,6 +498,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 	// 3. Render prompt.
 	attempt.Status = StatusBuildingPrompt
+	initialTurnContext := o.loadTurnContext(issue, wsMgr, ws)
 	prompt, err := workflow.Render(wf, workflow.IssueContext{
 		ID:          issue.ID,
 		Identifier:  issue.Identifier,
@@ -508,6 +509,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 		Labels:      issue.Labels,
 		URL:         issue.URL,
 		BranchName:  issue.BranchName,
+		TurnContext: initialTurnContext,
 	}, attempt.Attempt)
 	if err != nil {
 		attempt.Status = StatusFailed
@@ -518,15 +520,15 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
 	agentCfg := &agent.Config{
-		Command:           cfg.CodexCommand(),
-		ApprovalPolicy:    cfg.ApprovalPolicy(),
-		MaxTurns:          cfg.MaxTurns(),
-		TurnTimeoutMs:     cfg.TurnTimeoutMs(),
+		Command:              cfg.CodexCommand(),
+		ApprovalPolicy:       cfg.ApprovalPolicy(),
+		MaxTurns:             cfg.MaxTurns(),
+		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
 		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
 		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
 		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy: cfg.TurnSandboxPolicy(),
-		ThreadSandbox:     cfg.ThreadSandbox(),
+		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
+		ThreadSandbox:        cfg.ThreadSandbox(),
 	}
 
 	// 5. Handshake.
@@ -549,8 +551,13 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 		turnPrompt := prompt
 		if turnNum > 1 {
-			turnPrompt = fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
-				issue.Identifier, issue.Title, turnNum, cfg.MaxTurns())
+			turnPrompt = buildContinuationPrompt(
+				issue.Identifier,
+				issue.Title,
+				turnNum,
+				cfg.MaxTurns(),
+				o.loadTurnContext(issue, wsMgr, ws),
+			)
 		}
 
 		result := runner.RunTurn(ctx, threadID, turnPrompt, issue.Identifier, issue.Title, agentCfg,
@@ -579,11 +586,39 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	runner.StopSession()
 	runnerStarted = false
 
-	if err := wsMgr.FinishRun(ctx, ws); err != nil {
+	if _, err := wsMgr.FinishRun(ctx, ws); err != nil {
 		slog.Warn("orchestrator.after_run_failed", "issue", issue.Identifier, "error", err)
 	}
 	attempt.Status = StatusSucceeded
 	return nil
+}
+
+func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Manager, ws *workspace.Workspace) string {
+	if wsMgr == nil || ws == nil {
+		return ""
+	}
+	turnContext, err := wsMgr.GetTurnContext(ws)
+	if err != nil {
+		slog.Warn("orchestrator.turn_context_unavailable", "issue", issue.Identifier, "error", err)
+		return ""
+	}
+	return turnContext
+}
+
+func buildContinuationPrompt(identifier, title string, turnNum, maxTurns int, turnContext string) string {
+	if strings.TrimSpace(turnContext) == "" {
+		return fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
+			identifier, title, turnNum, maxTurns)
+	}
+
+	return fmt.Sprintf(
+		"Continue working on %s: %s.\n\nProgress so far:\n%s\n\nThis is turn %d of %d. Continue where you left off without repeating completed work.",
+		identifier,
+		title,
+		turnContext,
+		turnNum,
+		maxTurns,
+	)
 }
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
