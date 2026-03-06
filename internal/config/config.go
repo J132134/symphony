@@ -292,6 +292,9 @@ func (c *SymphonyConfig) CodexCommandForState(state string) string {
 	}
 	return c.CodexCommand()
 }
+func (c *SymphonyConfig) UsesClaudeForState(state string) bool {
+	return isClaudeCommand(c.CodexCommandForState(state))
+}
 func (c *SymphonyConfig) ApprovalPolicy() string {
 	return c.getString("codex.approval_policy", "auto-edit")
 }
@@ -355,4 +358,17 @@ func (c *SymphonyConfig) Validate() []string {
 		errs = append(errs, "agent.max_concurrent_agents must be greater than 0")
 	}
 	return errs
+}
+
+func isClaudeCommand(command string) bool {
+	parts := strings.Fields(strings.TrimSpace(command))
+	if len(parts) == 0 {
+		return false
+	}
+	switch filepath.Base(parts[0]) {
+	case "claude", "claude-code":
+		return true
+	default:
+		return false
+	}
 }

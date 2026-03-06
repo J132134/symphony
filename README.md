@@ -172,6 +172,8 @@ codex:
 
 위 설정은 기본 작업은 Codex로 유지하면서 `Human Review` 상태에 들어간 이슈만 Claude로 실행한다.
 
+`Human Review`는 해당 상태를 실제로 Claude가 처리할 때만 concurrent 슬롯과 전역 세션 제한에 포함된다. `Human Review`에 대한 Claude override가 없으면 Symphony는 리뷰 대기 중인 이슈의 서브프로세스를 내리고, 상태가 다시 `In Progress`나 `Rework` 같은 다른 active 상태로 바뀌면 그때 다시 실행한다.
+
 ## HTTP 상태 API
 
 `--port` 옵션 또는 `server.port` 설정 시 활성화된다.

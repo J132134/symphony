@@ -263,13 +263,13 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 
 		o.state.mu.Lock()
-		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
+		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked(cfg)
 		o.state.mu.Unlock()
 
 		if slots <= 0 {
 			break
 		}
-		if !o.hasGlobalCapacityForState(issue.State) {
+		if !o.hasGlobalCapacityForState(cfg, issue.State) {
 			break
 		}
 		if o.canDispatch(cfg, issue) {
@@ -290,6 +290,9 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if !activeNorm[normState] || termNorm[normState] {
 		return false
 	}
+	if !shouldRunStateWithAgent(cfg, issue.State) {
+		return false
+	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -306,7 +309,7 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if _, ok := o.state.RetryQueue[issue.ID]; ok {
 		return false
 	}
-	if o.runningConcurrentCountLocked() >= o.state.MaxConcurrentAgents {
+	if o.runningConcurrentCountLocked(cfg) >= o.state.MaxConcurrentAgents {
 		return false
 	}
 
@@ -360,7 +363,7 @@ func sortCandidates(issues []*types.Issue) {
 // -- dispatch --
 
 func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
-	globalSlotHeld := countsTowardConcurrency(issue.State) && o.globalLimiter != nil
+	globalSlotHeld := countsTowardConcurrency(cfg, issue.State) && o.globalLimiter != nil
 	if globalSlotHeld && !o.globalLimiter.TryAcquire() {
 		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
 		return false
@@ -723,6 +726,12 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 					slog.Warn("orchestrator.reconcile_cleanup_failed", "issue_id", id, "error", err)
 				}
 			}
+			continue
+		}
+
+		if !shouldRunStateWithAgent(cfg, cur.State) {
+			slog.Info("orchestrator.reconcile_paused_for_human_review", "issue", cur.Identifier, "state", cur.State)
+			o.cancelWorker(id)
 		}
 	}
 }
@@ -838,12 +847,19 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		o.state.mu.Unlock()
 		return
 	}
+	if !shouldRunStateWithAgent(cfg, issue.State) {
+		slog.Info("orchestrator.retry_paused_for_human_review", "issue_id", issueID, "state", issue.State)
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		return
+	}
 
 	o.state.mu.Lock()
-	slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
+	slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked(cfg)
 	o.state.mu.Unlock()
 
-	if slots <= 0 || !o.hasGlobalCapacityForState(issue.State) {
+	if slots <= 0 || !o.hasGlobalCapacityForState(cfg, issue.State) {
 		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
 		return
 	}
@@ -955,18 +971,28 @@ func normStates(states []string) map[string]bool {
 	return m
 }
 
-func (o *Orchestrator) runningConcurrentCountLocked() int {
+func (o *Orchestrator) runningConcurrentCountLocked(cfg *config.SymphonyConfig) int {
 	count := 0
 	for _, attempt := range o.state.Running {
-		if countsTowardConcurrency(attempt.IssueState) {
+		if countsTowardConcurrency(cfg, attempt.IssueState) {
 			count++
 		}
 	}
 	return count
 }
 
-func countsTowardConcurrency(state string) bool {
-	return config.NormalizeState(state) != humanReviewState
+func shouldRunStateWithAgent(cfg *config.SymphonyConfig, state string) bool {
+	if config.NormalizeState(state) != humanReviewState {
+		return true
+	}
+	if cfg == nil {
+		return true
+	}
+	return cfg.UsesClaudeForState(state)
+}
+
+func countsTowardConcurrency(cfg *config.SymphonyConfig, state string) bool {
+	return shouldRunStateWithAgent(cfg, state)
 }
 
 func buildAgentConfig(cfg *config.SymphonyConfig, issueState string) *agent.Config {
@@ -983,8 +1009,8 @@ func buildAgentConfig(cfg *config.SymphonyConfig, issueState string) *agent.Conf
 	}
 }
 
-func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {
-	if !countsTowardConcurrency(state) {
+func (o *Orchestrator) hasGlobalCapacityForState(cfg *config.SymphonyConfig, state string) bool {
+	if !countsTowardConcurrency(cfg, state) {
 		return true
 	}
 	return o.hasGlobalCapacity()

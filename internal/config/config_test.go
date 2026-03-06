@@ -70,6 +70,29 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 	if got := cfg.CodexCommandForState("In Progress"); got != "codex app-server" {
 		t.Fatalf("CodexCommandForState(In Progress) = %q, want codex app-server", got)
 	}
+	if !cfg.UsesClaudeForState("Human Review") {
+		t.Fatal("UsesClaudeForState(Human Review) = false, want true")
+	}
+	if cfg.UsesClaudeForState("In Progress") {
+		t.Fatal("UsesClaudeForState(In Progress) = true, want false")
+	}
+}
+
+func TestUsesClaudeForStateFallsBackToDefaultCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"codex": map[string]any{
+			"command": "/usr/local/bin/claude-code --print",
+		},
+	})
+
+	if !cfg.UsesClaudeForState("Todo") {
+		t.Fatal("UsesClaudeForState(Todo) = false, want true")
+	}
+	if !cfg.UsesClaudeForState("Human Review") {
+		t.Fatal("UsesClaudeForState(Human Review) = false, want true")
+	}
 }
 
 func TestSymphonyConfigValidateRejectsEmptyWorkspaceRoot(t *testing.T) {
