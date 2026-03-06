@@ -22,6 +22,8 @@ import (
 	"symphony/internal/workspace"
 )
 
+const humanReviewState = "human review"
+
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
 	workflowPath  string
@@ -261,13 +263,13 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 
 		o.state.mu.Lock()
-		slots := o.state.MaxConcurrentAgents - len(o.state.Running)
+		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
 		o.state.mu.Unlock()
 
 		if slots <= 0 {
 			break
 		}
-		if !o.hasGlobalCapacity() {
+		if !o.hasGlobalCapacityForState(issue.State) {
 			break
 		}
 		if o.canDispatch(cfg, issue) {
@@ -304,7 +306,7 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if _, ok := o.state.RetryQueue[issue.ID]; ok {
 		return false
 	}
-	if len(o.state.Running) >= o.state.MaxConcurrentAgents {
+	if o.runningConcurrentCountLocked() >= o.state.MaxConcurrentAgents {
 		return false
 	}
 
@@ -358,7 +360,8 @@ func sortCandidates(issues []*types.Issue) {
 // -- dispatch --
 
 func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum int) bool {
-	if o.globalLimiter != nil && !o.globalLimiter.TryAcquire() {
+	globalSlotHeld := countsTowardConcurrency(issue.State) && o.globalLimiter != nil
+	if globalSlotHeld && !o.globalLimiter.TryAcquire() {
 		slog.Debug("orchestrator.global_limit_reached", "project", o.name, "issue", issue.Identifier)
 		return false
 	}
@@ -373,7 +376,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		StartedAt:      time.Now().UTC(),
 		Status:         StatusPreparingWorkspace,
 		IssueState:     issue.State,
-		GlobalSlotHeld: o.globalLimiter != nil,
+		GlobalSlotHeld: globalSlotHeld,
 		cancel:         cancel,
 	}
 
@@ -811,10 +814,10 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	o.state.mu.Lock()
-	slots := o.state.MaxConcurrentAgents - len(o.state.Running)
+	slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked()
 	o.state.mu.Unlock()
 
-	if slots <= 0 || !o.hasGlobalCapacity() {
+	if slots <= 0 || !o.hasGlobalCapacityForState(issue.State) {
 		o.scheduleRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, "no slots", true)
 		return
 	}
@@ -920,6 +923,27 @@ func normStates(states []string) map[string]bool {
 		m[config.NormalizeState(s)] = true
 	}
 	return m
+}
+
+func (o *Orchestrator) runningConcurrentCountLocked() int {
+	count := 0
+	for _, attempt := range o.state.Running {
+		if countsTowardConcurrency(attempt.IssueState) {
+			count++
+		}
+	}
+	return count
+}
+
+func countsTowardConcurrency(state string) bool {
+	return config.NormalizeState(state) != humanReviewState
+}
+
+func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {
+	if !countsTowardConcurrency(state) {
+		return true
+	}
+	return o.hasGlobalCapacity()
 }
 
 func isCtxErr(err error) bool {
