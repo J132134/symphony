@@ -90,6 +90,31 @@ func TestLoadDaemonConfigPreservesEmptyWorkflowForValidation(t *testing.T) {
 	requireErrorContaining(t, errs, "workflow path is required")
 }
 
+func TestLoadDaemonConfigPreservesEmptyRepoDirForValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "projects:\n  - name: alpha\n    workflow: " + workflowPath + "\nauto_update:\n  enabled: true\n  repo_dir: \"\"\nstatus_server:\n  enabled: false\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "auto_update.repo_dir")
+	requireErrorContaining(t, errs, "non-empty")
+}
+
 func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 	t.Parallel()
 

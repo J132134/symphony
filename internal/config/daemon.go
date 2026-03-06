@@ -38,6 +38,7 @@ type DaemonConfig struct {
 	ConfigPath   string
 
 	maxTotalConcurrentSessionsConfigured bool
+	autoUpdateRepoDirConfigured          bool
 }
 
 func LoadDaemonConfig(path string) (*DaemonConfig, error) {
@@ -88,8 +89,9 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		if mins, ok := au["interval_minutes"]; ok {
 			cfg.AutoUpdate.IntervalMinutes = toInt(mins, 30)
 		}
-		if rd, ok := au["repo_dir"].(string); ok && rd != "" {
+		if rd, ok := au["repo_dir"].(string); ok {
 			cfg.AutoUpdate.RepoDir = resolvePath(rd)
+			cfg.autoUpdateRepoDirConfigured = true
 		}
 	}
 
@@ -138,8 +140,12 @@ func (c *DaemonConfig) Validate() []string {
 			errs = append(errs, fmt.Sprintf("duplicate project name: %s", name))
 		}
 	}
-	if strings.TrimSpace(c.AutoUpdate.RepoDir) != "" {
-		errs = append(errs, validateGitRepoDir(c.AutoUpdate.RepoDir, "auto_update.repo_dir")...)
+	if c.AutoUpdate.Enabled {
+		if c.autoUpdateRepoDirConfigured && strings.TrimSpace(c.AutoUpdate.RepoDir) == "" {
+			errs = append(errs, "auto_update.repo_dir must be non-empty when auto_update.enabled is true")
+		} else if strings.TrimSpace(c.AutoUpdate.RepoDir) != "" {
+			errs = append(errs, validateGitRepoDir(c.AutoUpdate.RepoDir, "auto_update.repo_dir")...)
+		}
 	}
 	if c.StatusServer.Enabled {
 		errs = append(errs, validateTCPPortAvailable(c.StatusServer.Port, "status_server.port")...)
