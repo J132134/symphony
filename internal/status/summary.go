@@ -31,6 +31,9 @@ type ProjectSummary struct {
 	SubprocessCount    int      `json:"subprocess_count"`
 	RunningIssueIDs    []string `json:"running_issue_ids"`
 	RetryCount         int      `json:"retry_count"`
+	Paused             bool     `json:"paused"`
+	PausedUntil        string   `json:"paused_until,omitempty"`
+	PauseReason        string   `json:"pause_reason,omitempty"`
 	TrackerConnected   bool     `json:"tracker_connected"`
 	LastTrackerSuccess string   `json:"last_tracker_success,omitempty"`
 	LastTrackerError   string   `json:"last_tracker_error,omitempty"`
@@ -47,9 +50,11 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		Projects:  make([]ProjectSummary, 0, len(states)),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	now := time.Now().UTC()
 
 	var hasNetworkIssue bool
 	var hasError bool
+	var hasPaused bool
 
 	projectNames := make([]string, 0, len(states))
 	for name := range states {
@@ -77,6 +82,10 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		sort.Strings(project.RunningIssueIDs)
 
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		project.Paused, project.PausedUntil, project.PauseReason = st.PauseStatusLocked(now)
+		if project.Paused {
+			hasPaused = true
+		}
 		if !project.TrackerConnected {
 			hasNetworkIssue = true
 		}
@@ -97,6 +106,8 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 			hasError = true
 		} else if project.SubprocessCount > 0 {
 			project.Status = "running"
+		} else if project.Paused {
+			project.Status = "paused"
 		}
 
 		summary.SubprocessCount += project.SubprocessCount
@@ -114,6 +125,8 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		summary.Status = "network_lost"
 	case summary.SubprocessCount > 0:
 		summary.Status = "running"
+	case hasPaused:
+		summary.Status = "paused"
 	default:
 		summary.Status = "idle"
 	}

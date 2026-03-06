@@ -167,10 +167,10 @@ codex:
 
 | 엔드포인트 | 설명 |
 |---|---|
-| `GET /api/v1/summary` | 메뉴바 UI용 데몬 요약 상태(JSON) |
+| `GET /api/v1/summary` | 메뉴바 UI용 데몬 요약 상태(JSON, `idle`/`running`/`paused`/`error`/`network_lost`) |
 | `POST /api/v1/refresh` | 즉시 폴링+조정 트리거 |
 
-`symphony menubar`는 macOS 메뉴바에서 데몬 상태를 보여준다. 정상 실행 중에는 회전하는 원형 인디케이터를, 에러가 있으면 경고 아이콘을, status server 또는 tracker 연결이 끊기면 일시정지 아이콘을 표시한다. 마우스 오버 툴팁과 메뉴 항목에서 현재 git hash, 실행 중인 서브프로세스 수, 이슈 ID 목록을 확인할 수 있다.
+`symphony menubar`는 macOS 메뉴바에서 데몬 상태를 보여준다. 정상 실행 중에는 회전하는 원형 인디케이터를, 에러가 있으면 경고 아이콘을, status server 또는 tracker 연결이 끊기면 일시정지 아이콘을 표시한다. rate limit으로 신규 dispatch가 멈춘 경우에도 summary의 프로젝트 pause 메타데이터를 바탕으로 `Paused` 상태와 pause reason / paused until 정보를 툴팁에서 확인할 수 있다. 마우스 오버 툴팁과 메뉴 항목에서 현재 git hash, 실행 중인 서브프로세스 수, 이슈 ID 목록을 확인할 수 있다.
 
 ## Workspace Hooks
 
@@ -262,6 +262,7 @@ Linear 폴링 (interval_ms마다)
   ↓
 dispatch 조건 확인:
   - running/claimed에 없을 것
+  - rate limit pause 중이 아닐 것
   - global/per-state concurrency 여유 있을 것
   - Todo 상태면 blocker가 모두 terminal일 것
   ↓
@@ -278,6 +279,13 @@ after_run hook 실행
   ↓
 재시도 예약 (정상 종료: 1초, 비정상: 지수 백오프)
 ```
+
+### Rate limit pause
+
+- 에이전트가 `account/rateLimits/updated` 이벤트를 보내면 신규 dispatch admission gate를 즉시 멈춘다.
+- payload에 reset 시각이 있으면 그 시각까지 자동 pause되고, 없으면 30초부터 시작하는 지수 백오프(최대 5분)를 사용한다.
+- pause는 현재 실행 중인 세션을 강제 중단하지 않고, poll 기반 신규 dispatch와 retry 기반 redispatch만 막는다.
+- daemon 모드에서는 shared limiter에도 같은 pause가 반영되어 다른 프로젝트의 신규 세션 시작도 함께 멈춘다.
 
 ### 재시도 지연
 

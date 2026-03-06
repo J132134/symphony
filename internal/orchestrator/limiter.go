@@ -1,12 +1,16 @@
 package orchestrator
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // SessionLimiter caps daemon-wide concurrent agent sessions across projects.
 type SessionLimiter struct {
-	mu    sync.Mutex
-	limit int
-	inUse int
+	mu          sync.Mutex
+	limit       int
+	inUse       int
+	pausedUntil time.Time
 }
 
 func NewSessionLimiter(limit int) *SessionLimiter {
@@ -22,6 +26,9 @@ func (l *SessionLimiter) TryAcquire() bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.isPausedLocked(time.Now().UTC()) {
+		return false
+	}
 	if l.inUse >= l.limit {
 		return false
 	}
@@ -64,5 +71,45 @@ func (l *SessionLimiter) Available() int {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.isPausedLocked(time.Now().UTC()) {
+		return 0
+	}
 	return l.limit - l.inUse
+}
+
+func (l *SessionLimiter) PauseUntil(until time.Time) {
+	if l == nil || until.IsZero() {
+		return
+	}
+
+	until = until.UTC()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if until.After(l.pausedUntil) {
+		l.pausedUntil = until
+	}
+}
+
+func (l *SessionLimiter) PausedUntil() (time.Time, bool) {
+	if l == nil {
+		return time.Time{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.isPausedLocked(time.Now().UTC()) {
+		return time.Time{}, false
+	}
+	return l.pausedUntil, true
+}
+
+func (l *SessionLimiter) isPausedLocked(now time.Time) bool {
+	if l.pausedUntil.IsZero() {
+		return false
+	}
+	if !l.pausedUntil.After(now) {
+		l.pausedUntil = time.Time{}
+		return false
+	}
+	return true
 }

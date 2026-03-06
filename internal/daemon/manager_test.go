@@ -95,6 +95,74 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 }
 
+func TestManagerGetSummaryMarksPausedProject(t *testing.T) {
+	t.Parallel()
+
+	paused := orchestrator.New("", 0, "alpha", nil)
+	pausedState := paused.GetState()
+	now := time.Now().UTC()
+	pausedState.RecordTrackerSuccess(now)
+	pausedUntil := now.Add(2 * time.Minute)
+	pausedState.PausedUntil = &pausedUntil
+	pausedState.PauseReason = "rate_limit_reset"
+
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{},
+		runners: map[string]*projectRunner{
+			"alpha": {proj: config.ProjectConfig{Name: "alpha"}, orch: paused},
+		},
+	}
+
+	summary := mgr.GetSummary()
+	if summary.Status != "paused" {
+		t.Fatalf("status = %q, want paused", summary.Status)
+	}
+	if len(summary.Projects) != 1 {
+		t.Fatalf("projects len = %d, want 1", len(summary.Projects))
+	}
+	if !summary.Projects[0].Paused {
+		t.Fatal("project should be marked paused")
+	}
+	if summary.Projects[0].Status != "paused" {
+		t.Fatalf("project status = %q, want paused", summary.Projects[0].Status)
+	}
+	if summary.Projects[0].PauseReason != "rate_limit_reset" {
+		t.Fatalf("pause_reason = %q, want rate_limit_reset", summary.Projects[0].PauseReason)
+	}
+}
+
+func TestManagerGetSummaryOverlaysGlobalPauseAcrossProjects(t *testing.T) {
+	t.Parallel()
+
+	idle := orchestrator.New("", 0, "alpha", nil)
+	idle.GetState().RecordTrackerSuccess(time.Now().UTC())
+
+	limiter := orchestrator.NewSessionLimiter(2)
+	limiter.PauseUntil(time.Now().UTC().Add(2 * time.Minute))
+
+	mgr := &Manager{
+		cfg:     &config.DaemonConfig{},
+		limiter: limiter,
+		runners: map[string]*projectRunner{
+			"alpha": {proj: config.ProjectConfig{Name: "alpha"}, orch: idle},
+		},
+	}
+
+	summary := mgr.GetSummary()
+	if summary.Status != "paused" {
+		t.Fatalf("status = %q, want paused", summary.Status)
+	}
+	if len(summary.Projects) != 1 {
+		t.Fatalf("projects len = %d, want 1", len(summary.Projects))
+	}
+	if !summary.Projects[0].Paused {
+		t.Fatal("project should inherit global pause")
+	}
+	if summary.Projects[0].PauseReason != "global_rate_limit" {
+		t.Fatalf("pause_reason = %q, want global_rate_limit", summary.Projects[0].PauseReason)
+	}
+}
+
 func TestManagerApplyConfigReconcilesProjectDiff(t *testing.T) {
 	t.Parallel()
 

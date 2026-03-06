@@ -153,6 +153,9 @@ func (a *app) render() {
 		fmt.Sprintf("Subprocesses: %d", summary.SubprocessCount),
 		fmt.Sprintf("Issues: %s", issues),
 	}
+	if pauseLine := pauseTooltipLine(summary); pauseLine != "" {
+		tooltipLines = append(tooltipLines, pauseLine)
+	}
 	if summary.RetryCount > 0 {
 		tooltipLines = append(tooltipLines, fmt.Sprintf("Retries: %d", summary.RetryCount))
 	}
@@ -182,9 +185,43 @@ func menuBarStatus(status string, lastErr error, spinIndex int) (icon string, la
 		return "⏸", "Network lost"
 	case "error":
 		return "⚠", "Error"
+	case "paused":
+		return "⏸", "Paused"
 	case "running":
 		return spinnerFrames[spinIndex%len(spinnerFrames)], "Running"
 	default:
 		return "○", "Idle"
 	}
+}
+
+func pauseTooltipLine(summary status.Summary) string {
+	pausedProjects := make([]string, 0, len(summary.Projects))
+	var pausedUntil string
+	var pauseReason string
+
+	for _, project := range summary.Projects {
+		if !project.Paused {
+			continue
+		}
+		pausedProjects = append(pausedProjects, project.Name)
+		if pausedUntil == "" {
+			pausedUntil = project.PausedUntil
+		}
+		if pauseReason == "" {
+			pauseReason = project.PauseReason
+		}
+	}
+
+	if len(pausedProjects) == 0 {
+		return ""
+	}
+
+	line := fmt.Sprintf("Paused: %s", strings.Join(pausedProjects, ", "))
+	if pauseReason != "" {
+		line += fmt.Sprintf(" (%s)", pauseReason)
+	}
+	if pausedUntil != "" {
+		line += fmt.Sprintf(" until %s", pausedUntil)
+	}
+	return line
 }

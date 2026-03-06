@@ -338,6 +338,17 @@ func (m *Manager) GetAllStates() map[string]*orchestrator.State {
 	return result
 }
 
+func (m *Manager) GlobalPauseStatus() (paused bool, pausedUntil string, reason string) {
+	if m == nil || m.limiter == nil {
+		return false, "", ""
+	}
+	until, ok := m.limiter.PausedUntil()
+	if !ok {
+		return false, "", ""
+	}
+	return true, until.Format(time.RFC3339), "global_rate_limit"
+}
+
 func (m *Manager) waitForIdle(ready chan struct{}) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -376,6 +387,9 @@ func (m *Manager) GetSummary() status.Summary {
 	projectMap := make(map[string]status.ProjectSummary, len(runners))
 	var hasError bool
 	var hasNetworkIssue bool
+	var hasPaused bool
+	now := time.Now().UTC()
+	globalPaused, globalPausedUntil, globalPauseReason := m.GlobalPauseStatus()
 
 	for _, pr := range runners {
 		st, lastErr := pr.snapshot()
@@ -391,6 +405,12 @@ func (m *Manager) GetSummary() status.Summary {
 				project.Status = "error"
 				project.LastError = lastErr
 				hasError = true
+			} else if globalPaused {
+				project.Status = "paused"
+				project.Paused = true
+				project.PausedUntil = globalPausedUntil
+				project.PauseReason = globalPauseReason
+				hasPaused = true
 			}
 			projectMap[pr.proj.Name] = project
 			continue
@@ -405,6 +425,15 @@ func (m *Manager) GetSummary() status.Summary {
 		}
 		sort.Strings(project.RunningIssueIDs)
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		project.Paused, project.PausedUntil, project.PauseReason = st.PauseStatusLocked(now)
+		if !project.Paused && globalPaused {
+			project.Paused = true
+			project.PausedUntil = globalPausedUntil
+			project.PauseReason = globalPauseReason
+		}
+		if project.Paused {
+			hasPaused = true
+		}
 		if !project.TrackerConnected {
 			project.Status = "network_lost"
 			hasNetworkIssue = true
@@ -419,6 +448,8 @@ func (m *Manager) GetSummary() status.Summary {
 			}
 		} else if project.SubprocessCount > 0 {
 			project.Status = "running"
+		} else if project.Paused {
+			project.Status = "paused"
 		}
 		st.Unlock()
 
@@ -443,6 +474,8 @@ func (m *Manager) GetSummary() status.Summary {
 		summary.Status = "network_lost"
 	case summary.SubprocessCount > 0:
 		summary.Status = "running"
+	case hasPaused:
+		summary.Status = "paused"
 	default:
 		summary.Status = "idle"
 	}

@@ -27,6 +27,10 @@ const (
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
 
+func isRetryAbandonComment(body string) bool {
+	return strings.Contains(body, retryAbandonCommentMarker)
+}
+
 type TokenUsage struct {
 	InputTokens  int64
 	OutputTokens int64
@@ -78,10 +82,6 @@ type AbandonedEntry struct {
 	AbandonedAt  time.Time
 }
 
-func isRetryAbandonComment(body string) bool {
-	return strings.Contains(body, retryAbandonCommentMarker)
-}
-
 func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {
 	if e == nil {
 		return time.Time{}
@@ -123,6 +123,10 @@ type State struct {
 	LastTrackerSuccessAt *time.Time
 	LastTrackerErrorAt   *time.Time
 	LastTrackerError     string
+
+	PausedUntil         *time.Time
+	PauseReason         string
+	RateLimitPauseCount int
 }
 
 func NewState() *State {
@@ -173,9 +177,21 @@ func (s *State) TrackerStatus() (connected bool, lastSuccess string, lastError s
 	return s.trackerStatusLocked()
 }
 
+func (s *State) PauseStatus() (paused bool, pausedUntil string, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pauseStatusLocked(time.Now().UTC())
+}
+
 // TrackerStatusLocked reports tracker connectivity while the caller already holds s.mu.
 func (s *State) TrackerStatusLocked() (connected bool, lastSuccess string, lastError string) {
 	return s.trackerStatusLocked()
+}
+
+// PauseStatusLocked reports admission pause state while the caller already holds s.mu.
+func (s *State) PauseStatusLocked(now time.Time) (paused bool, pausedUntil string, reason string) {
+	return s.pauseStatusLocked(now.UTC())
 }
 
 func (s *State) trackerStatusLocked() (connected bool, lastSuccess string, lastError string) {
@@ -191,4 +207,17 @@ func (s *State) trackerStatusLocked() (connected bool, lastSuccess string, lastE
 		lastSuccess = s.LastTrackerSuccessAt.Format(time.RFC3339)
 	}
 	return connected, lastSuccess, lastError
+}
+
+func (s *State) pauseStatusLocked(now time.Time) (paused bool, pausedUntil string, reason string) {
+	if s.PausedUntil == nil {
+		return false, "", ""
+	}
+	if !s.PausedUntil.After(now) {
+		s.PausedUntil = nil
+		s.PauseReason = ""
+		s.RateLimitPauseCount = 0
+		return false, "", ""
+	}
+	return true, s.PausedUntil.UTC().Format(time.RFC3339), s.PauseReason
 }
