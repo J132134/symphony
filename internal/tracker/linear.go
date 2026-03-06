@@ -30,13 +30,6 @@ query($projectSlug: String!, $states: [String!], $after: String) {
       id identifier title description priority
       state { name }
       branchName url
-      comments(last: 1, orderBy: updatedAt) {
-        nodes {
-          body
-          createdAt
-          updatedAt
-        }
-      }
       labels { nodes { name } }
       relations {
         nodes { type relatedIssue { id identifier state { name } } }
@@ -56,6 +49,24 @@ query($ids: [ID!]!) {
 const commentCreateMutation = `
 mutation($input: CommentCreateInput!) {
   commentCreate(input: $input) {
+    success
+  }
+}`
+
+const issueStateLookupQuery = `
+query($id: String!) {
+  issue(id: $id) {
+    team {
+      states {
+        nodes { id name }
+      }
+    }
+  }
+}`
+
+const issueUpdateMutation = `
+mutation($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) {
     success
   }
 }`
@@ -136,9 +147,9 @@ func (c *LinearClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) 
 	return result, nil
 }
 
-func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body string) error {
-	if issueID == "" {
-		return fmt.Errorf("issue ID is required")
+func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) error {
+	if strings.TrimSpace(issueID) == "" {
+		return fmt.Errorf("issue id is required")
 	}
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("comment body is required")
@@ -153,8 +164,54 @@ func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body str
 		return err
 	}
 	payload, _ := data["commentCreate"].(map[string]any)
-	if success, _ := payload["success"].(bool); !success {
-		return fmt.Errorf("commentCreate unsuccessful")
+	if ok, _ := payload["success"].(bool); !ok {
+		return fmt.Errorf("commentCreate returned success=false")
+	}
+	return nil
+}
+
+func (c *LinearClient) UpdateIssueState(ctx context.Context, issueID, stateName string) error {
+	if strings.TrimSpace(issueID) == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	stateName = strings.TrimSpace(stateName)
+	if stateName == "" {
+		return nil
+	}
+
+	data, err := c.execute(ctx, issueStateLookupQuery, map[string]any{"id": issueID})
+	if err != nil {
+		return err
+	}
+	issueData, _ := data["issue"].(map[string]any)
+	teamData, _ := issueData["team"].(map[string]any)
+	statesData, _ := teamData["states"].(map[string]any)
+
+	var stateID string
+	for _, raw := range castSlice(statesData["nodes"]) {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strVal(node["name"]), stateName) {
+			stateID = strVal(node["id"])
+			break
+		}
+	}
+	if stateID == "" {
+		return fmt.Errorf("state %q not found", stateName)
+	}
+
+	data, err = c.execute(ctx, issueUpdateMutation, map[string]any{
+		"id":      issueID,
+		"stateId": stateID,
+	})
+	if err != nil {
+		return err
+	}
+	payload, _ := data["issueUpdate"].(map[string]any)
+	if ok, _ := payload["success"].(bool); !ok {
+		return fmt.Errorf("issueUpdate returned success=false")
 	}
 	return nil
 }
@@ -281,20 +338,6 @@ func normalizeIssue(node map[string]any) *types.Issue {
 		URL:         strVal(node["url"]),
 		Labels:      labels,
 		BlockedBy:   blockedBy,
-	}
-	if cd, ok := node["comments"].(map[string]any); ok {
-		for _, n := range castSlice(cd["nodes"]) {
-			nm, ok := n.(map[string]any)
-			if !ok {
-				continue
-			}
-			iss.LastComment = &types.Comment{
-				Body:      strVal(nm["body"]),
-				CreatedAt: parseISO(strVal(nm["createdAt"])),
-				UpdatedAt: parseISO(strVal(nm["updatedAt"])),
-			}
-			break
-		}
 	}
 	if pri, ok := node["priority"].(float64); ok && pri > 0 {
 		p := int(pri)

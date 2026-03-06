@@ -2,17 +2,20 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
-	"io"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/tracker"
-	"symphony/internal/types"
 )
 
 func TestOnWorkerDoneDuringDrainDoesNotScheduleRetry(t *testing.T) {
@@ -82,625 +85,326 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestOnRetryTimerKeepsAttemptAndFailureCountWhenNoSlots(t *testing.T) {
+func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-27","title":"retry","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-06T00:00:00Z","updatedAt":"2026-03-06T00:00:00Z"}]}}}`))
-	}))
-	defer srv.Close()
+	wsPath := initGitWorkspace(t)
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
 
-	tr, err := tracker.NewLinearClient("token", srv.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
 	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
+		t.Fatalf("NewLinearClient: %v", err)
 	}
-
-	o := New("", 0, "alpha", nil)
-	o.tracker = tr
-
-	entry := &RetryEntry{
-		IssueID:      "issue-1",
-		Identifier:   "J-27",
-		Attempt:      3,
-		FailureCount: 2,
-		DueAt:        time.Now(),
-	}
-
-	o.state.mu.Lock()
-	o.state.MaxConcurrentAgents = 0
-	o.state.RetryQueue[entry.IssueID] = entry
-	o.state.Claimed[entry.IssueID] = struct{}{}
-	o.state.mu.Unlock()
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
-			"active_states": []any{"In Progress"},
+			"on_success_state": "Human Review",
+		},
+		"agent": map[string]any{
+			"max_attempts": 2,
+			"max_turns":    3,
 		},
 	})
 
-	o.onRetryTimer(context.Background(), cfg, entry.IssueID)
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	rescheduled, ok := o.state.RetryQueue[entry.IssueID]
-	if !ok {
-		t.Fatal("retry entry should be rescheduled")
-	}
-	if rescheduled.timer != nil {
-		rescheduled.timer.Stop()
-	}
-	if rescheduled.Attempt != 3 {
-		t.Fatalf("retry attempt = %d, want 3", rescheduled.Attempt)
-	}
-	if rescheduled.FailureCount != 2 {
-		t.Fatalf("retry failure_count = %d, want 2", rescheduled.FailureCount)
-	}
-}
-
-func TestOnRetryTimerReleasesClaimWhenIssueBecomesInactive(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-27","title":"retry","description":"","priority":0,"state":{"name":"Done"},"branchName":"","url":"","labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-06T00:00:00Z","updatedAt":"2026-03-06T00:00:00Z"}]}}}`))
-	}))
-	defer srv.Close()
-
-	tr, err := tracker.NewLinearClient("token", srv.URL, "proj", []string{"In Progress", "Done"})
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
 	o := New("", 0, "alpha", nil)
-	o.tracker = tr
-
-	entry := &RetryEntry{
-		IssueID:      "issue-1",
-		Identifier:   "J-27",
-		Attempt:      3,
-		FailureCount: 2,
-		DueAt:        time.Now(),
-	}
-
-	o.state.mu.Lock()
-	o.state.MaxConcurrentAgents = 1
-	o.state.RetryQueue[entry.IssueID] = entry
-	o.state.Claimed[entry.IssueID] = struct{}{}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states":   []any{"In Progress"},
-			"terminal_states": []any{"Done"},
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:       "issue-1",
+		Identifier:    "J-29",
+		Attempt:       1,
+		WorkspacePath: wsPath,
+		StartedAt:     time.Now().Add(-(3*time.Minute + 4*time.Second)),
+		Status:        StatusSucceeded,
+		Session: LiveSession{
+			TurnCount:    2,
+			InputTokens:  28000,
+			OutputTokens: 14100,
+			TotalTokens:  42100,
 		},
-	})
-
-	o.onRetryTimer(context.Background(), cfg, entry.IssueID)
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	if _, ok := o.state.RetryQueue[entry.IssueID]; ok {
-		t.Fatal("retry entry should be cleared when issue becomes inactive")
 	}
-	if _, ok := o.state.Claimed[entry.IssueID]; ok {
-		t.Fatal("claimed issue should be released when issue becomes inactive")
-	}
-	if _, ok := o.state.Abandoned[entry.IssueID]; ok {
-		t.Fatal("inactive issue should not be marked abandoned by retry timer")
-	}
-}
-
-func TestOnWorkerDoneFailureSchedulesIncrementedRetry(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-27", Attempt: 1}
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
 	o.state.Claimed[attempt.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
-	o.onWorkerDone(context.Background(), config.New(nil), attempt.IssueID, attempt, errors.New("boom"))
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil)
 
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
+	stopRetryTimer(t, o, attempt.IssueID)
 
-	entry, ok := o.state.RetryQueue[attempt.IssueID]
-	if !ok {
-		t.Fatal("retry entry should be scheduled")
+	if recorder.commentCount() != 1 {
+		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
 	}
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	if entry.Attempt != 2 {
-		t.Fatalf("retry attempt = %d, want 2", entry.Attempt)
-	}
-	if entry.FailureCount != 1 {
-		t.Fatalf("retry failure_count = %d, want 1", entry.FailureCount)
-	}
-}
-
-func TestOnWorkerDoneSuccessKeepsAttemptNumber(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-27", Attempt: 1, FailureCount: 3}
-
-	o.state.mu.Lock()
-	o.state.Running[attempt.IssueID] = attempt
-	o.state.Claimed[attempt.IssueID] = struct{}{}
-	o.state.mu.Unlock()
-
-	o.onWorkerDone(context.Background(), config.New(nil), attempt.IssueID, attempt, nil)
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	entry, ok := o.state.RetryQueue[attempt.IssueID]
-	if !ok {
-		t.Fatal("retry entry should be scheduled")
-	}
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	if entry.Attempt != 1 {
-		t.Fatalf("retry attempt = %d, want 1", entry.Attempt)
-	}
-	if entry.FailureCount != 0 {
-		t.Fatalf("retry failure_count = %d, want 0", entry.FailureCount)
-	}
-}
-
-func TestShouldAbandonRetryOnlyAfterExceedingMaxAttempts(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-
-	disabled := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_retry_attempts": 0,
-		},
-	})
-	if o.shouldAbandonRetry(disabled, 100) {
-		t.Fatal("disabled max_retry_attempts should never abandon")
-	}
-
-	cfg := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_retry_attempts": 2,
-		},
-	})
-	if o.shouldAbandonRetry(cfg, 2) {
-		t.Fatal("failure count equal to max should not abandon")
-	}
-	if !o.shouldAbandonRetry(cfg, 3) {
-		t.Fatal("failure count above max should abandon")
-	}
-}
-
-func TestOnWorkerDoneFailureAbandonsAfterMaxRetryAttempts(t *testing.T) {
-	t.Parallel()
-
-	var capturedBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
+	body := recorder.lastComment()
+	for _, want := range []string{
+		"✅ **Symphony agent completed** (attempt 1, turn 2/3)",
+		"**Tokens:** 42,100 (in: 28,000 / out: 14,100)",
+		"- Modified: foo.txt",
+		"- Last commit: `feat: add foo (",
+		"- PR: https://github.com/J132134/symphony/pull/new/j-29-test",
+		"**Branch:** `j-29-test`",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("comment body missing %q:\n%s", want, body)
 		}
-		capturedBody = string(raw)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
-	}))
-	defer srv.Close()
+	}
+	if got := recorder.lastState(); got != "Human Review" {
+		t.Fatalf("state transition = %q, want Human Review", got)
+	}
 
-	tr, err := tracker.NewLinearClient("token", srv.URL, "proj", []string{"Todo", "In Progress"})
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if o.state.CompletedCount != 1 {
+		t.Fatalf("completed count = %d, want 1", o.state.CompletedCount)
+	}
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+		t.Fatal("expected success path to schedule follow-up retry")
+	}
+}
+
+func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
 	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
+		t.Fatalf("NewLinearClient: %v", err)
 	}
-
-	o := New("", 0, "alpha", nil)
-	o.tracker = tr
-
-	attempt := &RunAttempt{
-		IssueID:      "issue-1",
-		Identifier:   "J-27",
-		Attempt:      2,
-		FailureCount: 1,
-		IssueState:   "In Progress",
-	}
-
-	o.state.mu.Lock()
-	o.state.Running[attempt.IssueID] = attempt
-	o.state.Claimed[attempt.IssueID] = struct{}{}
-	o.state.mu.Unlock()
 
 	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"on_failure_state": "Rework",
+		},
 		"agent": map[string]any{
-			"max_retry_attempts": 1,
+			"max_attempts": 2,
 		},
 	})
-
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, errors.New("fatal setup"))
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
-		t.Fatal("retry entry should not exist after abandon")
-	}
-	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
-		t.Fatal("claimed issue should be released after abandon")
-	}
-	entry, ok := o.state.Abandoned[attempt.IssueID]
-	if !ok {
-		t.Fatal("abandoned entry should be recorded")
-	}
-	if entry.FailureCount != 2 {
-		t.Fatalf("abandoned failure_count = %d, want 2", entry.FailureCount)
-	}
-	if !strings.Contains(capturedBody, "commentCreate") {
-		t.Fatalf("commentCreate mutation was not sent: %s", capturedBody)
-	}
-	if !strings.Contains(capturedBody, "fatal setup") {
-		t.Fatalf("last error missing from comment body: %s", capturedBody)
-	}
-}
-
-func TestOnWorkerDoneFailureAbandonsEvenWhenCommentFails(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"errors":[{"message":"boom"}]}`))
-	}))
-	defer srv.Close()
-
-	tr, err := tracker.NewLinearClient("token", srv.URL, "proj", []string{"Todo", "In Progress"})
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = tr
-
-	attempt := &RunAttempt{
-		IssueID:      "issue-1",
-		Identifier:   "J-27",
-		Attempt:      2,
-		FailureCount: 1,
-		IssueState:   "In Progress",
-	}
-
-	o.state.mu.Lock()
-	o.state.Running[attempt.IssueID] = attempt
-	o.state.Claimed[attempt.IssueID] = struct{}{}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_retry_attempts": 1,
-		},
-	})
-
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, errors.New("fatal setup"))
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
-		t.Fatal("retry entry should not exist after abandon")
-	}
-	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
-		t.Fatal("claimed issue should be released after abandon")
-	}
-	entry, ok := o.state.Abandoned[attempt.IssueID]
-	if !ok {
-		t.Fatal("abandoned entry should still be recorded when comment create fails")
-	}
-	if entry.Error != "fatal setup" {
-		t.Fatalf("abandoned error = %q, want %q", entry.Error, "fatal setup")
-	}
-}
-
-func TestOnWorkerDoneFailureDoesNotAbandonWhenMaxRetryAttemptsDisabled(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	attempt := &RunAttempt{
-		IssueID:      "issue-1",
-		Identifier:   "J-27",
-		Attempt:      4,
-		FailureCount: 7,
-		IssueState:   "In Progress",
-	}
-
-	o.state.mu.Lock()
-	o.state.Running[attempt.IssueID] = attempt
-	o.state.Claimed[attempt.IssueID] = struct{}{}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_retry_attempts": 0,
-		},
-	})
-
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, errors.New("fatal setup"))
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-
-	if _, ok := o.state.Abandoned[attempt.IssueID]; ok {
-		t.Fatal("abandoned entry should not be recorded when max_retry_attempts is disabled")
-	}
-	entry, ok := o.state.RetryQueue[attempt.IssueID]
-	if !ok {
-		t.Fatal("retry entry should be scheduled when max_retry_attempts is disabled")
-	}
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	if entry.Attempt != 5 {
-		t.Fatalf("retry attempt = %d, want 5", entry.Attempt)
-	}
-	if entry.FailureCount != 8 {
-		t.Fatalf("retry failure_count = %d, want 8", entry.FailureCount)
-	}
-}
-
-func TestCanDispatchReleasesAbandonedIssueAfterStateChange(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	o.state.mu.Lock()
-	o.state.Abandoned["issue-1"] = &AbandonedEntry{
-		Identifier: "J-27",
-		State:      "In Progress",
-	}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"Todo", "In Progress", "Rework"},
-		},
-	})
-
-	sameState := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
-	if o.canDispatch(cfg, sameState) {
-		t.Fatal("abandoned issue should stay blocked while state is unchanged")
-	}
-
-	nextState := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "Rework"}
-	if !o.canDispatch(cfg, nextState) {
-		t.Fatal("state change should release abandoned issue")
-	}
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-	if _, ok := o.state.Abandoned["issue-1"]; ok {
-		t.Fatal("abandoned entry should be cleared after state change")
-	}
-}
-
-func TestCanDispatchReleasesAbandonedIssueAfterUpdateAtSameState(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	abandonedAt := time.Now().Add(-time.Minute)
-
-	o.state.mu.Lock()
-	o.state.Abandoned["issue-1"] = &AbandonedEntry{
-		Identifier:  "J-27",
-		State:       "In Progress",
-		AbandonedAt: abandonedAt,
-	}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"Todo", "In Progress"},
-		},
-	})
-
-	staleUpdatedAt := abandonedAt.Add(-time.Second)
-	stale := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress", UpdatedAt: &staleUpdatedAt}
-	if o.canDispatch(cfg, stale) {
-		t.Fatal("abandoned issue should stay blocked when same-state issue was not updated after abandon")
-	}
-
-	freshUpdatedAt := abandonedAt.Add(time.Second)
-	fresh := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress", UpdatedAt: &freshUpdatedAt}
-	if !o.canDispatch(cfg, fresh) {
-		t.Fatal("same-state issue updated after abandon should be dispatchable")
-	}
-}
-
-func TestCanDispatchKeepsAbandonedIssueBlockedForOwnAbandonCommentUpdate(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	abandonedAt := time.Now().Add(-time.Minute)
-	commentUpdatedAt := abandonedAt.Add(2 * time.Second)
-
-	o.state.mu.Lock()
-	o.state.Abandoned["issue-1"] = &AbandonedEntry{
-		Identifier:  "J-27",
-		State:       "In Progress",
-		AbandonedAt: abandonedAt,
-	}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"Todo", "In Progress"},
-		},
-	})
-
-	issue := &types.Issue{
-		ID:         "issue-1",
-		Identifier: "J-27",
-		State:      "In Progress",
-		UpdatedAt:  &commentUpdatedAt,
-		LastComment: &types.Comment{
-			Body:      buildRetryAbandonComment("J-27", 3, 4, "fatal setup"),
-			UpdatedAt: &commentUpdatedAt,
-		},
-	}
-	if o.canDispatch(cfg, issue) {
-		t.Fatal("own abandon comment should not release same-state abandoned issue")
-	}
-}
-
-func TestCanDispatchReleasesAbandonedIssueAfterUpdatePastOwnAbandonComment(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	abandonedAt := time.Now().Add(-time.Minute)
-	commentUpdatedAt := abandonedAt.Add(2 * time.Second)
-	issueUpdatedAt := commentUpdatedAt.Add(time.Second)
-
-	o.state.mu.Lock()
-	o.state.Abandoned["issue-1"] = &AbandonedEntry{
-		Identifier:  "J-27",
-		State:       "In Progress",
-		AbandonedAt: abandonedAt,
-	}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"Todo", "In Progress"},
-		},
-	})
-
-	issue := &types.Issue{
-		ID:         "issue-1",
-		Identifier: "J-27",
-		State:      "In Progress",
-		UpdatedAt:  &issueUpdatedAt,
-		LastComment: &types.Comment{
-			Body:      buildRetryAbandonComment("J-27", 3, 4, "fatal setup"),
-			UpdatedAt: &commentUpdatedAt,
-		},
-	}
-	if !o.canDispatch(cfg, issue) {
-		t.Fatal("same-state issue updated after abandon comment should be dispatchable")
-	}
-}
-
-func TestCanDispatchKeepsAbandonedIssueBlockedWhenUpdatedAtMissing(t *testing.T) {
-	t.Parallel()
-
-	o := New("", 0, "alpha", nil)
-	abandonedAt := time.Now().Add(-time.Minute)
-
-	o.state.mu.Lock()
-	o.state.Abandoned["issue-1"] = &AbandonedEntry{
-		Identifier:  "J-27",
-		State:       "In Progress",
-		AbandonedAt: abandonedAt,
-	}
-	o.state.mu.Unlock()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"Todo", "In Progress"},
-		},
-	})
-
-	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
-	if o.canDispatch(cfg, issue) {
-		t.Fatal("abandoned issue should stay blocked when updatedAt is missing")
-	}
-
-	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-	if _, ok := o.state.Abandoned["issue-1"]; !ok {
-		t.Fatal("abandoned issue should remain recorded when updatedAt is missing")
-	}
-}
-
-func TestReconcileUpdatesRunningIssueState(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"issue-1","identifier":"J-27","state":{"name":"Rework"}}]}}}`))
-	}))
-	defer srv.Close()
-
-	tr, err := tracker.NewLinearClient("token", srv.URL, "proj", []string{"Todo", "In Progress", "Rework"})
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	o := New("", 0, "alpha", nil)
-	o.tracker = tr
-	o.cfg = config.New(map[string]any{
-		"tracker": map[string]any{
-			"terminal_states": []any{"Done"},
-		},
-		"codex": map[string]any{
-			"stall_timeout_ms": 60_000,
-		},
-	})
-
+	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
-		Identifier: "J-27",
-		IssueState: "Todo",
-		StartedAt:  time.Now(),
+		Identifier: "J-29",
+		Attempt:    2,
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+		Status:     StatusStalled,
+		Session: LiveSession{
+			TurnCount: 1,
+		},
 	}
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
-	o.reconcile(context.Background())
+	runErr := fmt.Errorf("turn failed: stall_timeout")
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, runErr)
+
+	if recorder.commentCount() != 1 {
+		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
+	}
+	body := recorder.lastComment()
+	for _, want := range []string{
+		"❌ **Symphony agent failed** (attempt 2/2)",
+		"**Error:** turn failed: stall_timeout",
+		"**Duration:** 5m 0s (stalled)",
+		"**Last status:** stalled (turn 1)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("comment body missing %q:\n%s", want, body)
+		}
+	}
+	if got := recorder.lastState(); got != "Rework" {
+		t.Fatalf("state transition = %q, want Rework", got)
+	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
-	if got := o.state.Running[attempt.IssueID].IssueState; got != "Rework" {
-		t.Fatalf("IssueState = %q, want %q", got, "Rework")
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
+		t.Fatal("final failure should not schedule a retry")
+	}
+	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
+		t.Fatal("final failure should release the claimed issue")
 	}
 }
 
-func TestBuildRetryAbandonCommentIncludesCountsAndError(t *testing.T) {
+func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	t.Parallel()
 
-	body := buildRetryAbandonComment("J-27", 3, 4, "fatal setup")
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
 
-	if !strings.Contains(body, "J-27") {
-		t.Fatalf("comment body missing identifier: %s", body)
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
 	}
-	if !strings.Contains(body, retryAbandonCommentMarker) {
-		t.Fatalf("comment body missing abandon marker: %s", body)
+
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_attempts": 3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-29",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		Status:     StatusFailed,
 	}
-	if !strings.Contains(body, "agent.max_retry_attempts=3") {
-		t.Fatalf("comment body missing max attempts: %s", body)
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, fmt.Errorf("boom"))
+	stopRetryTimer(t, o, attempt.IssueID)
+
+	if recorder.commentCount() != 0 {
+		t.Fatalf("comment count = %d, want 0", recorder.commentCount())
 	}
-	if !strings.Contains(body, "연속 실패 횟수: 4회") {
-		t.Fatalf("comment body missing failure count: %s", body)
+	if recorder.lastState() != "" {
+		t.Fatalf("unexpected state transition = %q", recorder.lastState())
 	}
-	if !strings.Contains(body, "fatal setup") {
-		t.Fatalf("comment body missing last error: %s", body)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+		t.Fatal("expected retry to be scheduled for intermediate failure")
 	}
 }
 
-func TestBuildRetryAbandonCommentTruncatesLongError(t *testing.T) {
-	t.Parallel()
+type linearRecorder struct {
+	mu         sync.Mutex
+	comments   []string
+	stateNames []string
+}
 
-	errMsg := strings.Repeat("x", 2100)
-	body := buildRetryAbandonComment("J-27", 3, 4, errMsg)
+func (r *linearRecorder) addComment(body string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.comments = append(r.comments, body)
+}
 
-	if strings.Contains(body, strings.Repeat("x", 2001)) {
-		t.Fatalf("comment body should truncate long error: len=%d", len(body))
+func (r *linearRecorder) addState(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stateNames = append(r.stateNames, name)
+}
+
+func (r *linearRecorder) commentCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.comments)
+}
+
+func (r *linearRecorder) lastComment() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.comments) == 0 {
+		return ""
 	}
-	if !strings.Contains(body, strings.Repeat("x", 2000)) {
-		t.Fatalf("comment body should include truncated 2000-char error payload")
+	return r.comments[len(r.comments)-1]
+}
+
+func (r *linearRecorder) lastState() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.stateNames) == 0 {
+		return ""
 	}
+	return r.stateNames[len(r.stateNames)-1]
+}
+
+func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
+	t.Helper()
+
+	recorder := &linearRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "commentCreate"):
+			input, _ := req.Variables["input"].(map[string]any)
+			recorder.addComment(asString(input["body"]))
+			_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+		case strings.Contains(req.Query, "issue(id: $id)"):
+			_, _ = w.Write([]byte(`{"data":{"issue":{"team":{"states":{"nodes":[{"id":"state-human-review","name":"Human Review"},{"id":"state-rework","name":"Rework"}]}}}}}`))
+		case strings.Contains(req.Query, "issueUpdate"):
+			switch asString(req.Variables["stateId"]) {
+			case "state-human-review":
+				recorder.addState("Human Review")
+			case "state-rework":
+				recorder.addState("Rework")
+			default:
+				recorder.addState(asString(req.Variables["stateId"]))
+			}
+			_, _ = w.Write([]byte(`{"data":{"issueUpdate":{"success":true}}}`))
+		default:
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+	}))
+
+	return recorder, server
+}
+
+func initGitWorkspace(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "checkout", "-b", "j-29-test")
+	runGit(t, dir, "remote", "add", "origin", "https://github.com/J132134/symphony.git")
+
+	path := filepath.Join(dir, "foo.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write foo.txt: %v", err)
+	}
+	runGit(t, dir, "add", "foo.txt")
+	runGit(t, dir, "commit", "-m", "feat: add foo")
+	return dir
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func stopRetryTimer(t *testing.T, o *Orchestrator, issueID string) {
+	t.Helper()
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue[issueID]
+	if !ok || entry.timer == nil {
+		return
+	}
+	entry.timer.Stop()
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
 }

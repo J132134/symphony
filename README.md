@@ -56,6 +56,9 @@ tracker:
   project_slug: my-project
   active_states: [Todo, In Progress]
   terminal_states: [Done, Cancelled, Duplicate]
+  post_comments: true
+  on_success_state: Human Review
+  on_failure_state: ""
 
 polling:
   interval_ms: 10000
@@ -65,8 +68,8 @@ workspace:
 
 agent:
   max_concurrent_agents: 3
+  max_attempts: 3
   max_turns: 10
-  max_retry_attempts: 5
 
 codex:
   command: codex app-server
@@ -193,6 +196,27 @@ hooks:
 
 스크립트 실행 시 `SYMPHONY_WORKSPACE` 환경변수로 현재 워크스페이스 절대경로가 전달된다.
 
+## Linear 피드백
+
+기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남긴다. 코멘트 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
+
+```yaml
+tracker:
+  post_comments: true
+  on_success_state: Human Review
+  on_failure_state: Rework
+  pr_url_template: https://github.com/{repo_path}/pull/new/{branch}
+
+agent:
+  max_attempts: 3
+```
+
+- `tracker.post_comments`: Linear 코멘트 등록 on/off. 기본값은 `true`.
+- `tracker.on_success_state`: 성공 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
+- `tracker.on_failure_state`: 최종 실패 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
+- `tracker.pr_url_template`: PR 링크 템플릿. `{branch}`, `{branch_raw}`, `{commit}`, `{owner}`, `{repo}`, `{repo_path}`, `{remote_url}` 치환을 지원한다. 비우면 GitHub `origin` remote에서 `pull/new/<branch>` URL을 자동 유도한다.
+- `agent.max_attempts`: 워커 실행 최대 시도 횟수. 기본값은 `3`.
+
 ## 프롬프트 템플릿 변수
 
 | 변수 | 타입 | 설명 |
@@ -215,9 +239,10 @@ hooks:
 | `polling.interval_ms` | `10000` (10초) |
 | `workspace.root` | `~/.symphony/workspaces` |
 | `agent.max_concurrent_agents` | `10` |
+| `agent.max_attempts` | `3` |
 | `agent.max_turns` | `3` |
-| `agent.max_retry_attempts` | `0` (disabled) |
 | `agent.max_retry_backoff_ms` | `300000` (5분) |
+| `tracker.post_comments` | `true` |
 | `codex.command` | `codex app-server` |
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
 | `codex.stall_timeout_ms` | `300000` (5분) |
@@ -266,8 +291,6 @@ after_run hook 실행
 | 비정상 종료 attempt 2 | 20초 |
 | 비정상 종료 attempt 3 | 40초 |
 | 비정상 종료 attempt 4+ | 최대 5분 |
-
-`agent.max_retry_attempts`가 0보다 크면 비정상 종료 연속 실패 횟수가 값을 초과하는 시점에 재시도를 중단하고 Linear 이슈에 코멘트를 남긴다. 이후 이슈 state가 바뀌거나 이슈가 수정되면 다시 dispatch될 수 있다.
 
 ### Reconciliation (매 폴링 tick마다)
 
