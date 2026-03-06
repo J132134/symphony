@@ -522,8 +522,9 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 		ApprovalPolicy:    cfg.ApprovalPolicy(),
 		MaxTurns:          cfg.MaxTurns(),
 		TurnTimeoutMs:     cfg.TurnTimeoutMs(),
-		ReadTimeoutMs:     cfg.ReadTimeoutMs(),
-		StallTimeoutMs:    cfg.StallTimeoutMs(),
+		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
+		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
+		StallTimeoutMs:       cfg.StallTimeoutMs(),
 		TurnSandboxPolicy: cfg.TurnSandboxPolicy(),
 		ThreadSandbox:     cfg.ThreadSandbox(),
 	}

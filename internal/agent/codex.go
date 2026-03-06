@@ -38,9 +38,10 @@ type Config struct {
 	Command          string
 	ApprovalPolicy   string
 	MaxTurns         int
-	TurnTimeoutMs    int
-	ReadTimeoutMs    int
-	StallTimeoutMs   int
+	TurnTimeoutMs         int
+	ReadTimeoutMs         int
+	ThreadStartTimeoutMs  int
+	StallTimeoutMs        int
 	TurnSandboxPolicy string
 	ThreadSandbox    string
 }
@@ -177,7 +178,8 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 		threadParams["sandbox"] = sb
 	}
 
-	threadRes, err := r.sendRequest(ctx, readTimeout, methodThreadStart, threadParams)
+	threadStartTimeout := time.Duration(cfg.ThreadStartTimeoutMs) * time.Millisecond
+	threadRes, err := r.sendRequest(ctx, threadStartTimeout, methodThreadStart, threadParams)
 	if err != nil {
 		return "", fmt.Errorf("thread/start: %w", err)
 	}
