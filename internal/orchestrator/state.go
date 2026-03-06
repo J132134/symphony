@@ -56,6 +56,8 @@ type RunAttempt struct {
 	Session        LiveSession
 	IssueState     string // last known tracker state for per-state concurrency
 	GlobalSlotHeld bool
+	Urgent         bool
+	Preempted      bool
 
 	cancel context.CancelFunc
 }
