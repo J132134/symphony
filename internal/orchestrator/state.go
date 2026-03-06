@@ -40,15 +40,16 @@ type LiveSession struct {
 }
 
 type RunAttempt struct {
-	IssueID       string
-	Identifier    string
-	Attempt       int
-	WorkspacePath string
-	StartedAt     time.Time
-	Status        RunStatus
-	Error         string
-	Session       LiveSession
-	IssueState    string // last known tracker state for per-state concurrency
+	IssueID        string
+	Identifier     string
+	Attempt        int
+	WorkspacePath  string
+	StartedAt      time.Time
+	Status         RunStatus
+	Error          string
+	Session        LiveSession
+	IssueState     string // last known tracker state for per-state concurrency
+	GlobalSlotHeld bool
 
 	cancel context.CancelFunc
 }
