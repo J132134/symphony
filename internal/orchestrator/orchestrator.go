@@ -112,17 +112,35 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 // Stop signals shutdown and waits for the loop to exit.
 func (o *Orchestrator) Stop() {
-	select {
-	case <-o.stopCh:
-	default:
-		close(o.stopCh)
-	}
+	o.requestStop(false)
 	o.mu.Lock()
 	for _, cancel := range o.workerCancels {
 		cancel()
 	}
 	o.mu.Unlock()
 	<-o.doneCh
+}
+
+// DrainAndStop stops polling and waits for running turns to finish naturally.
+func (o *Orchestrator) DrainAndStop() {
+	o.requestStop(true)
+	<-o.doneCh
+}
+
+func (o *Orchestrator) requestStop(drain bool) {
+	if drain {
+		o.state.mu.Lock()
+		if !o.state.Draining {
+			o.state.Draining = true
+			o.clearRetryQueueLocked(true)
+		}
+		o.state.mu.Unlock()
+	}
+	select {
+	case <-o.stopCh:
+	default:
+		close(o.stopCh)
+	}
 }
 
 func (o *Orchestrator) GetState() *State { return o.state }
@@ -164,27 +182,39 @@ func (o *Orchestrator) pollLoop(ctx context.Context) error {
 
 		select {
 		case <-o.stopCh:
-			return o.gracefulStop()
+			return o.gracefulStop(o.isDraining())
 		case <-ctx.Done():
-			return o.gracefulStop()
+			return o.gracefulStop(false)
 		case <-time.After(time.Duration(intervalMs) * time.Millisecond):
 		}
 		o.tick(ctx)
 	}
 }
 
-func (o *Orchestrator) gracefulStop() error {
+func (o *Orchestrator) gracefulStop(drain bool) error {
 	slog.Info("orchestrator.stopping", "project", o.name)
 
 	o.state.mu.Lock()
 	o.clearRetryQueueLocked(true)
 	o.state.mu.Unlock()
 
-	o.mu.Lock()
-	for _, cancel := range o.workerCancels {
-		cancel()
+	if drain {
+		for {
+			o.state.mu.Lock()
+			running := len(o.state.Running)
+			o.state.mu.Unlock()
+			if running == 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	} else {
+		o.mu.Lock()
+		for _, cancel := range o.workerCancels {
+			cancel()
+		}
+		o.mu.Unlock()
 	}
-	o.mu.Unlock()
 
 	slog.Info("orchestrator.stopped", "project", o.name)
 	return nil
@@ -193,6 +223,9 @@ func (o *Orchestrator) gracefulStop() error {
 // -- tick --
 
 func (o *Orchestrator) tick(ctx context.Context) {
+	if o.isStopping() {
+		return
+	}
 	slog.Debug("orchestrator.tick", "project", o.name)
 	o.reconcile(ctx)
 
@@ -220,7 +253,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	sortCandidates(candidates)
 
 	for _, issue := range candidates {
-		if o.isDraining() {
+		if o.isStopping() || o.isDraining() {
 			return
 		}
 
@@ -378,20 +411,28 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		return
 	}
 
+	draining := o.isDraining()
+
 	if err == nil {
 		o.state.mu.Lock()
 		o.state.CompletedCount++
 		o.state.mu.Unlock()
-		slog.Info("orchestrator.worker_completed", "project", o.name, "issue_id", issueID)
+		if draining {
+			slog.Info("orchestrator.worker_drained", "project", o.name, "issue_id", issueID)
+		} else {
+			slog.Info("orchestrator.worker_completed", "project", o.name, "issue_id", issueID)
+		}
 	} else {
 		slog.Error("orchestrator.worker_failed", "project", o.name, "issue_id", issueID, "error", err)
 	}
 
-	if o.isDraining() {
+	if draining {
 		o.state.mu.Lock()
 		delete(o.state.Claimed, issueID)
 		o.state.mu.Unlock()
-		slog.Info("orchestrator.worker_finished_during_drain", "project", o.name, "issue_id", issueID)
+		if err != nil {
+			slog.Info("orchestrator.worker_finished_during_drain", "project", o.name, "issue_id", issueID)
+		}
 		return
 	}
 
@@ -687,6 +728,13 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 }
 
 func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyConfig, issueID string) {
+	if o.isStopping() {
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		return
+	}
+
 	o.state.mu.Lock()
 	entry, ok := o.state.RetryQueue[issueID]
 	if ok {
@@ -883,6 +931,15 @@ func isCtxErr(err error) bool {
 
 func (o *Orchestrator) hasGlobalCapacity() bool {
 	return o.globalLimiter == nil || o.globalLimiter.Available() > 0
+}
+
+func (o *Orchestrator) isStopping() bool {
+	select {
+	case <-o.stopCh:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *Orchestrator) releaseGlobalSlot(attempt *RunAttempt) {

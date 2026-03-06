@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestRequestRestartWhenIdleWaitsForRunningWork(t *testing.T) {
 		proj: config.ProjectConfig{Name: "alpha"},
 		orch: orch,
 	}
-	mgr.runners = []*projectRunner{runner}
+	mgr.runners = map[string]*projectRunner{"alpha": runner}
 
 	ready := mgr.RequestRestartWhenIdle()
 	if ready != mgr.RequestRestartWhenIdle() {
@@ -66,10 +67,10 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 
 	mgr := &Manager{
 		cfg: &config.DaemonConfig{},
-		runners: []*projectRunner{
-			{proj: config.ProjectConfig{Name: "alpha"}, orch: running},
-			{proj: config.ProjectConfig{Name: "beta"}, orch: networkLost},
-			{proj: config.ProjectConfig{Name: "gamma"}, lastErr: "workflow load failed"},
+		runners: map[string]*projectRunner{
+			"alpha": {proj: config.ProjectConfig{Name: "alpha"}, orch: running},
+			"beta":  {proj: config.ProjectConfig{Name: "beta"}, orch: networkLost},
+			"gamma": {proj: config.ProjectConfig{Name: "gamma"}, lastErr: "workflow load failed"},
 		},
 	}
 
@@ -92,4 +93,99 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	if summary.Projects[2].LastError != "workflow load failed" {
 		t.Fatalf("last_error = %q, want workflow load failed", summary.Projects[2].LastError)
 	}
+}
+
+func TestManagerApplyConfigReconcilesProjectDiff(t *testing.T) {
+	t.Parallel()
+
+	alpha := config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"}
+	betaOld := config.ProjectConfig{Name: "beta", Workflow: "/tmp/beta-old"}
+	betaNew := config.ProjectConfig{Name: "beta", Workflow: "/tmp/beta-new"}
+	gamma := config.ProjectConfig{Name: "gamma", Workflow: "/tmp/gamma"}
+
+	stopCounts := map[string]int{}
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{Projects: []config.ProjectConfig{alpha, betaOld}},
+		runners: map[string]*projectRunner{
+			"alpha": {
+				proj:   alpha,
+				cancel: func() { stopCounts["alpha"]++ },
+				done:   closedDone(),
+			},
+			"beta": {
+				proj:   betaOld,
+				cancel: func() { stopCounts["beta"]++ },
+				done:   closedDone(),
+			},
+		},
+	}
+
+	oldBetaRunner := mgr.runners["beta"]
+
+	mgr.ApplyConfig(&config.DaemonConfig{
+		Projects: []config.ProjectConfig{betaNew, gamma},
+	})
+
+	if stopCounts["alpha"] != 1 {
+		t.Fatalf("alpha stop count = %d, want 1", stopCounts["alpha"])
+	}
+	if stopCounts["beta"] != 1 {
+		t.Fatalf("beta stop count = %d, want 1", stopCounts["beta"])
+	}
+	if _, ok := mgr.runners["alpha"]; ok {
+		t.Fatal("alpha should be removed")
+	}
+	if got := mgr.runners["beta"].proj; !projectConfigEqual(got, betaNew) {
+		t.Fatalf("beta config = %+v, want %+v", got, betaNew)
+	}
+	if got := mgr.runners["gamma"].proj; !projectConfigEqual(got, gamma) {
+		t.Fatalf("gamma config = %+v, want %+v", got, gamma)
+	}
+	if mgr.runners["beta"] == oldBetaRunner {
+		t.Fatal("updated beta runner should be replaced")
+	}
+}
+
+func TestManagerApplyConfigIgnoresProjectOrderOnlyChanges(t *testing.T) {
+	t.Parallel()
+
+	alpha := config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"}
+	beta := config.ProjectConfig{Name: "beta", Workflow: "/tmp/beta"}
+
+	stopCounts := map[string]int{}
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{Projects: []config.ProjectConfig{alpha, beta}},
+		runners: map[string]*projectRunner{
+			"alpha": {
+				proj:   alpha,
+				cancel: func() { stopCounts["alpha"]++ },
+				done:   closedDone(),
+			},
+			"beta": {
+				proj:   beta,
+				cancel: func() { stopCounts["beta"]++ },
+				done:   closedDone(),
+			},
+		},
+	}
+
+	before := []*projectRunner{mgr.runners["alpha"], mgr.runners["beta"]}
+
+	mgr.ApplyConfig(&config.DaemonConfig{
+		Projects: []config.ProjectConfig{beta, alpha},
+	})
+
+	if stopCounts["alpha"] != 0 || stopCounts["beta"] != 0 {
+		t.Fatalf("order-only change should not stop runners, got %+v", stopCounts)
+	}
+	after := []*projectRunner{mgr.runners["alpha"], mgr.runners["beta"]}
+	if !slices.Equal(before, after) {
+		t.Fatal("order-only change should keep existing runners")
+	}
+}
+
+func closedDone() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
