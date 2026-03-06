@@ -243,7 +243,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	tr := o.tracker
 	o.mu.Unlock()
 
-	if cfg == nil || tr == nil || len(cfg.Validate()) > 0 {
+	if cfg == nil || tr == nil {
 		return
 	}
 
@@ -518,15 +518,15 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	// 4. Launch agent.
 	attempt.Status = StatusLaunchingAgent
 	agentCfg := &agent.Config{
-		Command:           cfg.CodexCommand(),
-		ApprovalPolicy:    cfg.ApprovalPolicy(),
-		MaxTurns:          cfg.MaxTurns(),
-		TurnTimeoutMs:     cfg.TurnTimeoutMs(),
+		Command:              cfg.CodexCommand(),
+		ApprovalPolicy:       cfg.ApprovalPolicy(),
+		MaxTurns:             cfg.MaxTurns(),
+		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
 		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
 		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
 		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy: cfg.TurnSandboxPolicy(),
-		ThreadSandbox:     cfg.ThreadSandbox(),
+		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
+		ThreadSandbox:        cfg.ThreadSandbox(),
 	}
 
 	// 5. Handshake.
@@ -906,6 +906,10 @@ func (o *Orchestrator) reloadWorkflow() error {
 		return err
 	}
 	cfg := config.New(wf.Config)
+	if errs := cfg.Validate(); len(errs) > 0 {
+		return fmt.Errorf("config: %s", strings.Join(errs, "; "))
+	}
+
 	o.mu.Lock()
 	o.wf = wf
 	o.cfg = cfg

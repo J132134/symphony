@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -180,6 +181,57 @@ func TestWatchWorkflowReloadsOnFileChange(t *testing.T) {
 			o.state.PollIntervalIdleMs == 2500 &&
 			o.state.MaxConcurrentAgents == 4
 	})
+}
+
+func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	writeWorkflowFile(t, workflowPath, 1000, 2000)
+
+	o := New(workflowPath, 0, "alpha", nil)
+	o.workflowWatchDebounce = 20 * time.Millisecond
+	if err := o.reloadWorkflow(); err != nil {
+		t.Fatalf("initial reload: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.watchWorkflow(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	writeInvalidWorkflowFile(t, workflowPath)
+	time.Sleep(100 * time.Millisecond)
+
+	o.state.mu.Lock()
+	if o.state.PollIntervalMs != 1000 {
+		t.Fatalf("PollIntervalMs = %d, want 1000", o.state.PollIntervalMs)
+	}
+	if o.state.PollIntervalIdleMs != 2000 {
+		t.Fatalf("PollIntervalIdleMs = %d, want 2000", o.state.PollIntervalIdleMs)
+	}
+	if o.state.MaxConcurrentAgents != 4 {
+		t.Fatalf("MaxConcurrentAgents = %d, want 4", o.state.MaxConcurrentAgents)
+	}
+	o.state.mu.Unlock()
+
+	o.mu.Lock()
+	cfg := o.cfg
+	o.mu.Unlock()
+	if cfg == nil {
+		t.Fatal("expected previous config to be retained")
+	}
+	if got := cfg.PollIntervalMs(); got != 1000 {
+		t.Fatalf("cfg.PollIntervalMs() = %d, want 1000", got)
+	}
 }
 
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
@@ -508,11 +560,14 @@ func asString(v any) string {
 
 func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
 	t.Helper()
+	port := randomFreePort(t)
 	content := []byte(
 		"---\n" +
 			"tracker:\n" +
 			"  api_key: test-key\n" +
 			"  project_slug: test-project\n" +
+			"server:\n" +
+			"  port: " + itoa(port) + "\n" +
 			"polling:\n" +
 			"  interval_ms: " + itoa(intervalMs) + "\n" +
 			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
@@ -538,6 +593,48 @@ func waitForOrchestrator(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
+}
+
+func writeInvalidWorkflowFile(t *testing.T, path string) {
+	t.Helper()
+	port := randomFreePort(t)
+
+	content := `---
+tracker:
+  api_key: test-key
+  project_slug: test-project
+server:
+  port: ` + itoa(port) + `
+polling:
+  interval_ms: 1000
+  idle_interval_ms: 2000
+workspace:
+  root: ""
+agent:
+  max_concurrent_agents: 4
+  max_turns: 3
+---
+# Workflow
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write invalid workflow: %v", err)
+	}
+}
+
+func randomFreePort(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener addr type %T", ln.Addr())
+	}
+	return addr.Port
 }
 
 func itoa(v int) string {
