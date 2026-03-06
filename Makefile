@@ -15,10 +15,14 @@ install: build
 	install -m 755 $(BIN_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
 
 install-launchagents:
-	cp scripts/com.symphony.daemon.plist ~/Library/LaunchAgents/
-	cp scripts/com.symphony.menubar.plist ~/Library/LaunchAgents/
-	launchctl load ~/Library/LaunchAgents/com.symphony.daemon.plist 2>/dev/null || true
-	launchctl load ~/Library/LaunchAgents/com.symphony.menubar.plist 2>/dev/null || true
+	@mkdir -p $(HOME)/Library/LaunchAgents data
+	sed -e 's|__HOME__|$(HOME)|g' -e 's|__REPO_DIR__|$(CURDIR)|g' \
+		scripts/com.symphony.daemon.plist > $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist
+	sed -e 's|__HOME__|$(HOME)|g' -e 's|__REPO_DIR__|$(CURDIR)|g' \
+		scripts/com.symphony.menubar.plist > $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist
+	launchctl load $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist 2>/dev/null || true
+	launchctl load $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist 2>/dev/null || true
+	@echo "Installed. Check status: launchctl list | grep symphony"
 
 clean:
 	rm -rf $(BIN_DIR)
