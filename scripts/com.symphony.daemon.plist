@@ -12,7 +12,7 @@
   재시작:     launchctl stop com.symphony.daemon
 
   KeepAlive: true → 종료 이유와 무관하게 항상 재시작
-  exit(42) = 자동 업데이트 트리거
+  auto-update는 새 바이너리 설치 후 exit(0)으로 launchd 재시작을 위임
 -->
 <plist version="1.0">
 <dict>
