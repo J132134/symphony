@@ -177,6 +177,58 @@ func TestCanDispatchSkipsManualHumanReviewState(t *testing.T) {
 	}
 }
 
+func TestCanDispatchAllowsUrgentWhenConcurrencyLimitReached(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 1
+	o.state.Running["issue-1"] = &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-10",
+		IssueState: "In Progress",
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("urgent issue should bypass the project concurrency limit")
+	}
+}
+
+func TestCanDispatchBlocksNonUrgentWhileUrgentRunning(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.Running["issue-urgent"] = &RunAttempt{
+		IssueID:    "issue-urgent",
+		Identifier: "J-39",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-12", State: "In Progress"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("non-urgent issue should stay paused while an urgent issue is running")
+	}
+}
+
 func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
 	t.Parallel()
 
@@ -245,6 +297,82 @@ func TestHasGlobalCapacityForStateIncludesClaudeHumanReview(t *testing.T) {
 
 	if o.hasGlobalCapacityForState(cfg, "Human Review") {
 		t.Fatal("claude human review issue should respect the global limiter")
+	}
+}
+
+func TestShouldAcquireGlobalSlotIncludesUrgentIssues(t *testing.T) {
+	t.Parallel()
+
+	urgent := &types.Issue{ID: "issue-1", State: "In Progress", Priority: intPtr(urgentPriority)}
+	if !shouldAcquireGlobalSlot(nil, urgent) {
+		t.Fatal("urgent issue should still count as a running global session")
+	}
+
+	normal := &types.Issue{ID: "issue-2", State: "In Progress"}
+	if !shouldAcquireGlobalSlot(nil, normal) {
+		t.Fatal("non-urgent in-progress issue should still acquire a global slot")
+	}
+}
+
+func TestPreemptForUrgentMarksRunningIssuesAndCancels(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	var cancelled []string
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-10",
+		IssueState: "In Progress",
+	}
+	o.state.Running["issue-2"] = &RunAttempt{
+		IssueID:    "issue-2",
+		Identifier: "J-11",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.mu.Unlock()
+
+	o.mu.Lock()
+	o.workerCancels["issue-1"] = func() { cancelled = append(cancelled, "issue-1") }
+	o.workerCancels["issue-2"] = func() { cancelled = append(cancelled, "issue-2") }
+	o.mu.Unlock()
+
+	o.preemptForUrgent(nil, &types.Issue{ID: "issue-99", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)})
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if !o.state.Running["issue-1"].Preempted {
+		t.Fatal("non-urgent issue should be marked preempted")
+	}
+	if o.state.Running["issue-2"].Preempted {
+		t.Fatal("urgent issue should not be preempted by another urgent dispatch")
+	}
+	if got := len(cancelled); got != 1 || cancelled[0] != "issue-1" {
+		t.Fatalf("cancelled = %v, want only issue-1", cancelled)
+	}
+	if _, ok := o.state.Abandoned["issue-1"]; !ok {
+		t.Fatal("preempted issue should be tracked as abandoned for resume")
+	}
+}
+
+func TestPreemptForUrgentPreemptsAcrossGlobalLimiter(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewSessionLimiter(2)
+	o := New("", 0, "alpha", limiter)
+
+	var cancelled []string
+	if !limiter.TryAcquireIssue("issue-remote", false, func() { cancelled = append(cancelled, "issue-remote") }) {
+		t.Fatal("remote issue acquire should succeed")
+	}
+
+	o.preemptForUrgent(nil, &types.Issue{ID: "issue-99", Identifier: "J-39", State: "In Progress", Priority: intPtr(urgentPriority)})
+
+	if len(cancelled) != 1 || cancelled[0] != "issue-remote" {
+		t.Fatalf("cancelled = %v, want only issue-remote", cancelled)
 	}
 }
 
@@ -695,6 +823,170 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	}
 }
 
+func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_attempts": 3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-39",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		Status:     StatusCanceled,
+		Preempted:  true,
+	}
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, context.Canceled)
+	stopRetryTimer(t, o, attempt.IssueID)
+
+	if recorder.commentCount() != 0 {
+		t.Fatalf("comment count = %d, want 0", recorder.commentCount())
+	}
+	if recorder.lastState() != "" {
+		t.Fatalf("unexpected state transition = %q", recorder.lastState())
+	}
+	if recorder.linkCount() != 0 {
+		t.Fatalf("link count = %d, want 0", recorder.linkCount())
+	}
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; !ok {
+		t.Fatal("preempted issue should be re-queued")
+	}
+	if o.state.CompletedCount != 0 {
+		t.Fatalf("completed count = %d, want 0", o.state.CompletedCount)
+	}
+}
+
+func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.Running["issue-urgent"] = &RunAttempt{
+		IssueID:    "issue-urgent",
+		Identifier: "J-39",
+		IssueState: "In Progress",
+		Urgent:     true,
+	}
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-12",
+		Attempt:    1,
+		DueAt:      time.Now(),
+	}
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("non-urgent issue should remain queued while urgent work is running")
+	}
+	if entry.Error != "urgent in progress" {
+		t.Fatalf("retry error = %q, want urgent in progress", entry.Error)
+	}
+	if len(o.state.Running) != 1 {
+		t.Fatalf("running count = %d, want only the urgent issue", len(o.state.Running))
+	}
+}
+
+func TestOnRetryTimerDefersNonUrgentWhileGlobalUrgentRuns(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	limiter := NewSessionLimiter(2)
+	if !limiter.ForceAcquireIssue("issue-urgent", true, nil) {
+		t.Fatal("urgent acquire should succeed")
+	}
+
+	o := New("", 0, "alpha", limiter)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-12",
+		Attempt:    1,
+		DueAt:      time.Now(),
+	}
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("non-urgent issue should remain queued while a global urgent issue is running")
+	}
+	if entry.Error != "urgent in progress" {
+		t.Fatalf("retry error = %q, want urgent in progress", entry.Error)
+	}
+}
+
 func TestBuildContinuationPromptIncludesTurnContext(t *testing.T) {
 	t.Parallel()
 
@@ -961,6 +1253,10 @@ func stopRetryTimer(t *testing.T, o *Orchestrator, issueID string) {
 		return
 	}
 	entry.timer.Stop()
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func asString(v any) string {
