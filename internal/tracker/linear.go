@@ -323,7 +323,7 @@ func normalizeIssue(node map[string]any) *types.Issue {
 	if rd, ok := node["relations"].(map[string]any); ok {
 		for _, n := range castSlice(rd["nodes"]) {
 			nm, ok := n.(map[string]any)
-			if !ok || strVal(nm["type"]) != "blocks" {
+			if !ok || strVal(nm["type"]) != "blocked_by" {
 				continue
 			}
 			related, ok := nm["relatedIssue"].(map[string]any)
