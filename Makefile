@@ -1,4 +1,4 @@
-.PHONY: build install clean test
+.PHONY: build install install-launchagents clean test
 
 BINARY   = symphony
 BIN_DIR  = bin
@@ -13,6 +13,12 @@ build:
 
 install: build
 	install -m 755 $(BIN_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+
+install-launchagents:
+	cp scripts/com.symphony.daemon.plist ~/Library/LaunchAgents/
+	cp scripts/com.symphony.menubar.plist ~/Library/LaunchAgents/
+	launchctl load ~/Library/LaunchAgents/com.symphony.daemon.plist 2>/dev/null || true
+	launchctl load ~/Library/LaunchAgents/com.symphony.menubar.plist 2>/dev/null || true
 
 clean:
 	rm -rf $(BIN_DIR)
