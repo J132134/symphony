@@ -70,6 +70,7 @@ type State struct {
 	PollIntervalMs      int
 	PollIntervalIdleMs  int
 	MaxConcurrentAgents int
+	Draining            bool
 
 	Running    map[string]*RunAttempt
 	Claimed    map[string]struct{}

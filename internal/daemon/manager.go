@@ -16,13 +16,21 @@ type projectRunner struct {
 	proj    config.ProjectConfig
 	limiter *orchestrator.SessionLimiter
 
-	mu   sync.Mutex
-	orch *orchestrator.Orchestrator
+	mu       sync.Mutex
+	orch     *orchestrator.Orchestrator
+	draining bool
 }
 
 func (pr *projectRunner) run(ctx context.Context) {
 	backoff := 5 * time.Second
 	for ctx.Err() == nil {
+		pr.mu.Lock()
+		draining := pr.draining
+		pr.mu.Unlock()
+		if draining {
+			return
+		}
+
 		o := orchestrator.New(pr.proj.Workflow, 0, pr.proj.Name, pr.limiter)
 
 		pr.mu.Lock()
@@ -37,6 +45,12 @@ func (pr *projectRunner) run(ctx context.Context) {
 		pr.mu.Unlock()
 
 		if ctx.Err() != nil {
+			return
+		}
+		pr.mu.Lock()
+		draining = pr.draining
+		pr.mu.Unlock()
+		if draining {
 			return
 		}
 
@@ -57,6 +71,16 @@ func (pr *projectRunner) run(ctx context.Context) {
 	}
 }
 
+func (pr *projectRunner) beginDrain() {
+	pr.mu.Lock()
+	pr.draining = true
+	o := pr.orch
+	pr.mu.Unlock()
+	if o != nil {
+		o.BeginDrain()
+	}
+}
+
 func (pr *projectRunner) stop() {
 	pr.mu.Lock()
 	o := pr.orch
@@ -64,6 +88,17 @@ func (pr *projectRunner) stop() {
 	if o != nil {
 		o.Stop()
 	}
+}
+
+func (pr *projectRunner) isIdle() bool {
+	pr.mu.Lock()
+	o := pr.orch
+	draining := pr.draining
+	pr.mu.Unlock()
+	if o == nil {
+		return draining
+	}
+	return o.IsIdle()
 }
 
 func (pr *projectRunner) getState() *orchestrator.State {
@@ -78,10 +113,14 @@ func (pr *projectRunner) getState() *orchestrator.State {
 
 // Manager coordinates multiple Orchestrators.
 type Manager struct {
+	mu      sync.Mutex
 	cfg     *config.DaemonConfig
 	runners []*projectRunner
 	cancel  context.CancelFunc
 	limiter *orchestrator.SessionLimiter
+
+	restartRequested bool
+	restartReady     chan struct{}
 }
 
 func NewManager(cfg *config.DaemonConfig) *Manager {
@@ -94,21 +133,32 @@ func NewManager(cfg *config.DaemonConfig) *Manager {
 // Run starts all projects and blocks until ctx is cancelled.
 func (m *Manager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
 	m.cancel = cancel
+	m.mu.Unlock()
 	defer cancel()
 
-	m.runners = make([]*projectRunner, len(m.cfg.Projects))
+	runners := make([]*projectRunner, len(m.cfg.Projects))
 	for i, proj := range m.cfg.Projects {
 		pr := &projectRunner{proj: proj, limiter: m.limiter}
-		m.runners[i] = pr
+		runners[i] = pr
 		go pr.run(ctx)
+	}
+	m.mu.Lock()
+	m.runners = runners
+	restartRequested := m.restartRequested
+	m.mu.Unlock()
+	if restartRequested {
+		for _, pr := range runners {
+			pr.beginDrain()
+		}
 	}
 
 	slog.Info("daemon.started", "projects", len(m.cfg.Projects), "max_total_concurrent_sessions", m.cfg.MaxTotalConcurrentSessions())
 	<-ctx.Done()
 
 	slog.Info("daemon.shutting_down")
-	for _, pr := range m.runners {
+	for _, pr := range runners {
 		pr.stop()
 	}
 	slog.Info("daemon.stopped")
@@ -116,18 +166,72 @@ func (m *Manager) Run(ctx context.Context) {
 
 // Shutdown triggers a graceful stop (for auto-update).
 func (m *Manager) Shutdown() {
-	if m.cancel != nil {
-		m.cancel()
+	m.mu.Lock()
+	cancel := m.cancel
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+}
+
+func (m *Manager) RequestRestartWhenIdle() <-chan struct{} {
+	m.mu.Lock()
+	if m.restartRequested {
+		ch := m.restartReady
+		m.mu.Unlock()
+		return ch
+	}
+	m.restartRequested = true
+	m.restartReady = make(chan struct{})
+	runners := append([]*projectRunner(nil), m.runners...)
+	ch := m.restartReady
+	m.mu.Unlock()
+
+	for _, pr := range runners {
+		pr.beginDrain()
+	}
+
+	go m.waitForIdle(ch)
+	return ch
 }
 
 // GetAllStates returns state for all running projects.
 func (m *Manager) GetAllStates() map[string]*orchestrator.State {
-	result := make(map[string]*orchestrator.State, len(m.runners))
-	for _, pr := range m.runners {
+	m.mu.Lock()
+	runners := append([]*projectRunner(nil), m.runners...)
+	m.mu.Unlock()
+
+	result := make(map[string]*orchestrator.State, len(runners))
+	for _, pr := range runners {
 		if st := pr.getState(); st != nil {
 			result[pr.proj.Name] = st
 		}
 	}
 	return result
+}
+
+func (m *Manager) waitForIdle(ready chan struct{}) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if m.allIdle() {
+			close(ready)
+			return
+		}
+		<-ticker.C
+	}
+}
+
+func (m *Manager) allIdle() bool {
+	m.mu.Lock()
+	runners := append([]*projectRunner(nil), m.runners...)
+	m.mu.Unlock()
+
+	for _, pr := range runners {
+		if !pr.isIdle() {
+			return false
+		}
+	}
+	return true
 }

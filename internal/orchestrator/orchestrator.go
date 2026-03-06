@@ -127,6 +127,25 @@ func (o *Orchestrator) Stop() {
 
 func (o *Orchestrator) GetState() *State { return o.state }
 
+func (o *Orchestrator) BeginDrain() {
+	o.state.mu.Lock()
+	if o.state.Draining {
+		o.state.mu.Unlock()
+		return
+	}
+	o.state.Draining = true
+	o.clearRetryQueueLocked(true)
+	o.state.mu.Unlock()
+
+	slog.Info("orchestrator.draining", "project", o.name)
+}
+
+func (o *Orchestrator) IsIdle() bool {
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	return len(o.state.Running) == 0 && len(o.state.RetryQueue) == 0
+}
+
 func (o *Orchestrator) TriggerRefresh(ctx context.Context) { go o.tick(ctx) }
 
 // -- poll loop --
@@ -158,12 +177,7 @@ func (o *Orchestrator) gracefulStop() error {
 	slog.Info("orchestrator.stopping", "project", o.name)
 
 	o.state.mu.Lock()
-	for _, entry := range o.state.RetryQueue {
-		if entry.timer != nil {
-			entry.timer.Stop()
-		}
-	}
-	o.state.RetryQueue = make(map[string]*RetryEntry)
+	o.clearRetryQueueLocked(true)
 	o.state.mu.Unlock()
 
 	o.mu.Lock()
@@ -181,6 +195,10 @@ func (o *Orchestrator) gracefulStop() error {
 func (o *Orchestrator) tick(ctx context.Context) {
 	slog.Debug("orchestrator.tick", "project", o.name)
 	o.reconcile(ctx)
+
+	if o.isDraining() {
+		return
+	}
 
 	o.mu.Lock()
 	cfg := o.cfg
@@ -200,6 +218,10 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	sortCandidates(candidates)
 
 	for _, issue := range candidates {
+		if o.isDraining() {
+			return
+		}
+
 		o.state.mu.Lock()
 		slots := o.state.MaxConcurrentAgents - len(o.state.Running)
 		o.state.mu.Unlock()
@@ -232,6 +254,9 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
 
+	if o.state.Draining {
+		return false
+	}
 	if _, ok := o.state.Running[issue.ID]; ok {
 		return false
 	}
@@ -356,9 +381,21 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		o.state.CompletedCount++
 		o.state.mu.Unlock()
 		slog.Info("orchestrator.worker_completed", "project", o.name, "issue_id", issueID)
-		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "", false)
 	} else {
 		slog.Error("orchestrator.worker_failed", "project", o.name, "issue_id", issueID, "error", err)
+	}
+
+	if o.isDraining() {
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		slog.Info("orchestrator.worker_finished_during_drain", "project", o.name, "issue_id", issueID)
+		return
+	}
+
+	if err == nil {
+		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, "", false)
+	} else {
 		o.scheduleRetry(ctx, cfg, issueID, attempt.Identifier, attempt.Attempt, err.Error(), true)
 	}
 }
@@ -655,6 +692,13 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 	if !ok {
 		return
 	}
+	if o.isDraining() {
+		o.state.mu.Lock()
+		delete(o.state.Claimed, issueID)
+		o.state.mu.Unlock()
+		slog.Info("orchestrator.retry_skipped_during_drain", "project", o.name, "issue_id", issueID)
+		return
+	}
 
 	o.mu.Lock()
 	tr := o.tracker
@@ -841,4 +885,22 @@ func (o *Orchestrator) releaseGlobalSlot(attempt *RunAttempt) {
 	}
 	o.globalLimiter.Release()
 	attempt.GlobalSlotHeld = false
+}
+
+func (o *Orchestrator) isDraining() bool {
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	return o.state.Draining
+}
+
+func (o *Orchestrator) clearRetryQueueLocked(releaseClaims bool) {
+	for issueID, entry := range o.state.RetryQueue {
+		if entry.timer != nil {
+			entry.timer.Stop()
+		}
+		if releaseClaims {
+			delete(o.state.Claimed, issueID)
+		}
+	}
+	o.state.RetryQueue = make(map[string]*RetryEntry)
 }
