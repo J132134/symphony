@@ -71,3 +71,26 @@ func TestBuildSummaryPrefersErrorOverNetworkLoss(t *testing.T) {
 		t.Fatalf("status = %q, want error", summary.Status)
 	}
 }
+
+func TestBuildSummaryIgnoresAbandonedIssuesInRetryCount(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+
+	st := orchestrator.NewState()
+	st.RecordTrackerSuccess(now)
+	st.Abandoned["1"] = &orchestrator.AbandonedEntry{
+		Identifier:   "J-27",
+		State:        "In Progress",
+		FailureCount: 3,
+		AbandonedAt:  now,
+	}
+
+	summary := BuildSummary(map[string]*orchestrator.State{"alpha": st})
+	if summary.RetryCount != 0 {
+		t.Fatalf("retry_count = %d, want 0", summary.RetryCount)
+	}
+	if summary.Status != "idle" {
+		t.Fatalf("status = %q, want idle", summary.Status)
+	}
+}
