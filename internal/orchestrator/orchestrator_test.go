@@ -403,6 +403,44 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	}
 }
 
+func TestBuildContinuationPromptIncludesTurnContext(t *testing.T) {
+	t.Parallel()
+
+	prompt := buildContinuationPrompt("J-24", "Multi-turn prompt", 2, 20, "Git diff summary:\nfoo.txt")
+	for _, want := range []string{
+		"Continue working on J-24: Multi-turn prompt.",
+		"Progress so far:",
+		"Git diff summary:\nfoo.txt",
+		"This is turn 2 of 20.",
+		"Continue where you left off without repeating completed work.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildContinuationPromptFallsBackWithoutTurnContext(t *testing.T) {
+	t.Parallel()
+
+	prompt := buildContinuationPrompt("J-24", "Multi-turn prompt", 2, 20, "")
+	want := "Continue working on J-24: Multi-turn prompt. This is turn 2 of 20."
+	if prompt != want {
+		t.Fatalf("prompt = %q, want %q", prompt, want)
+	}
+}
+
+func TestIsRetryAbandonComment(t *testing.T) {
+	t.Parallel()
+
+	if !isRetryAbandonComment("<!-- symphony:retry-abandoned -->\npaused") {
+		t.Fatal("expected retry abandon marker to be detected")
+	}
+	if isRetryAbandonComment("plain comment") {
+		t.Fatal("plain comment should not be treated as retry abandon marker")
+	}
+}
+
 type linearRecorder struct {
 	mu         sync.Mutex
 	comments   []string
@@ -529,42 +567,4 @@ func stopRetryTimer(t *testing.T, o *Orchestrator, issueID string) {
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
-}
-
-func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
-	t.Helper()
-	content := []byte(
-		"---\n" +
-			"tracker:\n" +
-			"  api_key: test-key\n" +
-			"  project_slug: test-project\n" +
-			"polling:\n" +
-			"  interval_ms: " + itoa(intervalMs) + "\n" +
-			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
-			"agent:\n" +
-			"  max_concurrent_agents: 4\n" +
-			"workspace:\n" +
-			"  root: /tmp/symphony\n" +
-			"---\n" +
-			"# Workflow\n",
-	)
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		t.Fatalf("write workflow: %v", err)
-	}
-}
-
-func waitForOrchestrator(t *testing.T, check func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if check() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("condition not met before timeout")
-}
-
-func itoa(v int) string {
-	return fmt.Sprintf("%d", v)
 }

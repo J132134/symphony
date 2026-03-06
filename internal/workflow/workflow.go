@@ -87,6 +87,7 @@ type IssueContext struct {
 	Labels      []string
 	URL         string
 	BranchName  string
+	TurnContext string
 }
 
 // Render renders the prompt template for the given issue and attempt number.
@@ -103,7 +104,8 @@ func Render(def *Definition, issue IssueContext, attempt int) (string, error) {
 			"url":         nonEmpty(issue.URL),
 			"branch_name": nonEmpty(issue.BranchName),
 		},
-		"attempt": attempt,
+		"attempt":      attempt,
+		"turn_context": nonEmpty(issue.TurnContext),
 	}
 	out, err := def.Template.Execute(ctx)
 	if err != nil {
