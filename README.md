@@ -23,7 +23,7 @@ make install
 make install-launchagents
 ```
 
-`make install-launchagents`는 `scripts/` 안의 plist 템플릿에서 현재 홈 디렉토리와 레포 경로를 자동으로 채워 `~/Library/LaunchAgents/`에 설치한다. 로그인 시 데몬과 메뉴바가 자동으로 실행된다.
+`make install-launchagents`는 `scripts/` 안의 plist 템플릿에서 현재 홈 디렉토리와 로그 디렉토리를 채워 `~/Library/LaunchAgents/`에 설치한다. 로그는 `~/Library/Logs/Symphony`에 기록되며, launchd 작업 디렉터리도 레포로 고정하지 않으므로 레포가 `Documents`나 `Desktop` 아래 있어도 데몬 시작만으로 해당 보호 폴더 접근 알림을 불필요하게 띄우지 않는다.
 
 ### 설치 확인
 
@@ -144,6 +144,8 @@ symphony menubar
 ```
 
 `symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
+
+`config.yaml` 안의 상대 경로(`projects[].workflow`, `auto_update.repo_dir`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다.
 
 `agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 제한`과 `데몬 전체 제한`을 모두 만족해야 한다.
 
