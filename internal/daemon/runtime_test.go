@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"symphony/internal/config"
 )
 
-func TestRuntimeReloadsValidConfigAndKeepsCurrentRuntimeOnInvalidConfig(t *testing.T) {
+func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -29,8 +30,9 @@ func TestRuntimeReloadsValidConfigAndKeepsCurrentRuntimeOnInvalidConfig(t *testi
 		Projects:   []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
 	}
 	betaCfg := &config.DaemonConfig{
-		ConfigPath: configPath,
-		Projects:   []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		ConfigPath:   configPath,
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7778},
 	}
 	invalidCfg := &config.DaemonConfig{ConfigPath: configPath}
 
@@ -58,17 +60,22 @@ func TestRuntimeReloadsValidConfigAndKeepsCurrentRuntimeOnInvalidConfig(t *testi
 				return nil, nil
 			}
 		},
-		runApp: func(ctx context.Context, cfg *config.DaemonConfig) {
+		startRuntime: func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
 			name := cfg.Projects[0].Name
 			mu.Lock()
 			started = append(started, name)
 			mu.Unlock()
 
-			<-ctx.Done()
-
-			mu.Lock()
-			stopped = append(stopped, name)
-			mu.Unlock()
+			ctx, cancel := context.WithCancel(parent)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				<-ctx.Done()
+				mu.Lock()
+				stopped = append(stopped, name)
+				mu.Unlock()
+			}()
+			return &managedRuntime{cfg: cfg, cancel: cancel, done: done}, nil
 		},
 	}
 
@@ -119,6 +126,114 @@ func TestRuntimeReloadsValidConfigAndKeepsCurrentRuntimeOnInvalidConfig(t *testi
 	defer mu.Unlock()
 	if !slices.Equal(stopped, []string{"alpha", "beta"}) {
 		t.Fatalf("expected beta runtime to stop on shutdown, got %v", stopped)
+	}
+}
+
+func TestRuntimeAppliesProjectOnlyReloadIncrementally(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	writeConfigToken(t, configPath, "alpha")
+
+	alphaCfg := &config.DaemonConfig{
+		ConfigPath: configPath,
+		Projects:   []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+	}
+	betaCfg := &config.DaemonConfig{
+		ConfigPath: configPath,
+		Projects:   []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+	}
+
+	var mu sync.Mutex
+	starts := 0
+	stops := 0
+	reloader := &recordingConfigApplier{}
+
+	runtime := &Runtime{
+		configPath:    configPath,
+		watchInterval: 10 * time.Millisecond,
+		loadConfig: func(path string) (*config.DaemonConfig, error) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			switch string(data) {
+			case "alpha":
+				return alphaCfg, nil
+			case "beta!!":
+				return betaCfg, nil
+			default:
+				t.Fatalf("unexpected config token: %q", data)
+				return nil, nil
+			}
+		},
+		startRuntime: func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+			mu.Lock()
+			starts++
+			mu.Unlock()
+
+			ctx, cancel := context.WithCancel(parent)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				<-ctx.Done()
+				mu.Lock()
+				stops++
+				mu.Unlock()
+			}()
+			return &managedRuntime{cfg: cfg, reloader: reloader, cancel: cancel, done: done}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(ctx, alphaCfg)
+	}()
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return starts == 1
+	})
+
+	writeConfigToken(t, configPath, "beta!!")
+	waitFor(t, func() bool {
+		return reflect.DeepEqual(reloader.projectSets(), [][]string{{"beta"}})
+	})
+
+	mu.Lock()
+	if starts != 1 {
+		t.Fatalf("project-only reload should not start a new runtime, got %d", starts)
+	}
+	if stops != 0 {
+		t.Fatalf("project-only reload should not stop the current runtime, got %d", stops)
+	}
+	mu.Unlock()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runtime exited with error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runtime shutdown")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if stops != 1 {
+		t.Fatalf("expected runtime to stop once on shutdown, got %d", stops)
 	}
 }
 
@@ -176,4 +291,23 @@ func waitFor(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
+}
+
+type recordingConfigApplier struct {
+	mu     sync.Mutex
+	sets   [][]string
+	config []*config.DaemonConfig
+}
+
+func (r *recordingConfigApplier) ApplyConfig(cfg *config.DaemonConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.config = append(r.config, cfg)
+	r.sets = append(r.sets, projectNames(cfg))
+}
+
+func (r *recordingConfigApplier) projectSets() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.sets)
 }
