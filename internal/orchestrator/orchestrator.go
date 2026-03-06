@@ -22,8 +22,6 @@ import (
 	"symphony/internal/workspace"
 )
 
-const humanReviewState = "human review"
-
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
 	workflowPath  string
@@ -976,7 +974,7 @@ func (o *Orchestrator) runningConcurrentCountLocked() int {
 }
 
 func countsTowardConcurrency(state string) bool {
-	return config.NormalizeState(state) != humanReviewState
+	return true
 }
 
 func (o *Orchestrator) hasGlobalCapacityForState(state string) bool {

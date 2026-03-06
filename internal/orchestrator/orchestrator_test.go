@@ -87,7 +87,7 @@ func TestOnRetryTimerDuringDrainClearsClaimWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
+func TestRunningConcurrentCountIncludesHumanReview(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
@@ -98,12 +98,12 @@ func TestRunningConcurrentCountExcludesHumanReview(t *testing.T) {
 	got := o.runningConcurrentCountLocked()
 	o.state.mu.Unlock()
 
-	if got != 1 {
-		t.Fatalf("runningConcurrentCountLocked() = %d, want 1", got)
+	if got != 2 {
+		t.Fatalf("runningConcurrentCountLocked() = %d, want 2", got)
 	}
 }
 
-func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
+func TestCanDispatchCountsHumanReviewForConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
@@ -124,8 +124,8 @@ func TestCanDispatchIgnoresHumanReviewForConcurrencyLimit(t *testing.T) {
 	})
 
 	issue := &types.Issue{ID: "issue-1", Identifier: "J-27", State: "In Progress"}
-	if !o.canDispatch(cfg, issue) {
-		t.Fatal("human review issue should not consume a concurrent slot")
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("human review issue should consume a concurrent slot")
 	}
 }
 
@@ -154,7 +154,7 @@ func TestCanDispatchBlocksTodoWhenBlockerIsNotTerminal(t *testing.T) {
 	}
 }
 
-func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
+func TestHasGlobalCapacityForStateCountsHumanReview(t *testing.T) {
 	t.Parallel()
 
 	limiter := NewSessionLimiter(1)
@@ -167,8 +167,8 @@ func TestHasGlobalCapacityForStateIgnoresHumanReview(t *testing.T) {
 	if o.hasGlobalCapacityForState("In Progress") {
 		t.Fatal("non-review issue should respect the global limiter")
 	}
-	if !o.hasGlobalCapacityForState("Human Review") {
-		t.Fatal("human review issue should bypass the global limiter")
+	if o.hasGlobalCapacityForState("Human Review") {
+		t.Fatal("human review issue should respect the global limiter")
 	}
 }
 
