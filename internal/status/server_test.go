@@ -12,6 +12,7 @@ import (
 
 type fakeSummarySource struct {
 	summary      Summary
+	projects     []ProjectSummary
 	states       map[string]*orchestrator.State
 	refreshCalls int
 }
@@ -25,6 +26,10 @@ func (f *fakeSummarySource) GetAllStates() map[string]*orchestrator.State {
 
 func (f *fakeSummarySource) GetSummary() Summary {
 	return f.summary
+}
+
+func (f *fakeSummarySource) GetProjects() []ProjectSummary {
+	return f.projects
 }
 
 func (f *fakeSummarySource) TriggerRefresh(context.Context) {
@@ -76,5 +81,41 @@ func TestHandleRefreshTriggersSource(t *testing.T) {
 	}
 	if source.refreshCalls != 1 {
 		t.Fatalf("refresh_calls = %d, want 1", source.refreshCalls)
+	}
+}
+
+func TestHandleProjectsPrefersProjectSource(t *testing.T) {
+	t.Parallel()
+
+	server := New(&fakeSummarySource{
+		projects: []ProjectSummary{{
+			Name:          "alpha",
+			Status:        "quarantined",
+			Health:        "quarantined",
+			CrashCount:    3,
+			QuarantinedAt: "2026-03-06T14:00:00Z",
+		}},
+	}, 7777)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rec.Code)
+	}
+
+	var payload []ProjectSummary
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode projects: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("projects len = %d, want 1", len(payload))
+	}
+	if payload[0].Health != "quarantined" {
+		t.Fatalf("health = %q, want quarantined", payload[0].Health)
+	}
+	if payload[0].CrashCount != 3 {
+		t.Fatalf("crash_count = %d, want 3", payload[0].CrashCount)
 	}
 }

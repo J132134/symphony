@@ -202,7 +202,8 @@ func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
 	}
 	return prev.AutoUpdate == next.AutoUpdate &&
 		prev.Agent == next.Agent &&
-		prev.StatusServer == next.StatusServer
+		prev.StatusServer == next.StatusServer &&
+		prev.ProjectHealth == next.ProjectHealth
 }
 
 func projectNames(cfg *config.DaemonConfig) []string {

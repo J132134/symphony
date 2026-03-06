@@ -26,13 +26,15 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 	writeConfigToken(t, configPath, "alpha")
 
 	alphaCfg := &config.DaemonConfig{
-		ConfigPath: configPath,
-		Projects:   []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		ConfigPath:    configPath,
+		Projects:      []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 	betaCfg := &config.DaemonConfig{
-		ConfigPath:   configPath,
-		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
-		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7778},
+		ConfigPath:    configPath,
+		Projects:      []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 7778},
+		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 	invalidCfg := &config.DaemonConfig{ConfigPath: configPath}
 
@@ -142,12 +144,14 @@ func TestRuntimeAppliesProjectOnlyReloadIncrementally(t *testing.T) {
 	writeConfigToken(t, configPath, "alpha")
 
 	alphaCfg := &config.DaemonConfig{
-		ConfigPath: configPath,
-		Projects:   []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		ConfigPath:    configPath,
+		Projects:      []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 	betaCfg := &config.DaemonConfig{
-		ConfigPath: configPath,
-		Projects:   []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		ConfigPath:    configPath,
+		Projects:      []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
+		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 
 	var mu sync.Mutex
