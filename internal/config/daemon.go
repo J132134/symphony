@@ -49,6 +49,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 		path = filepath.Join(home, ".config", "symphony", "config.yaml")
 	}
+	configDir := filepath.Dir(path)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -75,7 +76,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 			}
 			name, _ := pm["name"].(string)
 			wf, _ := pm["workflow"].(string)
-			wf = resolvePath(wf)
+			wf = resolvePath(configDir, wf)
 			cfg.Projects = append(cfg.Projects, ProjectConfig{Name: name, Workflow: wf})
 		}
 	}
@@ -90,7 +91,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 			cfg.AutoUpdate.IntervalMinutes = toInt(mins, 30)
 		}
 		if rd, ok := au["repo_dir"].(string); ok {
-			cfg.AutoUpdate.RepoDir = resolvePath(rd)
+			cfg.AutoUpdate.RepoDir = resolvePath(configDir, rd)
 			cfg.autoUpdateRepoDirConfigured = true
 		}
 	}
@@ -179,7 +180,7 @@ func DefaultMaxTotalConcurrentSessions() int {
 	}
 }
 
-func resolvePath(v string) string {
+func resolvePath(baseDir, v string) string {
 	if strings.TrimSpace(v) == "" {
 		return ""
 	}
@@ -189,6 +190,9 @@ func resolvePath(v string) string {
 	if len(v) > 0 && v[0] == '~' {
 		home, _ := os.UserHomeDir()
 		v = home + v[1:]
+	}
+	if !filepath.IsAbs(v) && strings.TrimSpace(baseDir) != "" {
+		v = filepath.Join(baseDir, v)
 	}
 	abs, err := filepath.Abs(v)
 	if err != nil {

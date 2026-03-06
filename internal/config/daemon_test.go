@@ -130,6 +130,58 @@ func TestLoadDaemonConfigPreservesEmptyRepoDirForValidation(t *testing.T) {
 	requireErrorContaining(t, errs, "non-empty")
 }
 
+func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	workflowDir := filepath.Join(configDir, "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatalf("mkdir workflow dir: %v", err)
+	}
+	workflowPath := filepath.Join(workflowDir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	repoDir := filepath.Join(configDir, "repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir repo dir: %v", err)
+	}
+
+	configPath := filepath.Join(configDir, "config.yaml")
+	configYAML := "projects:\n  - name: alpha\n    workflow: workflows/WORKFLOW.md\nauto_update:\n  enabled: true\n  repo_dir: repo\nstatus_server:\n  enabled: false\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatalf("chdir outside: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(prevWD)
+	}()
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if got, want := cfg.Projects[0].Workflow, workflowPath; got != want {
+		t.Fatalf("Workflow = %q, want %q", got, want)
+	}
+	if got, want := cfg.AutoUpdate.RepoDir, repoDir; got != want {
+		t.Fatalf("RepoDir = %q, want %q", got, want)
+	}
+}
+
 func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 	t.Parallel()
 
