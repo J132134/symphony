@@ -5,6 +5,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,15 +36,15 @@ const (
 
 // Config is passed to the runner per session.
 type Config struct {
-	Command          string
-	ApprovalPolicy   string
-	MaxTurns         int
-	TurnTimeoutMs         int
-	ReadTimeoutMs         int
-	ThreadStartTimeoutMs  int
-	StallTimeoutMs        int
-	TurnSandboxPolicy string
-	ThreadSandbox    string
+	Command              string
+	ApprovalPolicy       string
+	MaxTurns             int
+	TurnTimeoutMs        int
+	ReadTimeoutMs        int
+	ThreadStartTimeoutMs int
+	StallTimeoutMs       int
+	TurnSandboxPolicy    string
+	ThreadSandbox        string
 }
 
 // TokenUsage tracks input/output/total tokens for a turn delta.
@@ -92,7 +93,8 @@ type Runner struct {
 	pending map[int]chan rpcResult
 	reqID   atomic.Int32
 
-	notifCh chan *Incoming
+	notifCh         chan *Incoming
+	priorityNotifCh chan *Incoming
 
 	// cumulative token counts for delta computation
 	lastInput  int64
@@ -104,6 +106,8 @@ func NewRunner() *Runner {
 	return &Runner{
 		pending: make(map[int]chan rpcResult),
 		notifCh: make(chan *Incoming, 512),
+		// Turn terminal notifications must survive general queue saturation.
+		priorityNotifCh: make(chan *Incoming, 16),
 	}
 }
 
@@ -213,9 +217,7 @@ func (r *Runner) RunTurn(
 	})
 
 	// Drain stale notifications from previous turns.
-	for len(r.notifCh) > 0 {
-		<-r.notifCh
-	}
+	r.drainNotifications()
 
 	turnParams := map[string]any{
 		"threadId":       threadID,
@@ -242,61 +244,59 @@ func (r *Runner) RunTurn(
 
 func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, cb EventCallback) TurnResult {
 	for {
-		select {
-		case <-ctx.Done():
-			emit(cb, Event{Name: "turn_failed", Timestamp: time.Now().UTC(),
-				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, Message: "turn_timeout"})
-			return TurnResult{Error: "turn_timeout"}
-
-		case msg, ok := <-r.notifCh:
-			if !ok {
-				return TurnResult{Error: "channel_closed"}
-			}
-
-			if msg.ServerReq != nil {
-				r.handleServerRequest(msg.ServerReq, cb)
-				continue
-			}
-			if msg.Notif == nil {
-				continue
-			}
-
-			method := msg.Notif.Method
-			params := msg.Notif.Params
-			if params == nil {
-				params = map[string]any{}
-			}
-
-			switch method {
-			case methodTurnCompleted:
-				emit(cb, Event{Name: "turn_completed", Timestamp: time.Now().UTC(),
-					SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
-				return TurnResult{Success: true, CompletedNaturally: true}
-
-			case methodTurnFailed:
-				errMsg, _ := params["error"].(string)
-				if errMsg == "" {
-					errMsg = "unknown_error"
-				}
+		msg, err := r.nextNotification(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				emit(cb, Event{Name: "turn_failed", Timestamp: time.Now().UTC(),
-					SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, Message: errMsg})
-				return TurnResult{Error: errMsg, CompletedNaturally: true}
-
-			case methodTurnCancelled:
-				emit(cb, Event{Name: "turn_cancelled", Timestamp: time.Now().UTC(),
-					SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
-				return TurnResult{Error: "cancelled"}
-
-			case methodTokenUsage:
-				r.handleTokenUsage(threadID, turnID, params, cb)
-
-			case methodRateLimits:
-				emit(cb, Event{Name: "rate_limit", Timestamp: time.Now().UTC(),
-					SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
-
-			default:
-				slog.Debug("agent.unhandled_notification", "method", method)
+					SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, Message: "turn_timeout"})
+				return TurnResult{Error: "turn_timeout"}
 			}
+			return TurnResult{Error: "channel_closed"}
+		}
+
+		if msg.ServerReq != nil {
+			r.handleServerRequest(msg.ServerReq, cb)
+			continue
+		}
+		if msg.Notif == nil {
+			continue
+		}
+
+		method := msg.Notif.Method
+		params := msg.Notif.Params
+		if params == nil {
+			params = map[string]any{}
+		}
+
+		switch method {
+		case methodTurnCompleted:
+			emit(cb, Event{Name: "turn_completed", Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
+			return TurnResult{Success: true, CompletedNaturally: true}
+
+		case methodTurnFailed:
+			errMsg, _ := params["error"].(string)
+			if errMsg == "" {
+				errMsg = "unknown_error"
+			}
+			emit(cb, Event{Name: "turn_failed", Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, Message: errMsg})
+			return TurnResult{Error: errMsg, CompletedNaturally: true}
+
+		case methodTurnCancelled:
+			emit(cb, Event{Name: "turn_cancelled", Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
+			return TurnResult{Error: "cancelled"}
+
+		case methodTokenUsage:
+			r.handleTokenUsage(threadID, turnID, params, cb)
+
+		case methodRateLimits:
+			emit(cb, Event{Name: "rate_limit", Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID})
+
+		default:
+			slog.Debug("agent.unhandled_notification", "method", method)
 		}
 	}
 }
@@ -436,10 +436,67 @@ func (r *Runner) dispatchLine(line []byte) {
 		return
 	}
 
+	if msg.Notif != nil && isTerminalNotification(msg.Notif.Method) {
+		r.priorityNotifCh <- msg
+		return
+	}
+
 	select {
 	case r.notifCh <- msg:
 	default:
 		slog.Warn("agent.notif_channel_full")
+	}
+}
+
+var errNotificationChannelClosed = errors.New("notification channel closed")
+
+func (r *Runner) nextNotification(ctx context.Context) (*Incoming, error) {
+	select {
+	case msg, ok := <-r.priorityNotifCh:
+		if !ok {
+			return nil, errNotificationChannelClosed
+		}
+		return msg, nil
+	default:
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case msg, ok := <-r.priorityNotifCh:
+		if !ok {
+			return nil, errNotificationChannelClosed
+		}
+		return msg, nil
+	case msg, ok := <-r.notifCh:
+		if !ok {
+			return nil, errNotificationChannelClosed
+		}
+		return msg, nil
+	}
+}
+
+func (r *Runner) drainNotifications() {
+	drainNotificationChannel(r.priorityNotifCh)
+	drainNotificationChannel(r.notifCh)
+}
+
+func drainNotificationChannel(ch chan *Incoming) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+func isTerminalNotification(method string) bool {
+	switch method {
+	case methodTurnCompleted, methodTurnFailed, methodTurnCancelled:
+		return true
+	default:
+		return false
 	}
 }
 
