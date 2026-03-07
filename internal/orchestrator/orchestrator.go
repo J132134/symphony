@@ -19,7 +19,6 @@ import (
 	"symphony/internal/workspace"
 )
 
-const humanReviewState = "human review"
 const urgentPriority = 1
 const capacityRetryDelayMs = 5_000
 
@@ -260,6 +259,13 @@ func (o *Orchestrator) workerHandlesSnapshot() []*workerHandle {
 		handles = append(handles, handle)
 	}
 	return handles
+}
+
+func isPauseState(cfg *config.SymphonyConfig, state string) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.PauseNorm()[config.NormalizeState(state)]
 }
 
 // -- poll loop --

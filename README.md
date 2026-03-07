@@ -54,7 +54,8 @@ tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: my-project
-  active_states: [Todo, In Progress]
+  active_states: [Todo, Plan Review, In Progress, Human Review]
+  pause_states: [Plan Review, Human Review]
   terminal_states: [Done, Cancelled, Duplicate]
   post_comments: true
   on_success_state: Human Review
@@ -202,11 +203,12 @@ hooks:
 
 ## Linear 피드백
 
-기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, `tracker.on_success_state`가 `Human Review`일 때는 PR 링크를 Add link에도 함께 등록한다. GitHub에서 브랜치 기준 기존 PR을 찾을 수 있으면 실제 PR URL을 사용하고, 찾지 못하면 설정된 `tracker.pr_url_template`(또는 기본 `pull/new/<branch>`)로 폴백한다. 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남기며, 코멘트/링크/상태 전환 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
+기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, `tracker.on_success_state`가 pause state(`tracker.pause_states`)일 때는 PR 링크를 Add link에도 함께 등록한다. GitHub에서 브랜치 기준 기존 PR을 찾을 수 있으면 실제 PR URL을 사용하고, 찾지 못하면 설정된 `tracker.pr_url_template`(또는 기본 `pull/new/<branch>`)로 폴백한다. 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남기며, 코멘트/링크/상태 전환 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
 
 ```yaml
 tracker:
   post_comments: true
+  pause_states: [Plan Review, Human Review]
   on_success_state: Human Review
   on_failure_state: Rework
   pr_url_template: https://github.com/{repo_path}/pull/new/{branch}
@@ -216,6 +218,7 @@ agent:
 ```
 
 - `tracker.post_comments`: Linear 코멘트 등록 on/off. 기본값은 `true`.
+- `tracker.pause_states`: active 상태 중 dispatch/retry/concurrency 계산에서 제외할 상태 목록. 기본값은 `["Human Review"]`.
 - `tracker.on_success_state`: 성공 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
 - `tracker.on_failure_state`: 최종 실패 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
 - `tracker.pr_url_template`: PR 링크 템플릿. `{branch}`, `{branch_raw}`, `{commit}`, `{owner}`, `{repo}`, `{repo_path}`, `{remote_url}` 치환을 지원한다. 비우면 GitHub `origin` remote에서 `pull/new/<branch>` URL을 자동 유도한다.
