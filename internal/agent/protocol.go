@@ -22,6 +22,7 @@ const (
 	methodCmdApproval  = "item/commandExecution/requestApproval"
 	methodFileApproval = "item/fileChange/requestApproval"
 	methodUserInput    = "item/tool/requestUserInput"
+	methodToolCall     = "item/tool/call"
 )
 
 // rpcEnvelope is used for initial type detection.

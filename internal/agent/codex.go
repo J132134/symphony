@@ -357,6 +357,21 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		_ = r.stdin.Write(data)
 		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
 			SessionID: r.sessionID, Message: req.Method})
+	case methodToolCall:
+		r.mu.Lock()
+		handler := r.toolHandler
+		r.mu.Unlock()
+		toolName, _ := req.Params["name"].(string)
+		if toolName == "" {
+			toolName, _ = req.Params["toolName"].(string)
+		}
+		if handler != nil && toolName != "" {
+			go r.handleDynamicTool(req.ID, toolName, req.Params)
+			return
+		}
+		slog.Warn("agent.tool_call_unsupported", "tool", toolName)
+		data, _ := FormatErrorResponse(req.ID, -32601, "Tool call not supported")
+		_ = r.stdin.Write(data)
 	case methodUserInput:
 		r.mu.Lock()
 		handler := r.toolHandler
@@ -387,6 +402,9 @@ func (r *Runner) handleDynamicTool(reqID any, toolName string, params map[string
 	}
 
 	input, _ := params["input"].(map[string]any)
+	if input == nil {
+		input, _ = params["arguments"].(map[string]any)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
