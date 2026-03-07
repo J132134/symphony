@@ -1,0 +1,18 @@
+# Symphony daemon configuration
+# Edit projects below, then run: symphony daemon
+#
+# Docs: https://github.com/J132134/symphony
+
+projects:
+  - name: my-project
+    workflow: ~/projects/my-project/WORKFLOW.md
+  # - name: another-project
+  #   workflow: ~/projects/another-project/WORKFLOW.md
+
+status_server:
+  enabled: true
+  port: 7777
+
+auto_update:
+  enabled: true
+  interval_minutes: 30
