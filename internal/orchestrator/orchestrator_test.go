@@ -1876,3 +1876,58 @@ func randomFreePort(t *testing.T) int {
 func itoa(v int) string {
 	return fmt.Sprintf("%d", v)
 }
+
+func TestParseStatusPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "unstaged modified",
+			input: " M README.md",
+			want:  []string{"README.md"},
+		},
+		{
+			name:  "staged modified",
+			input: "M  README.md",
+			want:  []string{"README.md"},
+		},
+		{
+			name:  "untracked",
+			input: "?? new.go",
+			want:  []string{"new.go"},
+		},
+		{
+			name:  "rename",
+			input: "R  old.go -> new.go",
+			want:  []string{"new.go"},
+		},
+		{
+			name:  "multiple files",
+			input: " M internal/config/config.go\nM  README.md\n?? extra.txt",
+			want:  []string{"internal/config/config.go", "README.md", "extra.txt"},
+		},
+		{
+			name:  "empty output",
+			input: "",
+			want:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseStatusPaths(tc.input)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseStatusPaths(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("parseStatusPaths(%q)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

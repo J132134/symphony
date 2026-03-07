@@ -74,6 +74,7 @@ type RunAttempt struct {
 	GlobalSlotHeld bool
 	Urgent         bool
 	Preempted      bool
+	Summary        *workspaceSummary // collected before FinishRun (after_run hook may reset workspace)
 
 	mu            sync.Mutex
 	status        RunStatus

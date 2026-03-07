@@ -397,6 +397,10 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	runner.StopSession()
 	runnerStarted = false
 
+	if summary, err := collectWorkspaceSummary(ws.Path, cfg); err == nil {
+		attempt.Summary = &summary
+	}
+
 	if _, err := wsMgr.FinishRun(ctx, ws); err != nil {
 		slog.Warn("orchestrator.after_run_failed", "issue", issue.Identifier, "error", err)
 	}

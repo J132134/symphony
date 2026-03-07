@@ -30,7 +30,13 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 		return
 	}
 
-	summary, summaryErr := collectWorkspaceSummary(attempt.WorkspacePath, cfg)
+	var summary workspaceSummary
+	var summaryErr error
+	if attempt.Summary != nil {
+		summary = *attempt.Summary
+	} else {
+		summary, summaryErr = collectWorkspaceSummary(attempt.WorkspacePath, cfg)
+	}
 
 	if cfg.TrackerPostComments() {
 		if summaryErr != nil {
@@ -233,8 +239,7 @@ func changedFiles(workspacePath string) ([]string, error) {
 func parseStatusPaths(out string) []string {
 	var files []string
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		if len(line) > 3 {

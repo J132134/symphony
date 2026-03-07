@@ -30,7 +30,7 @@ query($projectSlug: String!, $states: [String!], $after: String) {
       id identifier title description priority
       state { name }
       branchName url
-      comments(first: 1) {
+      comments(last: 1, orderBy: updatedAt) {
         nodes { body createdAt updatedAt }
       }
       labels { nodes { name } }
