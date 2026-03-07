@@ -13,8 +13,11 @@ import (
 
 	"symphony/internal/config"
 	"symphony/internal/tracker"
+	"symphony/internal/types"
 	"symphony/internal/workspace"
 )
+
+const feedbackCommentMarker = "<!-- symphony:feedback -->"
 
 type workspaceSummary struct {
 	Branch            string
@@ -43,7 +46,7 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 			slog.Warn("orchestrator.comment_build_failed", "issue_id", issueID, "error", summaryErr)
 		} else if body, err := buildSuccessComment(cfg, attempt, summary); err != nil {
 			slog.Warn("orchestrator.comment_build_failed", "issue_id", issueID, "error", err)
-		} else if err := tr.AddComment(ctx, issueID, body); err != nil {
+		} else if err := postOrUpdateFeedbackComment(ctx, tr, issueID, body); err != nil {
 			slog.Warn("orchestrator.comment_post_failed", "issue_id", issueID, "error", err)
 		}
 	}
@@ -69,7 +72,7 @@ func (o *Orchestrator) maybePostFinalFailureFeedback(ctx context.Context, cfg *c
 		body, buildErr := buildFailureComment(cfg, attempt, err)
 		if buildErr != nil {
 			slog.Warn("orchestrator.comment_build_failed", "issue_id", issueID, "error", buildErr)
-		} else if postErr := tr.AddComment(ctx, issueID, body); postErr != nil {
+		} else if postErr := postOrUpdateFeedbackComment(ctx, tr, issueID, body); postErr != nil {
 			slog.Warn("orchestrator.comment_post_failed", "issue_id", issueID, "error", postErr)
 		}
 	}
@@ -104,7 +107,7 @@ func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt, summar
 		lines = append(lines, "", fmt.Sprintf("**Branch:** `%s`", escapeCode(summary.Branch)))
 	}
 
-	return strings.Join(lines, "\n"), nil
+	return withFeedbackMarker(strings.Join(lines, "\n")), nil
 }
 
 func shouldAttachPRLink(cfg *config.SymphonyConfig, state string, summary workspaceSummary, summaryErr error) bool {
@@ -178,7 +181,74 @@ func buildFailureComment(cfg *config.SymphonyConfig, attempt *RunAttempt, err er
 		fmt.Sprintf("**Duration:** %s", duration),
 		fmt.Sprintf("**Last status:** %s", lastStatusLine(attempt)),
 	}
-	return strings.Join(lines, "\n"), nil
+	return withFeedbackMarker(strings.Join(lines, "\n")), nil
+}
+
+func withFeedbackMarker(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return feedbackCommentMarker
+	}
+	if strings.Contains(body, feedbackCommentMarker) {
+		return body
+	}
+	return feedbackCommentMarker + "\n\n" + body
+}
+
+func postOrUpdateFeedbackComment(ctx context.Context, tr *tracker.LinearClient, issueID, body string) error {
+	issue, err := tr.FetchIssueByID(ctx, issueID)
+	if err == nil {
+		if existing := latestFeedbackComment(issue); existing != nil && strings.TrimSpace(existing.ID) != "" {
+			return tr.UpdateComment(ctx, existing.ID, body)
+		}
+	}
+	return tr.AddComment(ctx, issueID, body)
+}
+
+func latestFeedbackComment(issue *types.Issue) *types.Comment {
+	if issue == nil {
+		return nil
+	}
+	var latest *types.Comment
+	var latestAt time.Time
+	for _, comment := range issue.Comments {
+		if !isFeedbackComment(comment) {
+			continue
+		}
+		commentAt := latestFeedbackCommentTime(comment)
+		if latest == nil || commentAt.After(latestAt) {
+			latest = comment
+			latestAt = commentAt
+		}
+	}
+	return latest
+}
+
+func isFeedbackComment(comment *types.Comment) bool {
+	if comment == nil {
+		return false
+	}
+	body := strings.TrimSpace(comment.Body)
+	if body == "" {
+		return false
+	}
+	if strings.Contains(body, feedbackCommentMarker) {
+		return true
+	}
+	return strings.HasPrefix(body, "✅ **Symphony agent completed**") || strings.HasPrefix(body, "❌ **Symphony agent failed**")
+}
+
+func latestFeedbackCommentTime(comment *types.Comment) time.Time {
+	if comment == nil {
+		return time.Time{}
+	}
+	if comment.UpdatedAt != nil {
+		return *comment.UpdatedAt
+	}
+	if comment.CreatedAt != nil {
+		return *comment.CreatedAt
+	}
+	return time.Time{}
 }
 
 func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (workspaceSummary, error) {

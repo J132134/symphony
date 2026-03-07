@@ -18,6 +18,7 @@ type BlockerRef struct {
 }
 
 type Comment struct {
+	ID        string
 	Body      string
 	CreatedAt *time.Time
 	UpdatedAt *time.Time
@@ -34,6 +35,7 @@ type Issue struct {
 	URL         string
 	Labels      []string
 	BlockedBy   []BlockerRef
+	Comments    []*Comment
 	LastComment *Comment
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time

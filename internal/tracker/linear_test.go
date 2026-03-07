@@ -21,6 +21,7 @@ func TestNormalizeIssueCapturesLatestComment(t *testing.T) {
 		"comments": map[string]any{
 			"nodes": []any{
 				map[string]any{
+					"id":        "comment-1",
 					"body":      "<!-- symphony:retry-abandoned -->\nbody",
 					"createdAt": "2026-03-06T00:00:00Z",
 					"updatedAt": "2026-03-06T00:00:01Z",
@@ -35,6 +36,12 @@ func TestNormalizeIssueCapturesLatestComment(t *testing.T) {
 
 	if issue.LastComment == nil {
 		t.Fatal("LastComment should be captured")
+	}
+	if len(issue.Comments) != 1 {
+		t.Fatalf("len(Comments) = %d, want 1", len(issue.Comments))
+	}
+	if got := issue.Comments[0].ID; got != "comment-1" {
+		t.Fatalf("Comments[0].ID = %q, want comment-1", got)
 	}
 	if !strings.Contains(issue.LastComment.Body, "retry-abandoned") {
 		t.Fatalf("LastComment.Body = %q, want retry-abandoned marker", issue.LastComment.Body)
@@ -226,6 +233,86 @@ func TestAddCommentReturnsHTTPStatusError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Linear API status 403") {
 		t.Fatalf("AddComment() error = %v, want HTTP status message", err)
+	}
+}
+
+func TestUpdateComment(t *testing.T) {
+	t.Parallel()
+
+	var authHeader string
+	var capturedBody string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":true}}}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	if err := client.UpdateComment(context.Background(), "comment-1", "updated"); err != nil {
+		t.Fatalf("UpdateComment() error = %v", err)
+	}
+	if authHeader != "token" {
+		t.Fatalf("Authorization header = %q, want %q", authHeader, "token")
+	}
+	if !strings.Contains(capturedBody, "commentUpdate") {
+		t.Fatalf("request body missing commentUpdate mutation: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, `"id":"comment-1"`) {
+		t.Fatalf("request body missing comment id: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, `"body":"updated"`) {
+		t.Fatalf("request body missing body: %s", capturedBody)
+	}
+}
+
+func TestUpdateCommentRejectsEmptyCommentID(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	err = client.UpdateComment(context.Background(), "", "updated")
+	if err == nil {
+		t.Fatal("UpdateComment() returned nil error for empty comment ID")
+	}
+	if !strings.Contains(err.Error(), "comment ID is required") {
+		t.Fatalf("UpdateComment() error = %v, want comment ID is required", err)
+	}
+}
+
+func TestUpdateCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":false}}}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	err = client.UpdateComment(context.Background(), "comment-1", "updated")
+	if err == nil {
+		t.Fatal("UpdateComment() returned nil error for unsuccessful mutation")
+	}
+	if !strings.Contains(err.Error(), "commentUpdate unsuccessful") {
+		t.Fatalf("UpdateComment() error = %v, want commentUpdate unsuccessful", err)
 	}
 }
 
