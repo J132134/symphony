@@ -1,4 +1,4 @@
-.PHONY: build install install-launchagents clean test
+.PHONY: build install install-release install-launchagents clean test
 
 BINARY   = symphony
 BIN_DIR  = bin
@@ -21,6 +21,8 @@ install-release:
 	gh release download --repo J132134/symphony --pattern 'symphony-darwin-arm64' \
 		--output $(INSTALL_DIR)/$(BINARY) --clobber
 	chmod 755 $(INSTALL_DIR)/$(BINARY)
+	xattr -c $(INSTALL_DIR)/$(BINARY)
+	codesign -s - $(INSTALL_DIR)/$(BINARY)
 	@echo "Installed $$($(INSTALL_DIR)/$(BINARY) version) → $(INSTALL_DIR)/$(BINARY)"
 
 install-launchagents:

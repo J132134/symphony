@@ -17,6 +17,7 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build \
             -ldflags "-X symphony/internal/version.version=${GITHUB_REF_NAME}" \
             -o symphony-darwin-arm64 ./cmd/symphony
+          codesign -s - symphony-darwin-arm64
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
