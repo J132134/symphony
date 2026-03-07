@@ -41,16 +41,20 @@ func Run(opts Options) error {
 	app := &app{
 		client:       NewClient(opts.BaseURL),
 		pollInterval: opts.PollInterval,
-		summary: status.Summary{
-			Status:          "network_lost",
-			Version:         version.Current().Version,
-			GitHash:         version.Current().GitHash,
-			RunningIssueIDs: []string{},
-		},
+		summary:      initialSummary(),
 	}
 
 	systray.Run(app.onReady, func() {})
 	return nil
+}
+
+func initialSummary() status.Summary {
+	return status.Summary{
+		Status:          "idle",
+		Version:         version.Current().Version,
+		GitHash:         version.Current().GitHash,
+		RunningIssueIDs: []string{},
+	}
 }
 
 func (a *app) onReady() {
