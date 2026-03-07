@@ -2,3 +2,4 @@ bin/
 data/
 *.log
 .env
+WORKFLOW.md
