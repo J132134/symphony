@@ -16,6 +16,7 @@ import (
 	"symphony/internal/menubar"
 	"symphony/internal/orchestrator"
 	"symphony/internal/status"
+	"symphony/internal/version"
 	"symphony/internal/workflow"
 )
 
@@ -42,8 +43,8 @@ func main() {
 		cmdDaemon(args[1:])
 	case "menubar":
 		cmdMenubar(args[1:])
-	case "self-update-helper":
-		cmdSelfUpdateHelper(args[1:])
+	case "version":
+		cmdVersion()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -191,15 +192,9 @@ func cmdMenubar(args []string) {
 	}
 }
 
-func cmdSelfUpdateHelper(args []string) {
-	opts := parseFlags(args, map[string]string{
-		"--repo-dir":    "",
-		"--install-dir": "",
-		"--log-level":   "INFO",
-	})
-
-	initLogger(opts["--log-level"])
-	os.Exit(daemon.RunSelfUpdateHelper(opts["--repo-dir"], opts["--install-dir"]))
+func cmdVersion() {
+	v := version.Current()
+	fmt.Println(v.Version)
 }
 
 // -- helpers --
@@ -254,6 +249,7 @@ Usage:
   symphony validate [--workflow WORKFLOW.md]
   symphony daemon   [--config CONFIG_PATH]  [--log-level LEVEL]
   symphony menubar  [--url http://127.0.0.1:7777] [--poll 5s]
+  symphony version
   symphony help
 `)
 }

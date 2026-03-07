@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 func validateReadableFile(path, label string) []string {
@@ -26,41 +24,6 @@ func validateReadableFile(path, label string) []string {
 		return []string{fmt.Sprintf("%s is not readable: %s (%v)", label, path, err)}
 	}
 	_ = f.Close()
-	return nil
-}
-
-func validateGitRepoDir(path, label string) []string {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{fmt.Sprintf("%s not found: %s", label, path)}
-		}
-		return []string{fmt.Sprintf("%s cannot be accessed: %v", label, err)}
-	}
-	if !info.IsDir() {
-		return []string{fmt.Sprintf("%s must be a directory: %s", label, path)}
-	}
-
-	insideCmd := exec.Command("git", "-C", path, "rev-parse", "--is-inside-work-tree")
-	insideOut, err := insideCmd.CombinedOutput()
-	if err != nil || strings.TrimSpace(string(insideOut)) != "true" {
-		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
-	}
-
-	topCmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
-	topOut, err := topCmd.CombinedOutput()
-	if err != nil {
-		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
-	}
-
-	repoRoot := filepath.Clean(strings.TrimSpace(string(topOut)))
-	targetPath, err := filepath.Abs(path)
-	if err != nil {
-		targetPath = filepath.Clean(path)
-	}
-	if repoRoot != filepath.Clean(targetPath) {
-		return []string{fmt.Sprintf("%s must be a git repository: %s", label, path)}
-	}
 	return nil
 }
 

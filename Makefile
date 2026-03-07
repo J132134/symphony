@@ -4,16 +4,24 @@ BINARY   = symphony
 BIN_DIR  = bin
 CMD_PATH = ./cmd/symphony
 LOG_DIR  = $(HOME)/Library/Logs/Symphony
+VERSION  ?= dev
 
 # Default install location; override with: make install INSTALL_DIR=~/bin
 INSTALL_DIR = $(HOME)/.local/bin
 
 build:
 	@mkdir -p $(BIN_DIR)
-	go build -o $(BIN_DIR)/$(BINARY) $(CMD_PATH)
+	go build -ldflags "-X symphony/internal/version.version=$(VERSION)" -o $(BIN_DIR)/$(BINARY) $(CMD_PATH)
 
 install: build
 	install -m 755 $(BIN_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+
+install-release:
+	@mkdir -p $(INSTALL_DIR)
+	gh release download --repo J132134/symphony --pattern 'symphony-darwin-arm64' \
+		--output $(INSTALL_DIR)/$(BINARY) --clobber
+	chmod 755 $(INSTALL_DIR)/$(BINARY)
+	@echo "Installed $$($(INSTALL_DIR)/$(BINARY) version) → $(INSTALL_DIR)/$(BINARY)"
 
 install-launchagents:
 	@mkdir -p $(HOME)/Library/LaunchAgents $(LOG_DIR)

@@ -3,7 +3,6 @@ package config
 import (
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -162,31 +161,6 @@ func TestLoadDaemonConfigPreservesEmptyWorkflowForValidation(t *testing.T) {
 	requireErrorContaining(t, errs, "workflow path is required")
 }
 
-func TestLoadDaemonConfigPreservesEmptyRepoDirForValidation(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	workflowPath := filepath.Join(dir, "WORKFLOW.md")
-	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
-		t.Fatalf("write workflow: %v", err)
-	}
-
-	configPath := filepath.Join(dir, "config.yaml")
-	configYAML := "projects:\n  - name: alpha\n    workflow: " + workflowPath + "\nauto_update:\n  enabled: true\n  repo_dir: \"\"\nstatus_server:\n  enabled: false\n"
-	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := LoadDaemonConfig(configPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-
-	errs := cfg.Validate()
-	requireErrorContaining(t, errs, "auto_update.repo_dir")
-	requireErrorContaining(t, errs, "non-empty")
-}
-
 func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -203,13 +177,8 @@ func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) 
 		t.Fatalf("write workflow: %v", err)
 	}
 
-	repoDir := filepath.Join(configDir, "repo")
-	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir repo dir: %v", err)
-	}
-
 	configPath := filepath.Join(configDir, "config.yaml")
-	configYAML := "projects:\n  - name: alpha\n    workflow: workflows/WORKFLOW.md\nauto_update:\n  enabled: true\n  repo_dir: repo\nstatus_server:\n  enabled: false\n"
+	configYAML := "projects:\n  - name: alpha\n    workflow: workflows/WORKFLOW.md\nstatus_server:\n  enabled: false\n"
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -234,9 +203,6 @@ func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) 
 	if got, want := cfg.Projects[0].Workflow, workflowPath; got != want {
 		t.Fatalf("Workflow = %q, want %q", got, want)
 	}
-	if got, want := cfg.AutoUpdate.RepoDir, repoDir; got != want {
-		t.Fatalf("RepoDir = %q, want %q", got, want)
-	}
 }
 
 func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
@@ -246,11 +212,6 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 	workflowDir := filepath.Join(dir, "workflow-dir")
 	if err := os.Mkdir(workflowDir, 0o755); err != nil {
 		t.Fatalf("mkdir workflow dir: %v", err)
-	}
-
-	repoDir := filepath.Join(dir, "not-a-repo")
-	if err := os.Mkdir(repoDir, 0o755); err != nil {
-		t.Fatalf("mkdir repo dir: %v", err)
 	}
 
 	ln, port := listenOnRandomPort(t)
@@ -263,7 +224,6 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 		}},
 		AutoUpdate: AutoUpdateConfig{
 			Enabled: true,
-			RepoDir: repoDir,
 		},
 		StatusServer: StatusServerConfig{
 			Enabled: true,
@@ -274,51 +234,8 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "workflow")
 	requireErrorContaining(t, errs, "readable file")
-	requireErrorContaining(t, errs, "auto_update.repo_dir")
-	requireErrorContaining(t, errs, "git repository")
 	requireErrorContaining(t, errs, "status_server.port")
 	requireErrorContaining(t, errs, "already in use")
-}
-
-func TestDaemonConfigValidateRejectsSubdirectoryInsideGitRepoForAutoUpdate(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	workflowPath := filepath.Join(dir, "WORKFLOW.md")
-	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
-		t.Fatalf("write workflow: %v", err)
-	}
-
-	repoDir := filepath.Join(dir, "repo")
-	if err := os.Mkdir(repoDir, 0o755); err != nil {
-		t.Fatalf("mkdir repo dir: %v", err)
-	}
-	if out, err := exec.Command("git", "init", repoDir).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v (%s)", err, out)
-	}
-
-	nestedDir := filepath.Join(repoDir, "nested")
-	if err := os.Mkdir(nestedDir, 0o755); err != nil {
-		t.Fatalf("mkdir nested dir: %v", err)
-	}
-
-	cfg := &DaemonConfig{
-		Projects: []ProjectConfig{{
-			Name:     "alpha",
-			Workflow: workflowPath,
-		}},
-		AutoUpdate: AutoUpdateConfig{
-			Enabled: true,
-			RepoDir: nestedDir,
-		},
-		StatusServer: StatusServerConfig{
-			Enabled: false,
-		},
-	}
-
-	errs := cfg.Validate()
-	requireErrorContaining(t, errs, "auto_update.repo_dir")
-	requireErrorContaining(t, errs, "git repository")
 }
 
 func TestDaemonConfigValidateRejectsUnreadableWorkflowAndPortRange(t *testing.T) {

@@ -16,7 +16,7 @@ func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
 		updaterExitFn = prevExit
 	})
 
-	prepareUpdateFn = func(string) (bool, error) {
+	prepareUpdateFn = func() (bool, error) {
 		return true, nil
 	}
 
@@ -40,7 +40,7 @@ func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		CheckForUpdates(mgr, "/tmp/repo")
+		CheckForUpdates(mgr)
 	}()
 
 	select {

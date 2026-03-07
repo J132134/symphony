@@ -241,7 +241,7 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			RunUpdateLoop(mgr, cfg.AutoUpdate.IntervalMinutes, cfg.AutoUpdate.RepoDir, stopUpdate)
+			RunUpdateLoop(mgr, cfg.AutoUpdate.IntervalMinutes, stopUpdate)
 		}()
 	}
 

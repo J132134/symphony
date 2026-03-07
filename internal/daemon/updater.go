@@ -1,36 +1,33 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"time"
-)
 
-const (
-	updateHelperUpdated  = 0
-	updateHelperNoChange = 10
+	"symphony/internal/update"
+	"symphony/internal/version"
 )
 
 var (
-	prepareUpdateFn = prepareUpdate
+	prepareUpdateFn = defaultPrepareUpdate
 	updaterExitFn   = os.Exit
 )
 
-// CheckForUpdates prepares an updated binary out-of-process and exits so an external supervisor can restart it.
-func CheckForUpdates(mgr *Manager, repoDir string) {
+// CheckForUpdates checks GitHub Releases for a newer binary, installs it, and
+// exits so launchd can restart the process.
+func CheckForUpdates(mgr *Manager) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("updater.panic", "error", r)
 		}
 	}()
 
-	updated, err := prepareUpdateFn(repoDir)
+	updated, err := prepareUpdateFn()
 	if err != nil {
 		slog.Warn("updater.prepare_failed", "error", err)
 		return
@@ -46,110 +43,45 @@ func CheckForUpdates(mgr *Manager, repoDir string) {
 	updaterExitFn(0)
 }
 
-func getGitHash(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	if dir != "" {
-		cmd.Dir = dir
+func defaultPrepareUpdate() (bool, error) {
+	cur := version.Current()
+	checker := update.Checker{
+		Owner: "J132134",
+		Repo:  "symphony",
+		Asset: assetName(),
 	}
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
 
-func prepareUpdate(repoDir string) (bool, error) {
-	if repoDir == "" {
+	result, err := checker.Check(cur.Version)
+	if err != nil {
+		return false, fmt.Errorf("check for update: %w", err)
+	}
+	if !result.Available {
+		slog.Debug("updater.no_update", "current", result.CurrentVer, "latest", result.LatestVer)
 		return false, nil
 	}
+	slog.Info("updater.update_available", "current", result.CurrentVer, "latest", result.LatestVer)
+
+	tempPath, err := checker.Download(result.DownloadURL)
+	if err != nil {
+		return false, fmt.Errorf("download update: %w", err)
+	}
+	defer os.Remove(tempPath)
 
 	exe, err := os.Executable()
 	if err != nil {
 		return false, fmt.Errorf("resolve executable path: %w", err)
 	}
-	installDir := filepath.Dir(exe)
 
-	cmd := exec.Command(exe, "self-update-helper", "--repo-dir", repoDir, "--install-dir", installDir)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-
-	err = cmd.Run()
-	code := exitCode(err)
-	if err != nil {
-		if code == updateHelperNoChange {
-			return false, nil
-		}
-		return false, fmt.Errorf("run self-update helper: %w", err)
+	if err := installBuiltBinary(tempPath, exe); err != nil {
+		return false, fmt.Errorf("install update: %w", err)
 	}
-	return code == updateHelperUpdated, nil
+
+	slog.Info("updater.installed", "version", result.LatestVer, "path", exe)
+	return true, nil
 }
 
-// RunSelfUpdateHelper executes the isolated update flow used by daemon auto-update.
-func RunSelfUpdateHelper(repoDir, installDir string) int {
-	if repoDir == "" || installDir == "" {
-		slog.Error("updater.invalid_helper_args", "repo_dir", repoDir, "install_dir", installDir)
-		return 1
-	}
-
-	before := getGitHash(repoDir)
-	if before == "" {
-		slog.Warn("updater.git_hash_failed", "repo_dir", repoDir)
-		return 1
-	}
-
-	statusOut, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
-	if err != nil {
-		slog.Warn("updater.git_status_failed", "error", err)
-		return 1
-	}
-	if len(strings.TrimSpace(string(statusOut))) > 0 {
-		slog.Warn("updater.dirty_repo_skipping_update", "repo_dir", repoDir,
-			"hint", "commit or stash local changes to allow auto-update")
-		return updateHelperNoChange
-	}
-
-	fetch := exec.Command("git", "fetch", "--quiet")
-	fetch.Dir = repoDir
-	if out, err := fetch.CombinedOutput(); err != nil {
-		slog.Warn("updater.git_fetch_failed", "stderr", string(out))
-		return 1
-	}
-
-	pull := exec.Command("git", "pull", "--ff-only")
-	pull.Dir = repoDir
-	if out, err := pull.CombinedOutput(); err != nil {
-		slog.Warn("updater.git_pull_failed", "stderr", string(out))
-		return 1
-	}
-
-	after := getGitHash(repoDir)
-	if before == after || after == "" {
-		return updateHelperNoChange
-	}
-
-	tempDir, err := os.MkdirTemp("", "symphony-update-*")
-	if err != nil {
-		slog.Error("updater.tempdir_failed", "error", err)
-		return 1
-	}
-	defer os.RemoveAll(tempDir)
-
-	builtBinary := filepath.Join(tempDir, "symphony")
-	build := exec.Command("go", "build", "-o", builtBinary, "./cmd/symphony")
-	build.Dir = repoDir
-	if out, err := build.CombinedOutput(); err != nil {
-		slog.Error("updater.build_failed", "output", truncateStr(string(out), 500), "error", err)
-		return 1
-	}
-
-	finalPath := filepath.Join(installDir, filepath.Base(builtBinary))
-	if err := installBuiltBinary(builtBinary, finalPath); err != nil {
-		slog.Error("updater.install_failed", "target", finalPath, "error", err)
-		return 1
-	}
-
-	slog.Info("updater.git_updated", "before", before, "after", after)
-	return updateHelperUpdated
+func assetName() string {
+	return fmt.Sprintf("symphony-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
 func installBuiltBinary(src, dst string) error {
@@ -197,7 +129,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 // RunUpdateLoop runs CheckForUpdates every intervalMinutes until stop is closed.
-func RunUpdateLoop(mgr *Manager, intervalMinutes int, repoDir string, stop <-chan struct{}) {
+func RunUpdateLoop(mgr *Manager, intervalMinutes int, stop <-chan struct{}) {
 	if intervalMinutes <= 0 {
 		intervalMinutes = 30
 	}
@@ -209,25 +141,7 @@ func RunUpdateLoop(mgr *Manager, intervalMinutes int, repoDir string, stop <-cha
 		case <-stop:
 			return
 		case <-ticker.C:
-			CheckForUpdates(mgr, repoDir)
+			CheckForUpdates(mgr)
 		}
 	}
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if ok := errors.As(err, &exitErr); ok {
-		return exitErr.ExitCode()
-	}
-	return -1
-}
-
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }

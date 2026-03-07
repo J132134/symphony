@@ -5,6 +5,9 @@ import (
 	"strings"
 )
 
+// version is injected at build time via -ldflags '-X symphony/internal/version.version=vX.Y.Z'.
+var version string
+
 type Info struct {
 	Version string `json:"version"`
 	GitHash string `json:"git_hash"`
@@ -12,6 +15,11 @@ type Info struct {
 }
 
 func Current() Info {
+	// ldflags injection takes precedence.
+	if version != "" {
+		return Info{Version: version}
+	}
+
 	info := Info{Version: "dev"}
 
 	buildInfo, ok := debug.ReadBuildInfo()
