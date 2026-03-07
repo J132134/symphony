@@ -46,7 +46,7 @@ make install-launchagents  # plist도 해당 경로로 재생성
 
 ### 1. `WORKFLOW.md` 작성
 
-프로젝트 루트에 `WORKFLOW.md`를 만든다. YAML front matter가 설정이고, `---` 이후가 에이전트에 전달되는 Jinja2 프롬프트 템플릿이다.
+프로젝트 루트에 `WORKFLOW.md`를 만든다. YAML front matter가 설정이고, `---` 이후가 에이전트에 전달되는 Jinja2 호환 프롬프트 템플릿이다.
 
 ```markdown
 ---
@@ -305,24 +305,22 @@ after_run hook 실행
 ## 프로젝트 구조
 
 ```
-src/symphony/
-├── cli.py              # CLI 진입점 (run, validate, daemon)
-├── orchestrator.py     # 메인 오케스트레이션 루프
-├── config.py           # WORKFLOW.md 설정 파싱
-├── workflow.py         # WORKFLOW.md 로드 + Jinja2 렌더링
-├── workspace.py        # 이슈별 디렉토리 관리 + hooks
-├── models.py           # 데이터 모델
-├── agent/
-│   ├── base.py         # AgentRunner Protocol
-│   ├── codex.py        # Codex/Claude Code 프로세스 실행 (JSON-RPC)
-│   └── protocol.py     # JSON-RPC 메시지 파싱/포맷
-├── tracker/
-│   ├── base.py         # TrackerClient Protocol
-│   └── linear.py       # Linear GraphQL API 클라이언트
-├── daemon/
-│   ├── config.py       # 데몬 config.yaml 파싱
-│   ├── manager.py      # 멀티 프로젝트 DaemonManager
-│   └── updater.py      # 자동 업데이트
-└── status/
-    └── server.py       # FastAPI HTTP 대시보드
+symphony/
+├── cmd/symphony/       # CLI 진입점
+├── internal/
+│   ├── agent/          # 에이전트 프로세스 실행 (JSON-RPC)
+│   ├── config/         # WORKFLOW.md + daemon config 파싱
+│   ├── daemon/         # 멀티 프로젝트 매니저, 자동 업데이트
+│   ├── filewatch/      # 파일 변경 감지
+│   ├── menubar/        # macOS 메뉴바 UI
+│   ├── orchestrator/   # 메인 오케스트레이션 루프
+│   ├── status/         # HTTP 상태 API
+│   ├── tracker/        # Linear GraphQL 클라이언트
+│   ├── update/         # GitHub Releases 업데이트 체커
+│   ├── version/        # 버전 정보
+│   ├── workflow/       # WORKFLOW.md 로드 + 템플릿 렌더링
+│   └── workspace/      # 이슈별 디렉토리 관리 + hooks
+├── scripts/            # LaunchAgent plist 템플릿
+├── .github/workflows/  # CI/CD (release)
+└── Makefile
 ```
