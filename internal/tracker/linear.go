@@ -31,7 +31,7 @@ query($projectSlug: String!, $states: [String!], $after: String) {
       state { name }
       branchName url
       comments(last: 1, orderBy: updatedAt) {
-        nodes { body createdAt updatedAt }
+        nodes { id body createdAt updatedAt }
       }
       labels { nodes { name } }
       relations {
@@ -55,8 +55,8 @@ query($id: String!) {
     id identifier title description priority
     state { name }
     branchName url
-    comments(first: 1) {
-      nodes { body createdAt updatedAt }
+    comments(last: 50, orderBy: updatedAt) {
+      nodes { id body createdAt updatedAt }
     }
     labels { nodes { name } }
     relations {
@@ -69,6 +69,13 @@ query($id: String!) {
 const commentCreateMutation = `
 mutation($input: CommentCreateInput!) {
   commentCreate(input: $input) {
+    success
+  }
+}`
+
+const commentUpdateMutation = `
+mutation($id: String!, $input: CommentUpdateInput!) {
+  commentUpdate(id: $id, input: $input) {
     success
   }
 }`
@@ -125,7 +132,7 @@ query($projectSlug: String!, $states: [String!], $after: String, $assigneeId: St
       state { name }
       branchName url
       comments(last: 1, orderBy: updatedAt) {
-        nodes { body createdAt updatedAt }
+        nodes { id body createdAt updatedAt }
       }
       labels { nodes { name } }
       relations {
@@ -275,6 +282,29 @@ func (c *LinearClient) AddComment(ctx context.Context, issueID, body string) err
 	payload, _ := data["commentCreate"].(map[string]any)
 	if ok, _ := payload["success"].(bool); !ok {
 		return fmt.Errorf("commentCreate unsuccessful")
+	}
+	return nil
+}
+
+func (c *LinearClient) UpdateComment(ctx context.Context, commentID, body string) error {
+	if strings.TrimSpace(commentID) == "" {
+		return fmt.Errorf("comment ID is required")
+	}
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("comment body is required")
+	}
+	data, err := c.execute(ctx, commentUpdateMutation, map[string]any{
+		"id": commentID,
+		"input": map[string]any{
+			"body": body,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	payload, _ := data["commentUpdate"].(map[string]any)
+	if ok, _ := payload["success"].(bool); !ok {
+		return fmt.Errorf("commentUpdate unsuccessful")
 	}
 	return nil
 }
@@ -502,15 +532,15 @@ func normalizeIssue(node map[string]any) *types.Issue {
 	}
 	iss.CreatedAt = parseISO(strVal(node["createdAt"]))
 	iss.UpdatedAt = parseISO(strVal(node["updatedAt"]))
-	iss.LastComment = latestComment(node["comments"])
+	iss.Comments = normalizeComments(node["comments"])
+	iss.LastComment = latestComment(iss.Comments)
 	return iss
 }
 
-func latestComment(raw any) *types.Comment {
+func normalizeComments(raw any) []*types.Comment {
 	comments, _ := raw.(map[string]any)
 	nodes := castSlice(comments["nodes"])
-	var latest *types.Comment
-	var latestAt time.Time
+	result := make([]*types.Comment, 0, len(nodes))
 
 	for _, rawNode := range nodes {
 		node, ok := rawNode.(map[string]any)
@@ -518,9 +548,27 @@ func latestComment(raw any) *types.Comment {
 			continue
 		}
 		comment := &types.Comment{
+			ID:        strVal(node["id"]),
 			Body:      strVal(node["body"]),
 			CreatedAt: parseISO(strVal(node["createdAt"])),
 			UpdatedAt: parseISO(strVal(node["updatedAt"])),
+		}
+		if strings.TrimSpace(comment.Body) == "" {
+			continue
+		}
+		result = append(result, comment)
+	}
+
+	return result
+}
+
+func latestComment(comments []*types.Comment) *types.Comment {
+	var latest *types.Comment
+	var latestAt time.Time
+
+	for _, comment := range comments {
+		if comment == nil {
+			continue
 		}
 		if strings.TrimSpace(comment.Body) == "" {
 			continue

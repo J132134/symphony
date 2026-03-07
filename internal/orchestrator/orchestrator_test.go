@@ -1509,7 +1509,6 @@ func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 	}
 }
 
-
 func TestIsRetryAbandonComment(t *testing.T) {
 	t.Parallel()
 
@@ -1522,16 +1521,78 @@ func TestIsRetryAbandonComment(t *testing.T) {
 }
 
 type linearRecorder struct {
-	mu         sync.Mutex
-	comments   []string
-	links      []string
-	stateNames []string
+	mu            sync.Mutex
+	commentOps    []string
+	creates       []string
+	updates       []string
+	issueComments []*types.Comment
+	nextCommentID int
+	links         []string
+	stateNames    []string
 }
 
 func (r *linearRecorder) addComment(body string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.comments = append(r.comments, body)
+	r.commentOps = append(r.commentOps, body)
+	r.creates = append(r.creates, body)
+	r.nextCommentID++
+	now := time.Now().UTC()
+	r.issueComments = append(r.issueComments, &types.Comment{
+		ID:        fmt.Sprintf("comment-%d", r.nextCommentID),
+		Body:      body,
+		CreatedAt: &now,
+		UpdatedAt: &now,
+	})
+}
+
+func (r *linearRecorder) updateComment(commentID, body string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commentOps = append(r.commentOps, body)
+	r.updates = append(r.updates, body)
+	now := time.Now().UTC()
+	for _, comment := range r.issueComments {
+		if comment != nil && comment.ID == commentID {
+			comment.Body = body
+			comment.UpdatedAt = &now
+			return
+		}
+	}
+	r.issueComments = append(r.issueComments, &types.Comment{
+		ID:        commentID,
+		Body:      body,
+		CreatedAt: &now,
+		UpdatedAt: &now,
+	})
+}
+
+func (r *linearRecorder) seedIssueComments(comments ...*types.Comment) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.issueComments = nil
+	r.nextCommentID = 0
+	for _, comment := range comments {
+		if comment == nil {
+			continue
+		}
+		clone := *comment
+		if clone.ID == "" {
+			r.nextCommentID++
+			clone.ID = fmt.Sprintf("seed-comment-%d", r.nextCommentID)
+		}
+		if clone.CreatedAt == nil {
+			now := time.Now().UTC()
+			clone.CreatedAt = &now
+		}
+		if clone.UpdatedAt == nil {
+			clone.UpdatedAt = clone.CreatedAt
+		}
+		r.issueComments = append(r.issueComments, &clone)
+	}
+	if r.nextCommentID < len(r.issueComments) {
+		r.nextCommentID = len(r.issueComments)
+	}
 }
 
 func (r *linearRecorder) addState(name string) {
@@ -1549,16 +1610,28 @@ func (r *linearRecorder) addLink(url string) {
 func (r *linearRecorder) commentCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.comments)
+	return len(r.commentOps)
 }
 
 func (r *linearRecorder) lastComment() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.comments) == 0 {
+	if len(r.commentOps) == 0 {
 		return ""
 	}
-	return r.comments[len(r.comments)-1]
+	return r.commentOps[len(r.commentOps)-1]
+}
+
+func (r *linearRecorder) createCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.creates)
+}
+
+func (r *linearRecorder) updateCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.updates)
 }
 
 func (r *linearRecorder) lastState() string {
@@ -1585,6 +1658,23 @@ func (r *linearRecorder) lastLink() string {
 	return r.links[len(r.links)-1]
 }
 
+func (r *linearRecorder) issueCommentCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.issueComments)
+}
+
+func (r *linearRecorder) issueCommentBody(commentID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, comment := range r.issueComments {
+		if comment != nil && comment.ID == commentID {
+			return comment.Body
+		}
+	}
+	return ""
+}
+
 func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	t.Helper()
 
@@ -1606,10 +1696,48 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 			input, _ := req.Variables["input"].(map[string]any)
 			recorder.addComment(asString(input["body"]))
 			_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+		case strings.Contains(req.Query, "commentUpdate"):
+			input, _ := req.Variables["input"].(map[string]any)
+			recorder.updateComment(asString(req.Variables["id"]), asString(input["body"]))
+			_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":true}}}`))
 		case strings.Contains(req.Query, "attachmentCreate"):
 			input, _ := req.Variables["input"].(map[string]any)
 			recorder.addLink(asString(input["url"]))
 			_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
+		case strings.Contains(req.Query, "branchName url"):
+			recorder.mu.Lock()
+			nodes := make([]map[string]any, 0, len(recorder.issueComments))
+			for _, comment := range recorder.issueComments {
+				if comment == nil {
+					continue
+				}
+				nodes = append(nodes, map[string]any{
+					"id":        comment.ID,
+					"body":      comment.Body,
+					"createdAt": comment.CreatedAt.UTC().Format(time.RFC3339),
+					"updatedAt": comment.UpdatedAt.UTC().Format(time.RFC3339),
+				})
+			}
+			recorder.mu.Unlock()
+			payload, err := json.Marshal(map[string]any{
+				"id":          "issue-1",
+				"identifier":  "J-29",
+				"title":       "feedback",
+				"description": "",
+				"priority":    nil,
+				"state":       map[string]any{"name": "In Progress"},
+				"branchName":  nil,
+				"url":         nil,
+				"comments":    map[string]any{"nodes": nodes},
+				"labels":      map[string]any{"nodes": []any{}},
+				"relations":   map[string]any{"nodes": []any{}},
+				"createdAt":   time.Now().UTC().Format(time.RFC3339),
+				"updatedAt":   time.Now().UTC().Format(time.RFC3339),
+			})
+			if err != nil {
+				t.Fatalf("marshal issue payload: %v", err)
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"issue":%s}}`, payload)
 		case strings.Contains(req.Query, "issue(id: $id)"):
 			_, _ = w.Write([]byte(`{"data":{"issue":{"team":{"states":{"nodes":[{"id":"state-human-review","name":"Human Review"},{"id":"state-rework","name":"Rework"}]}}}}}`))
 		case strings.Contains(req.Query, "issueUpdate"):
@@ -1628,6 +1756,149 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 	}))
 
 	return recorder, server
+}
+
+func TestMaybePostSuccessFeedbackUpdatesExistingCommentWithoutCreatingDuplicate(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	existingAt := time.Now().Add(-2 * time.Minute).UTC()
+	recorder.seedIssueComments(&types.Comment{
+		ID:        "comment-feedback",
+		Body:      feedbackCommentMarker + "\n\n✅ **Symphony agent completed** (attempt 1, turn 1/3)",
+		CreatedAt: &existingAt,
+		UpdatedAt: &existingAt,
+	})
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_turns": 3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-49",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-2 * time.Minute),
+		Summary: &workspaceSummary{
+			ModifiedFiles: []string{"foo.txt"},
+			Branch:        "j-49-comment-feedback-upsert",
+		},
+	}
+	attempt.SetTurnCount(1)
+
+	o.maybePostSuccessFeedback(context.Background(), cfg, client, attempt.IssueID, attempt)
+	o.maybePostSuccessFeedback(context.Background(), cfg, client, attempt.IssueID, attempt)
+
+	if recorder.createCount() != 0 {
+		t.Fatalf("create count = %d, want 0", recorder.createCount())
+	}
+	if recorder.updateCount() != 2 {
+		t.Fatalf("update count = %d, want 2", recorder.updateCount())
+	}
+	if recorder.issueCommentCount() != 1 {
+		t.Fatalf("issue comment count = %d, want 1", recorder.issueCommentCount())
+	}
+	body := recorder.issueCommentBody("comment-feedback")
+	if !strings.Contains(body, feedbackCommentMarker) {
+		t.Fatalf("updated comment missing feedback marker:\n%s", body)
+	}
+	if !strings.Contains(body, "✅ **Symphony agent completed**") {
+		t.Fatalf("updated comment missing success summary:\n%s", body)
+	}
+}
+
+func TestOnWorkerDoneSuccessUpdatesLegacyFeedbackCommentEvenWhenHumanCommentIsLatest(t *testing.T) {
+	t.Parallel()
+
+	wsPath := initGitWorkspace(t)
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	feedbackAt := time.Now().Add(-4 * time.Minute).UTC()
+	humanAt := time.Now().Add(-1 * time.Minute).UTC()
+	recorder.seedIssueComments(
+		&types.Comment{
+			ID:        "comment-feedback",
+			Body:      "✅ **Symphony agent completed** (attempt 1, turn 1/3)\n\nold body",
+			CreatedAt: &feedbackAt,
+			UpdatedAt: &feedbackAt,
+		},
+		&types.Comment{
+			ID:        "comment-human",
+			Body:      "사람이 남긴 최신 코멘트",
+			CreatedAt: &humanAt,
+			UpdatedAt: &humanAt,
+		},
+	)
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"on_success_state": "Human Review",
+		},
+		"agent": map[string]any{
+			"max_attempts": 2,
+			"max_turns":    3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:       "issue-1",
+		Identifier:    "J-49",
+		Attempt:       1,
+		WorkspacePath: wsPath,
+		StartedAt:     time.Now().Add(-(3*time.Minute + 4*time.Second)),
+		Session: LiveSession{
+			TurnCount:    2,
+			InputTokens:  28000,
+			OutputTokens: 14100,
+			TotalTokens:  42100,
+		},
+	}
+	attempt.SetStatus(StatusSucceeded)
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
+
+	if recorder.createCount() != 0 {
+		t.Fatalf("create count = %d, want 0", recorder.createCount())
+	}
+	if recorder.updateCount() != 1 {
+		t.Fatalf("update count = %d, want 1", recorder.updateCount())
+	}
+	if recorder.issueCommentCount() != 2 {
+		t.Fatalf("issue comment count = %d, want 2", recorder.issueCommentCount())
+	}
+	body := recorder.issueCommentBody("comment-feedback")
+	if !strings.Contains(body, feedbackCommentMarker) {
+		t.Fatalf("updated legacy comment missing feedback marker:\n%s", body)
+	}
+	if !strings.Contains(body, "✅ **Symphony agent completed** (attempt 1, turn 2/3)") {
+		t.Fatalf("updated comment missing latest success body:\n%s", body)
+	}
+	if got := recorder.issueCommentBody("comment-human"); got != "사람이 남긴 최신 코멘트" {
+		t.Fatalf("human comment was modified: %q", got)
+	}
 }
 
 func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
