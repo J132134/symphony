@@ -54,8 +54,8 @@ tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: my-project
-  active_states: [Todo, Planning, In Progress, Human Review]
-  pause_states: [Planning, Human Review]
+  active_states: [Todo, Plan Review, In Progress, Human Review]
+  pause_states: [Plan Review, Human Review]
   terminal_states: [Done, Cancelled, Duplicate]
   post_comments: true
   on_success_state: Human Review
@@ -208,7 +208,7 @@ hooks:
 ```yaml
 tracker:
   post_comments: true
-  pause_states: [Planning, Human Review]
+  pause_states: [Plan Review, Human Review]
   on_success_state: Human Review
   on_failure_state: Rework
   pr_url_template: https://github.com/{repo_path}/pull/new/{branch}

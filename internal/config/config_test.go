@@ -85,12 +85,12 @@ func TestPauseStatesOverrideAndNormalize(t *testing.T) {
 
 	cfg := New(map[string]any{
 		"tracker": map[string]any{
-			"pause_states": []any{" Planning ", "Human Review", "QA Hold"},
+			"pause_states": []any{" Plan Review ", "Human Review", "QA Hold"},
 		},
 	})
 
 	got := cfg.PauseStates()
-	want := []string{"Planning", "Human Review", "QA Hold"}
+	want := []string{"Plan Review", "Human Review", "QA Hold"}
 	if len(got) != len(want) {
 		t.Fatalf("PauseStates() len = %d, want %d (%v)", len(got), len(want), got)
 	}
@@ -99,7 +99,7 @@ func TestPauseStatesOverrideAndNormalize(t *testing.T) {
 			t.Fatalf("PauseStates()[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	for _, state := range []string{"planning", "human review", "qa hold"} {
+	for _, state := range []string{"plan review", "human review", "qa hold"} {
 		if !cfg.PauseNorm()[state] {
 			t.Fatalf("PauseNorm() missing %q", state)
 		}
