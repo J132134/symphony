@@ -16,6 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/J132134/symphony/main/scripts/insta
 ```
 
 `~/.local/bin/symphony`에 최신 릴리스 바이너리를 설치한다.
+공식 macOS 릴리스는 Developer ID로 서명되며, 설치 스크립트는 ad-hoc-signed 바이너리를 거부해 업데이트 때 권한 프롬프트가 다시 발생하는 배포를 막는다.
 
 **LaunchAgent(데몬 + 메뉴바 자동 시작)까지 한 번에 설치:**
 

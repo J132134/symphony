@@ -10,15 +10,18 @@ func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
 	t.Parallel()
 
 	prevPrepare := prepareUpdateFn
+	prevValidate := validateUpdateFn
 	prevExit := updaterExitFn
 	t.Cleanup(func() {
 		prepareUpdateFn = prevPrepare
+		validateUpdateFn = prevValidate
 		updaterExitFn = prevExit
 	})
 
 	prepareUpdateFn = func() (bool, error) {
 		return true, nil
 	}
+	validateUpdateFn = func(string) error { return nil }
 
 	var cancelOnce sync.Once
 	stopped := make(chan struct{})
@@ -62,5 +65,55 @@ func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("CheckForUpdates should return after updaterExitFn")
+	}
+}
+
+func TestValidateMacOSSignatureDetailsRejectsAdHoc(t *testing.T) {
+	t.Parallel()
+
+	err := validateMacOSSignatureDetails(`Executable=/tmp/symphony
+Signature=adhoc
+TeamIdentifier=not set
+`)
+	if err == nil {
+		t.Fatal("expected ad-hoc signature to be rejected")
+	}
+}
+
+func TestValidateMacOSSignatureDetailsRejectsMissingTeamIdentifier(t *testing.T) {
+	t.Parallel()
+
+	err := validateMacOSSignatureDetails(`Executable=/tmp/symphony
+Authority=Developer ID Application: Symphony Inc (TEAMID1234)
+TeamIdentifier=not set
+`)
+	if err == nil {
+		t.Fatal("expected missing TeamIdentifier to be rejected")
+	}
+}
+
+func TestValidateMacOSSignatureDetailsRejectsNonDeveloperIDAuthority(t *testing.T) {
+	t.Parallel()
+
+	err := validateMacOSSignatureDetails(`Executable=/tmp/symphony
+Authority=Apple Development: Symphony Inc (TEAMID1234)
+TeamIdentifier=TEAMID1234
+`)
+	if err == nil {
+		t.Fatal("expected non-Developer ID authority to be rejected")
+	}
+}
+
+func TestValidateMacOSSignatureDetailsAcceptsDeveloperIDSignedBinary(t *testing.T) {
+	t.Parallel()
+
+	err := validateMacOSSignatureDetails(`Executable=/tmp/symphony
+Authority=Developer ID Application: Symphony Inc (TEAMID1234)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=TEAMID1234
+`)
+	if err != nil {
+		t.Fatalf("expected Developer ID signed binary to be accepted: %v", err)
 	}
 }

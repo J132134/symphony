@@ -21,8 +21,18 @@ echo "Downloading symphony..."
 curl -fsSL "https://github.com/${REPO}/releases/latest/download/${BINARY}-darwin-arm64" \
   -o "${INSTALL_DIR}/${BINARY}"
 chmod 755 "${INSTALL_DIR}/${BINARY}"
-xattr -c "${INSTALL_DIR}/${BINARY}"
-codesign -s - --force "${INSTALL_DIR}/${BINARY}"
+xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY}" 2>/dev/null || true
+CODESIGN_INFO="$(codesign -dv --verbose=4 "${INSTALL_DIR}/${BINARY}" 2>&1)" || {
+  echo "Downloaded release is not properly signed:" >&2
+  echo "${CODESIGN_INFO}" >&2
+  exit 1
+}
+if [[ "${CODESIGN_INFO}" == *"Signature=adhoc"* ]] || [[ "${CODESIGN_INFO}" == *"TeamIdentifier=not set"* ]] || [[ "${CODESIGN_INFO}" != *"Authority=Developer ID Application:"* ]]; then
+  echo "Error: downloaded release is not Developer ID Application signed. Refusing install because macOS would re-prompt for Files and Folders access after updates." >&2
+  echo "${CODESIGN_INFO}" >&2
+  exit 1
+fi
+codesign --verify --verbose=2 "${INSTALL_DIR}/${BINARY}"
 echo "Installed $("${INSTALL_DIR}/${BINARY}" version) → ${INSTALL_DIR}/${BINARY}"
 
 # Add INSTALL_DIR to PATH if needed

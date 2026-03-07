@@ -5,8 +5,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"symphony/internal/update"
@@ -14,8 +16,9 @@ import (
 )
 
 var (
-	prepareUpdateFn = defaultPrepareUpdate
-	updaterExitFn   = os.Exit
+	prepareUpdateFn  = defaultPrepareUpdate
+	validateUpdateFn = validateUpdateAsset
+	updaterExitFn    = os.Exit
 )
 
 // CheckForUpdates checks GitHub Releases for a newer binary, installs it, and
@@ -67,6 +70,10 @@ func defaultPrepareUpdate() (bool, error) {
 	}
 	defer os.Remove(tempPath)
 
+	if err := validateUpdateFn(tempPath); err != nil {
+		return false, fmt.Errorf("validate update asset: %w", err)
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return false, fmt.Errorf("resolve executable path: %w", err)
@@ -82,6 +89,60 @@ func defaultPrepareUpdate() (bool, error) {
 
 func assetName() string {
 	return fmt.Sprintf("symphony-%s-%s", runtime.GOOS, runtime.GOARCH)
+}
+
+func validateUpdateAsset(path string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+
+	out, err := exec.Command("codesign", "-dv", "--verbose=4", path).CombinedOutput()
+	details := string(out)
+	if err != nil {
+		return fmt.Errorf("inspect macOS code signature: %w: %s", err, strings.TrimSpace(details))
+	}
+	if err := validateMacOSSignatureDetails(details); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMacOSSignatureDetails(details string) error {
+	if strings.EqualFold(codesignField(details, "Signature"), "adhoc") {
+		return fmt.Errorf("macOS update asset must be Developer ID signed, got ad-hoc signature")
+	}
+
+	if !codesignAuthorityContains(details, "Developer ID Application:") {
+		return fmt.Errorf("macOS update asset must be signed with a Developer ID Application certificate")
+	}
+
+	teamID := codesignField(details, "TeamIdentifier")
+	if teamID == "" || strings.EqualFold(teamID, "not set") {
+		return fmt.Errorf("macOS update asset must include a TeamIdentifier")
+	}
+
+	return nil
+}
+
+func codesignField(details, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(details, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func codesignAuthorityContains(details, want string) bool {
+	for _, line := range strings.Split(details, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Authority=") && strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func installBuiltBinary(src, dst string) error {
