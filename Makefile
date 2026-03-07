@@ -22,7 +22,7 @@ install-release:
 		--output $(INSTALL_DIR)/$(BINARY) --clobber
 	chmod 755 $(INSTALL_DIR)/$(BINARY)
 	xattr -c $(INSTALL_DIR)/$(BINARY)
-	codesign -s - $(INSTALL_DIR)/$(BINARY)
+	codesign -s - --force $(INSTALL_DIR)/$(BINARY)
 	@echo "Installed $$($(INSTALL_DIR)/$(BINARY) version) → $(INSTALL_DIR)/$(BINARY)"
 
 install-launchagents:
