@@ -165,9 +165,13 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	readTimeout := time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
 
 	// initialize
+	capabilities := map[string]any{}
+	if len(cfg.DynamicTools) > 0 {
+		capabilities["experimentalApi"] = true
+	}
 	initRes, err := r.sendRequest(ctx, readTimeout, methodInitialize, map[string]any{
 		"protocolVersion": "2025-01-01",
-		"capabilities":    map[string]any{},
+		"capabilities":    capabilities,
 		"clientInfo":      map[string]any{"name": "symphony", "version": "0.2.0"},
 	})
 	if err != nil {
