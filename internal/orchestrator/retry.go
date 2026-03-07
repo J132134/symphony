@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"symphony/internal/config"
-	"symphony/internal/types"
 )
 
 func (o *Orchestrator) scheduleFailureRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum, failureCount int, errMsg string) {
@@ -119,7 +118,7 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		return
 	}
 
-	candidates, err := tr.FetchCandidateIssues(ctx)
+	issue, err := tr.FetchIssueByID(ctx, issueID)
 	if err != nil {
 		o.state.RecordTrackerFailure(time.Now().UTC(), err)
 		slog.Error("orchestrator.retry_fetch_failed", "issue_id", issueID, "error", err)
@@ -127,14 +126,6 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		return
 	}
 	o.state.RecordTrackerSuccess(time.Now().UTC())
-
-	var issue *types.Issue
-	for _, c := range candidates {
-		if c.ID == issueID {
-			issue = c
-			break
-		}
-	}
 
 	if issue == nil {
 		slog.Info("orchestrator.retry_gone", "issue_id", issueID)

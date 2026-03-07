@@ -1232,7 +1232,7 @@ func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
 	}))
 	defer server.Close()
 
@@ -1294,7 +1294,7 @@ func TestOnRetryTimerDefersNonUrgentWhileGlobalUrgentRuns(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}]}}}`))
+		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
 	}))
 	defer server.Close()
 
@@ -1600,11 +1600,17 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
 	t.Helper()
 
+	byID := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		byID[iss.ID] = iss
+	}
+
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
 		var req struct {
-			Query string `json:"query"`
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -1616,6 +1622,19 @@ func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Se
 			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"nodes":%s}}}`, encodeIssueStateNodes(t, issues))
 		case strings.Contains(req.Query, "state: { name: { in: $states } }"):
 			_, _ = fmt.Fprintf(w, `{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":%s}}}`, encodeCandidateIssueNodes(t, issues))
+		case strings.Contains(req.Query, "branchName url"):
+			id := asString(req.Variables["id"])
+			iss, ok := byID[id]
+			if !ok {
+				_, _ = w.Write([]byte(`{"data":{"issue":null}}`))
+				return
+			}
+			nodes := encodeCandidateIssueNodes(t, []*types.Issue{iss})
+			// Strip array brackets to get a single object.
+			nodes = strings.TrimSpace(nodes)
+			nodes = strings.TrimPrefix(nodes, "[")
+			nodes = strings.TrimSuffix(nodes, "]")
+			_, _ = fmt.Fprintf(w, `{"data":{"issue":%s}}`, nodes)
 		default:
 			t.Fatalf("unexpected query: %s", req.Query)
 		}

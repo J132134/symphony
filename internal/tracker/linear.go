@@ -49,6 +49,23 @@ query($ids: [ID!]!) {
   }
 }`
 
+const issueByIDQuery = `
+query($id: String!) {
+  issue(id: $id) {
+    id identifier title description priority
+    state { name }
+    branchName url
+    comments(first: 1) {
+      nodes { body createdAt updatedAt }
+    }
+    labels { nodes { name } }
+    relations {
+      nodes { type relatedIssue { id identifier state { name } } }
+    }
+    createdAt updatedAt
+  }
+}`
+
 const commentCreateMutation = `
 mutation($input: CommentCreateInput!) {
   commentCreate(input: $input) {
@@ -128,6 +145,21 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func (c *LinearClient) FetchCandidateIssues(ctx context.Context) ([]*types.Issue, error) {
 	return c.fetchPaginated(ctx, c.activeStates)
+}
+
+func (c *LinearClient) FetchIssueByID(ctx context.Context, id string) (*types.Issue, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("issue ID is required")
+	}
+	data, err := c.execute(ctx, issueByIDQuery, map[string]any{"id": id})
+	if err != nil {
+		return nil, err
+	}
+	node, ok := data["issue"].(map[string]any)
+	if !ok || strVal(node["id"]) == "" {
+		return nil, nil
+	}
+	return normalizeIssue(node), nil
 }
 
 func (c *LinearClient) FetchIssuesByStates(ctx context.Context, states []string) ([]*types.Issue, error) {
