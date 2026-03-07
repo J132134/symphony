@@ -60,3 +60,19 @@ workflow.RenderContinuation(wf, issueCtx, turnNum, maxTurns)
 2. `config_test.go`에 기본값 + override 테스트 추가
 3. `README.md` 설정 기본값 표에 추가
 4. 새 동작의 파라미터를 Go 상수로만 두지 말고 반드시 WORKFLOW.md에 노출
+
+## 테스트 작성 가이드
+
+- 유닛 테스트에서 Linear API는 인터페이스로 mock (`linearClient` interface)
+- `config.New(map[string]any{...})`로 인메모리 설정 생성
+- WORKFLOW.md 파일이 필요한 테스트: `t.TempDir()`에 임시 파일 생성
+- 상태명 테스트: 정규화된 소문자("plan review")와 원본 케이스("Plan Review") 모두 커버
+- 테이블 드리븐 테스트 선호 (`for _, tc := range tests`)
+
+## 자주 실수하는 것들
+
+1. **상태 하드코딩**: `"Human Review"` 문자열을 Go에 직접 쓰지 말고 `isPauseState()` 사용
+2. **프롬프트 하드코딩**: 에이전트에 보내는 텍스트는 WORKFLOW.md 템플릿 경유
+3. **설정 노출 누락**: 새 동작의 파라미터를 Go 상수로만 두고 WORKFLOW.md에 노출 안 함
+4. **상태 비교 시 정규화 누락**: `issue.State == "Todo"` 대신 `NormalizeState(issue.State) == "todo"`
+5. **에러 처리 누락**: `onWorkerDone`에서 Linear 피드백 실패는 워커를 실패로 만들지 않고 경고 로그만
