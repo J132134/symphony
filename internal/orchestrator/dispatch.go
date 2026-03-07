@@ -336,13 +336,11 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	if handle != nil {
 		handle.setRunner(runner, agentCfg)
 	}
-	attempt.Session.ThreadID = threadID
-	attempt.Session.SessionID = runner.SessionID()
-	attempt.Session.AgentPID = runner.PID()
+	attempt.SetSessionIdentity(threadID, runner.SessionID(), runner.PID())
 
 	for turnNum := 1; turnNum <= cfg.MaxTurns(); turnNum++ {
 		attempt.SetStatus(StatusStreamingTurn)
-		attempt.Session.TurnCount = turnNum
+		attempt.SetTurnCount(turnNum)
 
 		turnPrompt := prompt
 		if turnNum > 1 {
@@ -429,12 +427,7 @@ func buildContinuationPrompt(identifier, title string, turnNum, maxTurns int, tu
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
 	attempt.UpdateLastEvent(e.Timestamp)
-	if e.SessionID != "" {
-		attempt.Session.SessionID = e.SessionID
-	}
-	if e.PID != "" {
-		attempt.Session.AgentPID = e.PID
-	}
+	attempt.UpdateSessionRuntime(e.SessionID, e.PID)
 	if e.Usage != nil {
 		o.state.mu.Lock()
 		o.state.Totals.InputTokens += e.Usage.InputTokens

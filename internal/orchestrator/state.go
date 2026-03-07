@@ -116,6 +116,37 @@ func (a *RunAttempt) AddTokens(in, out, total int64) {
 	a.Session.TotalTokens += total
 }
 
+func (a *RunAttempt) SetSessionIdentity(threadID, sessionID, agentPID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.ThreadID = threadID
+	a.Session.SessionID = sessionID
+	a.Session.AgentPID = agentPID
+}
+
+func (a *RunAttempt) UpdateSessionRuntime(sessionID, agentPID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sessionID != "" {
+		a.Session.SessionID = sessionID
+	}
+	if agentPID != "" {
+		a.Session.AgentPID = agentPID
+	}
+}
+
+func (a *RunAttempt) SetTurnCount(turnCount int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.TurnCount = turnCount
+}
+
+func (a *RunAttempt) SessionSnapshot() LiveSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Session
+}
+
 func (a *RunAttempt) SetCancelReason(reason WorkerCancelReason) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

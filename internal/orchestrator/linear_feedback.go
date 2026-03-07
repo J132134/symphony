@@ -76,11 +76,13 @@ func (o *Orchestrator) maybePostFinalFailureFeedback(ctx context.Context, cfg *c
 }
 
 func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt, summary workspaceSummary) (string, error) {
+	session := attempt.SessionSnapshot()
+
 	lines := []string{
-		fmt.Sprintf("✅ **Symphony agent completed** (attempt %d, turn %d/%d)", attempt.Attempt, max(1, attempt.Session.TurnCount), cfg.MaxTurns()),
+		fmt.Sprintf("✅ **Symphony agent completed** (attempt %d, turn %d/%d)", attempt.Attempt, max(1, session.TurnCount), cfg.MaxTurns()),
 		"",
 		fmt.Sprintf("**Duration:** %s", humanDuration(time.Since(attempt.StartedAt))),
-		fmt.Sprintf("**Tokens:** %s (in: %s / out: %s)", formatInt(attempt.Session.TotalTokens), formatInt(attempt.Session.InputTokens), formatInt(attempt.Session.OutputTokens)),
+		fmt.Sprintf("**Tokens:** %s (in: %s / out: %s)", formatInt(session.TotalTokens), formatInt(session.InputTokens), formatInt(session.OutputTokens)),
 		"",
 		"**Changes:**",
 		fmt.Sprintf("- Modified: %s", joinOrDefault(summary.ModifiedFiles, "none detected")),
@@ -299,8 +301,9 @@ func parseGitHubRemote(raw string) (string, string) {
 
 func lastStatusLine(attempt *RunAttempt) string {
 	status := string(attempt.GetStatus())
-	if attempt.Session.TurnCount > 0 {
-		return fmt.Sprintf("%s (turn %d)", status, attempt.Session.TurnCount)
+	session := attempt.SessionSnapshot()
+	if session.TurnCount > 0 {
+		return fmt.Sprintf("%s (turn %d)", status, session.TurnCount)
 	}
 	return status
 }
