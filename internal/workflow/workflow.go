@@ -92,7 +92,7 @@ type IssueContext struct {
 
 // Render renders the prompt template for the given issue and attempt number.
 func Render(def *Definition, issue IssueContext, attempt int) (string, error) {
-	ctx := pongo2.Context{
+	return render(def.Template, pongo2.Context{
 		"issue": map[string]any{
 			"id":          issue.ID,
 			"identifier":  issue.Identifier,
@@ -106,8 +106,63 @@ func Render(def *Definition, issue IssueContext, attempt int) (string, error) {
 		},
 		"attempt":      attempt,
 		"turn_context": nonEmpty(issue.TurnContext),
+	})
+}
+
+// RenderContinuation renders the multi-turn continuation prompt for turn > 1.
+// If def.Config contains agent.continuation_prompt, it renders that as a pongo2 template.
+// Otherwise it falls back to a default English format string.
+func RenderContinuation(def *Definition, issue IssueContext, turnNum, maxTurns int) (string, error) {
+	tmplStr := continuationPromptTemplate(def)
+	if tmplStr == "" {
+		return defaultContinuationPrompt(issue.Identifier, issue.Title, turnNum, maxTurns, issue.TurnContext), nil
 	}
-	out, err := def.Template.Execute(ctx)
+	tmpl, err := pongo2.FromString(tmplStr)
+	if err != nil {
+		return "", fmt.Errorf("continuation_prompt template parse: %w", err)
+	}
+	ctx := pongo2.Context{
+		"issue": map[string]any{
+			"id":          issue.ID,
+			"identifier":  issue.Identifier,
+			"title":       issue.Title,
+			"description": nonEmpty(issue.Description),
+			"state":       issue.State,
+			"labels":      issue.Labels,
+			"url":         nonEmpty(issue.URL),
+		},
+		"turn_num":     turnNum,
+		"max_turns":    maxTurns,
+		"turn_context": nonEmpty(issue.TurnContext),
+	}
+	return render(tmpl, ctx)
+}
+
+func continuationPromptTemplate(def *Definition) string {
+	if def == nil {
+		return ""
+	}
+	agent, ok := def.Config["agent"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := agent["continuation_prompt"].(string)
+	return strings.TrimSpace(s)
+}
+
+func defaultContinuationPrompt(identifier, title string, turnNum, maxTurns int, turnContext string) string {
+	if strings.TrimSpace(turnContext) == "" {
+		return fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
+			identifier, title, turnNum, maxTurns)
+	}
+	return fmt.Sprintf(
+		"Continue working on %s: %s.\n\nProgress so far:\n%s\n\nThis is turn %d of %d. Continue where you left off without repeating completed work.",
+		identifier, title, turnContext, turnNum, maxTurns,
+	)
+}
+
+func render(tmpl *pongo2.Template, ctx pongo2.Context) (string, error) {
+	out, err := tmpl.Execute(ctx)
 	if err != nil {
 		return "", fmt.Errorf("template render: %w", err)
 	}

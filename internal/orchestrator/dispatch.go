@@ -341,13 +341,23 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 
 		turnPrompt := prompt
 		if turnNum > 1 {
-			turnPrompt = buildContinuationPrompt(
-				issue.Identifier,
-				issue.Title,
-				turnNum,
-				cfg.MaxTurns(),
-				o.loadTurnContext(issue, wsMgr, ws),
-			)
+			tc := o.loadTurnContext(issue, wsMgr, ws)
+			cont, contErr := workflow.RenderContinuation(wf, workflow.IssueContext{
+				ID:          issue.ID,
+				Identifier:  issue.Identifier,
+				Title:       issue.Title,
+				Description: issue.Description,
+				State:       issue.State,
+				Labels:      issue.Labels,
+				URL:         issue.URL,
+				TurnContext: tc,
+			}, turnNum, cfg.MaxTurns())
+			if contErr != nil {
+				attempt.SetStatus(StatusFailed)
+				attempt.Error = contErr.Error()
+				return fmt.Errorf("render continuation prompt: %w", contErr)
+			}
+			turnPrompt = cont
 		}
 
 		turnID := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -406,21 +416,6 @@ func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Mana
 	return turnContext
 }
 
-func buildContinuationPrompt(identifier, title string, turnNum, maxTurns int, turnContext string) string {
-	if strings.TrimSpace(turnContext) == "" {
-		return fmt.Sprintf("Continue working on %s: %s. This is turn %d of %d.",
-			identifier, title, turnNum, maxTurns)
-	}
-
-	return fmt.Sprintf(
-		"Continue working on %s: %s.\n\nProgress so far:\n%s\n\nThis is turn %d of %d. Continue where you left off without repeating completed work.",
-		identifier,
-		title,
-		turnContext,
-		turnNum,
-		maxTurns,
-	)
-}
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
 	attempt.UpdateLastEvent(e.Timestamp)
