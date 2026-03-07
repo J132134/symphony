@@ -103,8 +103,8 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 			continue
 		}
 
-		if config.NormalizeState(cur.State) == humanReviewState {
-			slog.Info("orchestrator.reconcile_paused_for_human_review", "issue", cur.Identifier, "state", cur.State)
+		if isPauseState(cfg, cur.State) {
+			slog.Info("orchestrator.reconcile_paused_for_state", "issue", cur.Identifier, "state", cur.State)
 			o.cancelWorker(id, CancelReasonReconcile)
 		}
 	}

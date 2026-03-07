@@ -24,7 +24,7 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if !activeNorm[normState] || termNorm[normState] {
 		return false
 	}
-	if normState == humanReviewState {
+	if isPauseState(cfg, issue.State) {
 		return false
 	}
 

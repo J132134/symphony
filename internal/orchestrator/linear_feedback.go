@@ -45,7 +45,7 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 	if state := cfg.TrackerOnSuccessState(); state != "" {
 		if err := tr.UpdateIssueState(ctx, issueID, state); err != nil {
 			slog.Warn("orchestrator.success_state_update_failed", "issue_id", issueID, "state", state, "error", err)
-		} else if shouldAttachPRLink(state, summary, summaryErr) {
+		} else if shouldAttachPRLink(cfg, state, summary, summaryErr) {
 			linkURL := resolvePRLinkURL(summary, lookupGitHubPRURL)
 			if err := tr.AddLink(ctx, issueID, "PR", linkURL); err != nil {
 				slog.Warn("orchestrator.pr_link_add_failed", "issue_id", issueID, "state", state, "pr_url", linkURL, "error", err)
@@ -101,11 +101,11 @@ func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt, summar
 	return strings.Join(lines, "\n"), nil
 }
 
-func shouldAttachPRLink(state string, summary workspaceSummary, summaryErr error) bool {
+func shouldAttachPRLink(cfg *config.SymphonyConfig, state string, summary workspaceSummary, summaryErr error) bool {
 	if summaryErr != nil || summary.PRURL == "" {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(state), humanReviewState)
+	return isPauseState(cfg, state)
 }
 
 func resolvePRLinkURL(summary workspaceSummary, lookup func(owner, repo, branch string) string) string {

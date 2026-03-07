@@ -66,6 +66,46 @@ func TestTrackerFeedbackConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestPauseStatesDefaultsToHumanReview(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(nil)
+
+	got := cfg.PauseStates()
+	if len(got) != 1 || got[0] != "Human Review" {
+		t.Fatalf("PauseStates() = %v, want [Human Review]", got)
+	}
+	if !cfg.PauseNorm()["human review"] {
+		t.Fatal("PauseNorm() should include normalized human review")
+	}
+}
+
+func TestPauseStatesOverrideAndNormalize(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"tracker": map[string]any{
+			"pause_states": []any{" Planning ", "Human Review", "QA Hold"},
+		},
+	})
+
+	got := cfg.PauseStates()
+	want := []string{"Planning", "Human Review", "QA Hold"}
+	if len(got) != len(want) {
+		t.Fatalf("PauseStates() len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("PauseStates()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, state := range []string{"planning", "human review", "qa hold"} {
+		if !cfg.PauseNorm()[state] {
+			t.Fatalf("PauseNorm() missing %q", state)
+		}
+	}
+}
+
 func TestDrainTimeoutDefaultsToStallPlusHooks(t *testing.T) {
 	t.Parallel()
 

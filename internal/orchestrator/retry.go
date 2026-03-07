@@ -139,8 +139,8 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		o.releaseClaim(issueID)
 		return
 	}
-	if config.NormalizeState(issue.State) == humanReviewState {
-		slog.Info("orchestrator.retry_paused_for_human_review", "issue_id", issueID, "state", issue.State)
+	if isPauseState(cfg, issue.State) {
+		slog.Info("orchestrator.retry_paused_for_state", "issue_id", issueID, "state", issue.State)
 		o.releaseClaim(issueID)
 		return
 	}

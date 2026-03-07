@@ -20,8 +20,8 @@ func (o *Orchestrator) runningConcurrentCountLocked(cfg *config.SymphonyConfig) 
 	return count
 }
 
-func countsTowardConcurrency(_ *config.SymphonyConfig, state string) bool {
-	return config.NormalizeState(state) != humanReviewState
+func countsTowardConcurrency(cfg *config.SymphonyConfig, state string) bool {
+	return !isPauseState(cfg, state)
 }
 
 func (o *Orchestrator) hasRunningUrgentLocked(cfg *config.SymphonyConfig) bool {

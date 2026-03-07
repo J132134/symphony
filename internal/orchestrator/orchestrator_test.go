@@ -283,6 +283,27 @@ func TestRunningConcurrentCountExcludesManualHumanReview(t *testing.T) {
 	}
 }
 
+func TestRunningConcurrentCountExcludesConfiguredPauseState(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"pause_states": []any{"Planning"},
+		},
+	})
+
+	o.state.mu.Lock()
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1", IssueState: "Planning"}
+	o.state.Running["issue-2"] = &RunAttempt{IssueID: "issue-2", IssueState: "In Progress"}
+	got := o.runningConcurrentCountLocked(cfg)
+	o.state.mu.Unlock()
+
+	if got != 1 {
+		t.Fatalf("runningConcurrentCountLocked() = %d, want 1", got)
+	}
+}
+
 func TestCanDispatchIgnoresManualHumanReviewForConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 
@@ -325,6 +346,26 @@ func TestCanDispatchSkipsManualHumanReviewState(t *testing.T) {
 	issue := &types.Issue{ID: "issue-1", Identifier: "J-40", State: "Human Review"}
 	if o.canDispatch(cfg, issue) {
 		t.Fatal("manual human review issue should not dispatch")
+	}
+}
+
+func TestCanDispatchSkipsConfiguredPauseState(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "Planning", "In Progress"},
+			"pause_states":  []any{"Planning"},
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-1", Identifier: "J-46", State: "Planning"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("configured pause-state issue should not dispatch")
 	}
 }
 
@@ -464,11 +505,11 @@ func TestPreemptForUrgentMarksRunningIssuesAndCancels(t *testing.T) {
 
 	o.mu.Lock()
 	o.workersByIssue["issue-1"] = &workerHandle{
-		cancel: func() { cancelled = append(cancelled, "issue-1") },
+		cancel:  func() { cancelled = append(cancelled, "issue-1") },
 		attempt: o.state.Running["issue-1"],
 	}
 	o.workersByIssue["issue-2"] = &workerHandle{
-		cancel: func() { cancelled = append(cancelled, "issue-2") },
+		cancel:  func() { cancelled = append(cancelled, "issue-2") },
 		attempt: o.state.Running["issue-2"],
 	}
 	o.mu.Unlock()
@@ -606,6 +647,24 @@ func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
 	}
 	if len(o.state.Running) != 0 {
 		t.Fatalf("manual human review retry should not dispatch, got %d running", len(o.state.Running))
+	}
+}
+
+func TestShouldAttachPRLinkForConfiguredPauseState(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"pause_states": []any{"Planning"},
+		},
+	})
+
+	summary := workspaceSummary{PRURL: "https://example.com/pr/1"}
+	if !shouldAttachPRLink(cfg, "Planning", summary, nil) {
+		t.Fatal("configured pause state should attach PR link")
+	}
+	if shouldAttachPRLink(cfg, "In Progress", summary, nil) {
+		t.Fatal("non-pause state should not attach PR link")
 	}
 }
 

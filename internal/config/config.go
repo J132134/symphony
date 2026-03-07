@@ -14,6 +14,7 @@ type SymphonyConfig struct {
 	raw        map[string]any
 	activeNorm map[string]bool
 	termNorm   map[string]bool
+	pauseNorm  map[string]bool
 }
 
 func New(raw map[string]any) *SymphonyConfig {
@@ -23,6 +24,7 @@ func New(raw map[string]any) *SymphonyConfig {
 	c := &SymphonyConfig{raw: raw}
 	c.activeNorm = normalizeStateSet(c.ActiveStates())
 	c.termNorm = normalizeStateSet(c.TerminalStates())
+	c.pauseNorm = normalizeStateSet(c.PauseStates())
 	return c
 }
 
@@ -39,6 +41,9 @@ func (c *SymphonyConfig) ActiveNorm() map[string]bool { return c.activeNorm }
 
 // TermNorm returns a pre-computed set of normalized terminal state names.
 func (c *SymphonyConfig) TermNorm() map[string]bool { return c.termNorm }
+
+// PauseNorm returns a pre-computed set of normalized pause state names.
+func (c *SymphonyConfig) PauseNorm() map[string]bool { return c.pauseNorm }
 
 // NormalizeState trims and lowercases a state name (spec §4.2).
 func NormalizeState(s string) string {
@@ -199,6 +204,13 @@ func (c *SymphonyConfig) TerminalStates() []string {
 	v := c.get("tracker.terminal_states")
 	if v == nil {
 		return []string{"Closed", "Cancelled", "Canceled", "Duplicate", "Done"}
+	}
+	return parseStateList(v)
+}
+func (c *SymphonyConfig) PauseStates() []string {
+	v := c.get("tracker.pause_states")
+	if v == nil {
+		return []string{"Human Review"}
 	}
 	return parseStateList(v)
 }
@@ -367,4 +379,3 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	return errs
 }
-
