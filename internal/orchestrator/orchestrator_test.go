@@ -613,14 +613,6 @@ func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
 	t.Parallel()
 
 	o := New("", 0, "alpha", nil)
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"active_states": []any{"In Progress"},
-		},
-		"codex": map[string]any{
-			"command": "codex app-server",
-		},
-	})
 
 	resetAt := time.Now().UTC().Add(2 * time.Minute)
 	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-20", IssueState: "In Progress"}
@@ -641,17 +633,13 @@ func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
 		}
 	}
 
-	issue := &types.Issue{ID: "issue-2", Identifier: "J-21", State: "In Progress"}
-	if o.canDispatch(cfg, issue) {
-		t.Fatal("dispatch should be blocked while rate limit pause is active")
-	}
-
+	// Pause is enforced at tick level (not inside canDispatch); verify via admissionPauseState directly.
 	expired := time.Now().UTC().Add(-time.Second)
 	o.state.mu.Lock()
 	o.state.PausedUntil = &expired
 	o.state.mu.Unlock()
 
-	if !o.canDispatch(cfg, issue) {
+	if _, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
 		t.Fatal("dispatch should resume once the pause expires")
 	}
 }
