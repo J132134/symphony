@@ -97,6 +97,17 @@ func RunSelfUpdateHelper(repoDir, installDir string) int {
 		return 1
 	}
 
+	statusOut, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
+	if err != nil {
+		slog.Warn("updater.git_status_failed", "error", err)
+		return 1
+	}
+	if len(strings.TrimSpace(string(statusOut))) > 0 {
+		slog.Warn("updater.dirty_repo_skipping_update", "repo_dir", repoDir,
+			"hint", "commit or stash local changes to allow auto-update")
+		return updateHelperNoChange
+	}
+
 	fetch := exec.Command("git", "fetch", "--quiet")
 	fetch.Dir = repoDir
 	if out, err := fetch.CombinedOutput(); err != nil {
