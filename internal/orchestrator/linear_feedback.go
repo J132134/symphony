@@ -13,6 +13,7 @@ import (
 
 	"symphony/internal/config"
 	"symphony/internal/tracker"
+	"symphony/internal/workspace"
 )
 
 type workspaceSummary struct {
@@ -158,7 +159,7 @@ func buildFailureComment(cfg *config.SymphonyConfig, attempt *RunAttempt, err er
 	}
 
 	duration := humanDuration(time.Since(attempt.StartedAt))
-	if attempt.Status == StatusStalled {
+	if attempt.GetStatus() == StatusStalled {
 		duration += " (stalled)"
 	}
 
@@ -177,12 +178,12 @@ func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (
 		return workspaceSummary{}, fmt.Errorf("workspace path is empty")
 	}
 
-	branch, err := gitOutput(workspacePath, "branch", "--show-current")
+	branch, err := workspace.GitOutput(workspacePath, "branch", "--show-current")
 	if err != nil {
 		return workspaceSummary{}, err
 	}
 
-	lastCommitRaw, err := gitOutput(workspacePath, "log", "-1", "--pretty=format:%H%n%s")
+	lastCommitRaw, err := workspace.GitOutput(workspacePath, "log", "-1", "--pretty=format:%H%n%s")
 	if err != nil {
 		return workspaceSummary{}, err
 	}
@@ -193,7 +194,7 @@ func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (
 		return workspaceSummary{}, err
 	}
 
-	remoteURL, err := gitOutput(workspacePath, "remote", "get-url", "origin")
+	remoteURL, err := workspace.GitOutput(workspacePath, "remote", "get-url", "origin")
 	if err != nil {
 		remoteURL = ""
 	}
@@ -210,7 +211,7 @@ func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (
 }
 
 func changedFiles(workspacePath string) ([]string, error) {
-	statusOut, err := gitOutput(workspacePath, "status", "--short", "--untracked-files=all")
+	statusOut, err := workspace.GitOutput(workspacePath, "status", "--short", "--untracked-files=all")
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +221,7 @@ func changedFiles(workspacePath string) ([]string, error) {
 		return files, nil
 	}
 
-	showOut, err := gitOutput(workspacePath, "show", "--pretty=format:", "--name-only", "HEAD")
+	showOut, err := workspace.GitOutput(workspacePath, "show", "--pretty=format:", "--name-only", "HEAD")
 	if err != nil {
 		return nil, nil
 	}
@@ -296,17 +297,8 @@ func parseGitHubRemote(raw string) (string, string) {
 	return "", ""
 }
 
-func gitOutput(workspacePath string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", workspacePath}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 func lastStatusLine(attempt *RunAttempt) string {
-	status := string(attempt.Status)
+	status := string(attempt.GetStatus())
 	if attempt.Session.TurnCount > 0 {
 		return fmt.Sprintf("%s (turn %d)", status, attempt.Session.TurnCount)
 	}

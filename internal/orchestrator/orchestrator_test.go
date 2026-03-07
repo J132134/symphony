@@ -764,11 +764,8 @@ func TestBuildAgentConfigUsesDefaultCommand(t *testing.T) {
 		},
 	})
 
-	if got := buildAgentConfig(cfg, "Human Review").Command; got != "codex app-server --model gpt-5" {
-		t.Fatalf("buildAgentConfig(Human Review).Command = %q", got)
-	}
-	if got := buildAgentConfig(cfg, "In Progress").Command; got != "codex app-server --model gpt-5" {
-		t.Fatalf("buildAgentConfig(In Progress).Command = %q", got)
+	if got := buildAgentConfig(cfg).Command; got != "codex app-server --model gpt-5" {
+		t.Fatalf("buildAgentConfig().Command = %q", got)
 	}
 }
 
@@ -885,7 +882,6 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 		Attempt:       1,
 		WorkspacePath: wsPath,
 		StartedAt:     time.Now().Add(-(3*time.Minute + 4*time.Second)),
-		Status:        StatusSucceeded,
 		Session: LiveSession{
 			TurnCount:    2,
 			InputTokens:  28000,
@@ -893,6 +889,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 			TotalTokens:  42100,
 		},
 	}
+	attempt.SetStatus(StatusSucceeded)
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
@@ -955,9 +952,9 @@ func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
 		Identifier: "J-21",
 		Attempt:    1,
 		StartedAt:  time.Now().Add(-30 * time.Second),
-		Status:     StatusSucceeded,
 		IssueState: "In Progress",
 	}
+	attempt.SetStatus(StatusSucceeded)
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
@@ -999,11 +996,11 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 		Identifier: "J-29",
 		Attempt:    2,
 		StartedAt:  time.Now().Add(-5 * time.Minute),
-		Status:     StatusStalled,
 		Session: LiveSession{
 			TurnCount: 1,
 		},
 	}
+	attempt.SetStatus(StatusStalled)
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
@@ -1107,8 +1104,8 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 		Identifier: "J-29",
 		Attempt:    1,
 		StartedAt:  time.Now().Add(-30 * time.Second),
-		Status:     StatusFailed,
 	}
+	attempt.SetStatus(StatusFailed)
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt
@@ -1169,9 +1166,9 @@ func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
 		Identifier: "J-39",
 		Attempt:    1,
 		StartedAt:  time.Now().Add(-30 * time.Second),
-		Status:     StatusCanceled,
 		Preempted:  true,
 	}
+	attempt.SetStatus(StatusCanceled)
 
 	o.state.mu.Lock()
 	o.state.Running[attempt.IssueID] = attempt

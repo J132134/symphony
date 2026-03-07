@@ -4,6 +4,13 @@ package types
 
 import "time"
 
+// TokenUsage tracks input/output/total tokens for a turn delta.
+type TokenUsage struct {
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+}
+
 type BlockerRef struct {
 	ID         string
 	Identifier string

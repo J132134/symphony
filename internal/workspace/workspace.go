@@ -127,32 +127,17 @@ func (m *Manager) Cleanup(ctx context.Context, ws *Workspace) error {
 	return nil
 }
 
-// CleanupByKey is a convenience to cleanup by identifier when no Workspace object is available.
-func (m *Manager) CleanupByKey(ctx context.Context, identifier string) error {
-	key := SanitizeIdentifier(identifier)
-	wsPath := filepath.Join(m.root, key)
-	ws := &Workspace{Path: wsPath, Key: key}
-	return m.Cleanup(ctx, ws)
-}
-
-// Exists reports whether a workspace exists for the given identifier.
-func (m *Manager) Exists(identifier string) bool {
-	key := SanitizeIdentifier(identifier)
-	_, err := os.Stat(filepath.Join(m.root, key))
-	return err == nil
-}
-
 // GetTurnContext returns a concise summary of workspace progress for follow-up prompts.
 func (m *Manager) GetTurnContext(ws *Workspace) (string, error) {
 	if ws == nil || strings.TrimSpace(ws.Path) == "" {
 		return "", fmt.Errorf("workspace is required")
 	}
 
-	diffStat, err := gitOutput(ws.Path, "diff", "HEAD", "--stat")
+	diffStat, err := GitOutput(ws.Path, "diff", "HEAD", "--stat")
 	if err != nil {
 		return "", err
 	}
-	gitLog, err := gitOutput(ws.Path, "log", "--oneline", "-5")
+	gitLog, err := GitOutput(ws.Path, "log", "--oneline", "-5")
 	if err != nil {
 		return "", err
 	}
@@ -284,7 +269,8 @@ func readAfterRunOutput(wsPath string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func gitOutput(wsPath string, args ...string) (string, error) {
+// GitOutput runs a git command in wsPath and returns trimmed stdout.
+func GitOutput(wsPath string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", wsPath}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

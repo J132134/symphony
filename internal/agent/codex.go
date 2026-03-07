@@ -1,5 +1,4 @@
 // Package agent implements the Codex/Claude Code subprocess runner over JSON-RPC stdio.
-// Self-contained: no imports from other internal packages (avoids import cycles).
 package agent
 
 import (
@@ -17,24 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-)
 
-// Method constants for the Codex app-server JSON-RPC protocol.
-// (Duplicated from protocol.go for package clarity.)
-const (
-	methodInitialize    = "initialize"
-	methodInitialized   = "initialized"
-	methodThreadStart   = "thread/start"
-	methodTurnStart     = "turn/start"
-	methodTurnInterrupt = "turn/interrupt"
-	methodTurnCompleted = "turn/completed"
-	methodTurnFailed    = "turn/failed"
-	methodTurnCancelled = "turn/cancelled"
-	methodTokenUsage    = "thread/tokenUsage/updated"
-	methodRateLimits    = "account/rateLimits/updated"
-	methodCmdApproval   = "item/commandExecution/requestApproval"
-	methodFileApproval  = "item/fileChange/requestApproval"
-	methodUserInput     = "item/tool/requestUserInput"
+	"symphony/internal/types"
 )
 
 // Config is passed to the runner per session.
@@ -50,12 +33,8 @@ type Config struct {
 	ThreadSandbox        string
 }
 
-// TokenUsage tracks input/output/total tokens for a turn delta.
-type TokenUsage struct {
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-}
+// TokenUsage is an alias for types.TokenUsage.
+type TokenUsage = types.TokenUsage
 
 type RateLimitEvent struct {
 	ResetAt *time.Time
@@ -791,13 +770,6 @@ func emit(cb EventCallback, e Event) {
 	if cb != nil {
 		cb(e)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 type lockedWriter struct {

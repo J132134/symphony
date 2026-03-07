@@ -35,11 +35,8 @@ const (
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
 
-type TokenUsage struct {
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-}
+// TokenUsage is an alias for types.TokenUsage.
+type TokenUsage = types.TokenUsage
 
 type LiveSession struct {
 	SessionID    string
@@ -71,7 +68,6 @@ type RunAttempt struct {
 	FailureCount   int
 	WorkspacePath  string
 	StartedAt      time.Time
-	Status         RunStatus
 	Error          string
 	Session        LiveSession
 	IssueState     string // last known tracker state for per-state concurrency
@@ -80,11 +76,44 @@ type RunAttempt struct {
 	Preempted      bool
 
 	mu            sync.Mutex
+	status        RunStatus
 	CancelReason  WorkerCancelReason
 	CleanupOnExit bool
 	DrainDeadline *time.Time
 
 	cancel context.CancelFunc
+}
+
+func (a *RunAttempt) SetStatus(s RunStatus) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status = s
+}
+
+func (a *RunAttempt) GetStatus() RunStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.status
+}
+
+func (a *RunAttempt) UpdateLastEvent(t time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.LastEventAt = &t
+}
+
+func (a *RunAttempt) GetLastEventAt() *time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Session.LastEventAt
+}
+
+func (a *RunAttempt) AddTokens(in, out, total int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.InputTokens += in
+	a.Session.OutputTokens += out
+	a.Session.TotalTokens += total
 }
 
 func (a *RunAttempt) SetCancelReason(reason WorkerCancelReason) {
@@ -160,9 +189,7 @@ func isWorkerCancelled(err error) bool {
 	if err == nil {
 		return false
 	}
-	return isCtxErr(err) ||
-		errors.Is(err, errWorkerCancelled) ||
-		strings.Contains(err.Error(), "cancelled")
+	return isCtxErr(err) || errors.Is(err, errWorkerCancelled)
 }
 
 func workerCancelledError(reason WorkerCancelReason, detail string) error {

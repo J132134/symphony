@@ -87,7 +87,7 @@ func TestNormalizeIssueCapturesBlockedByRelations(t *testing.T) {
 	}
 }
 
-func TestCreateIssueComment(t *testing.T) {
+func TestAddComment(t *testing.T) {
 	t.Parallel()
 
 	var authHeader string
@@ -110,8 +110,8 @@ func TestCreateIssueComment(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	if err := client.CreateIssueComment(context.Background(), "issue-1", "hello"); err != nil {
-		t.Fatalf("CreateIssueComment() error = %v", err)
+	if err := client.AddComment(context.Background(), "issue-1", "hello"); err != nil {
+		t.Fatalf("AddComment() error = %v", err)
 	}
 	if authHeader != "token" {
 		t.Fatalf("Authorization header = %q, want %q", authHeader, "token")
@@ -127,7 +127,7 @@ func TestCreateIssueComment(t *testing.T) {
 	}
 }
 
-func TestCreateIssueCommentRejectsEmptyBody(t *testing.T) {
+func TestAddCommentRejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
@@ -135,16 +135,16 @@ func TestCreateIssueCommentRejectsEmptyBody(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	err = client.CreateIssueComment(context.Background(), "issue-1", " \n\t ")
+	err = client.AddComment(context.Background(), "issue-1", " \n\t ")
 	if err == nil {
-		t.Fatal("CreateIssueComment() returned nil error for blank body")
+		t.Fatal("AddComment() returned nil error for blank body")
 	}
 	if !strings.Contains(err.Error(), "comment body is required") {
-		t.Fatalf("CreateIssueComment() error = %v, want comment body is required", err)
+		t.Fatalf("AddComment() error = %v, want comment body is required", err)
 	}
 }
 
-func TestCreateIssueCommentRejectsEmptyIssueID(t *testing.T) {
+func TestAddCommentRejectsEmptyIssueID(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
@@ -152,16 +152,16 @@ func TestCreateIssueCommentRejectsEmptyIssueID(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	err = client.CreateIssueComment(context.Background(), "", "hello")
+	err = client.AddComment(context.Background(), "", "hello")
 	if err == nil {
-		t.Fatal("CreateIssueComment() returned nil error for empty issue ID")
+		t.Fatal("AddComment() returned nil error for empty issue ID")
 	}
 	if !strings.Contains(err.Error(), "issue ID is required") {
-		t.Fatalf("CreateIssueComment() error = %v, want issue ID is required", err)
+		t.Fatalf("AddComment() error = %v, want issue ID is required", err)
 	}
 }
 
-func TestCreateIssueCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
+func TestAddCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,16 +175,16 @@ func TestCreateIssueCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	err = client.CreateIssueComment(context.Background(), "issue-1", "hello")
+	err = client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
-		t.Fatal("CreateIssueComment() returned nil error for unsuccessful mutation")
+		t.Fatal("AddComment() returned nil error for unsuccessful mutation")
 	}
 	if !strings.Contains(err.Error(), "commentCreate unsuccessful") {
-		t.Fatalf("CreateIssueComment() error = %v, want commentCreate unsuccessful", err)
+		t.Fatalf("AddComment() error = %v, want commentCreate unsuccessful", err)
 	}
 }
 
-func TestCreateIssueCommentReturnsGraphQLError(t *testing.T) {
+func TestAddCommentReturnsGraphQLError(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,16 +198,16 @@ func TestCreateIssueCommentReturnsGraphQLError(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	err = client.CreateIssueComment(context.Background(), "issue-1", "hello")
+	err = client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
-		t.Fatal("CreateIssueComment() returned nil error for GraphQL error response")
+		t.Fatal("AddComment() returned nil error for GraphQL error response")
 	}
 	if !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("CreateIssueComment() error = %v, want GraphQL error message", err)
+		t.Fatalf("AddComment() error = %v, want GraphQL error message", err)
 	}
 }
 
-func TestCreateIssueCommentReturnsHTTPStatusError(t *testing.T) {
+func TestAddCommentReturnsHTTPStatusError(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,12 +220,12 @@ func TestCreateIssueCommentReturnsHTTPStatusError(t *testing.T) {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
 
-	err = client.CreateIssueComment(context.Background(), "issue-1", "hello")
+	err = client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
-		t.Fatal("CreateIssueComment() returned nil error for HTTP error response")
+		t.Fatal("AddComment() returned nil error for HTTP error response")
 	}
 	if !strings.Contains(err.Error(), "Linear API status 403") {
-		t.Fatalf("CreateIssueComment() error = %v, want HTTP status message", err)
+		t.Fatalf("AddComment() error = %v, want HTTP status message", err)
 	}
 }
 

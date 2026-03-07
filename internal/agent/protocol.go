@@ -7,21 +7,21 @@ import (
 
 // JSON-RPC 2.0 method constants (Codex app-server protocol).
 const (
-	MethodInitialize   = "initialize"
-	MethodInitialized  = "initialized"
-	MethodThreadStart  = "thread/start"
-	MethodTurnStart    = "turn/start"
-	MethodTurnInterrupt = "turn/interrupt"
+	methodInitialize    = "initialize"
+	methodInitialized   = "initialized"
+	methodThreadStart   = "thread/start"
+	methodTurnStart     = "turn/start"
+	methodTurnInterrupt = "turn/interrupt"
 
-	MethodTurnCompleted      = "turn/completed"
-	MethodTurnFailed         = "turn/failed"
-	MethodTurnCancelled      = "turn/cancelled"
-	MethodTokenUsageUpdated  = "thread/tokenUsage/updated"
-	MethodRateLimitsUpdated  = "account/rateLimits/updated"
+	methodTurnCompleted = "turn/completed"
+	methodTurnFailed    = "turn/failed"
+	methodTurnCancelled = "turn/cancelled"
+	methodTokenUsage    = "thread/tokenUsage/updated"
+	methodRateLimits    = "account/rateLimits/updated"
 
-	MethodCommandApproval   = "item/commandExecution/requestApproval"
-	MethodFileChangeApproval = "item/fileChange/requestApproval"
-	MethodUserInputRequest  = "item/tool/requestUserInput"
+	methodCmdApproval  = "item/commandExecution/requestApproval"
+	methodFileApproval = "item/fileChange/requestApproval"
+	methodUserInput    = "item/tool/requestUserInput"
 )
 
 // rpcEnvelope is used for initial type detection.

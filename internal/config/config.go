@@ -11,15 +11,34 @@ import (
 // SymphonyConfig provides typed access to WORKFLOW.md front matter.
 // All string values starting with "$" are resolved from environment variables.
 type SymphonyConfig struct {
-	raw map[string]any
+	raw        map[string]any
+	activeNorm map[string]bool
+	termNorm   map[string]bool
 }
 
 func New(raw map[string]any) *SymphonyConfig {
 	if raw == nil {
 		raw = map[string]any{}
 	}
-	return &SymphonyConfig{raw: raw}
+	c := &SymphonyConfig{raw: raw}
+	c.activeNorm = normalizeStateSet(c.ActiveStates())
+	c.termNorm = normalizeStateSet(c.TerminalStates())
+	return c
 }
+
+func normalizeStateSet(states []string) map[string]bool {
+	m := make(map[string]bool, len(states))
+	for _, s := range states {
+		m[NormalizeState(s)] = true
+	}
+	return m
+}
+
+// ActiveNorm returns a pre-computed set of normalized active state names.
+func (c *SymphonyConfig) ActiveNorm() map[string]bool { return c.activeNorm }
+
+// TermNorm returns a pre-computed set of normalized terminal state names.
+func (c *SymphonyConfig) TermNorm() map[string]bool { return c.termNorm }
 
 // NormalizeState trims and lowercases a state name (spec §4.2).
 func NormalizeState(s string) string {
@@ -349,15 +368,3 @@ func (c *SymphonyConfig) Validate() []string {
 	return errs
 }
 
-func isClaudeCommand(command string) bool {
-	parts := strings.Fields(strings.TrimSpace(command))
-	if len(parts) == 0 {
-		return false
-	}
-	switch filepath.Base(parts[0]) {
-	case "claude", "claude-code":
-		return true
-	default:
-		return false
-	}
-}

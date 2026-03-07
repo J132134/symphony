@@ -18,16 +18,6 @@ type Callbacks struct {
 	OnWatchError  func(error)
 }
 
-func Watch(ctx context.Context, path string, debounce time.Duration, onChange func(), onWatchError func(error)) error {
-	return Run(ctx, nil, path, debounce, Callbacks{
-		Reload: func() error {
-			onChange()
-			return nil
-		},
-		OnWatchError: onWatchError,
-	})
-}
-
 func Run(ctx context.Context, stop <-chan struct{}, path string, debounce time.Duration, callbacks Callbacks) error {
 	if callbacks.Reload == nil {
 		return errors.New("reload callback is required")

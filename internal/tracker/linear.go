@@ -214,11 +214,6 @@ func (c *LinearClient) AddLink(ctx context.Context, issueID, title, targetURL st
 	return nil
 }
 
-// CreateIssueComment keeps backward compatibility with older callers/tests.
-func (c *LinearClient) CreateIssueComment(ctx context.Context, issueID, body string) error {
-	return c.AddComment(ctx, issueID, body)
-}
-
 func (c *LinearClient) UpdateIssueState(ctx context.Context, issueID, stateName string) error {
 	if strings.TrimSpace(issueID) == "" {
 		return fmt.Errorf("issue id is required")
