@@ -4,6 +4,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,16 @@ import (
 	"symphony/internal/types"
 )
 
+// DynamicToolSpec describes a dynamic tool exposed to the agent.
+type DynamicToolSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"inputSchema"`
+}
+
+// DynamicToolHandler handles dynamic tool invocations from the agent.
+type DynamicToolHandler func(ctx context.Context, toolName string, input map[string]any) (map[string]any, error)
+
 // Config is passed to the runner per session.
 type Config struct {
 	Command              string
@@ -31,6 +42,7 @@ type Config struct {
 	StallTimeoutMs       int
 	TurnSandboxPolicy    string
 	ThreadSandbox        string
+	DynamicTools         []DynamicToolSpec
 }
 
 // TokenUsage is an alias for types.TokenUsage.
@@ -76,9 +88,10 @@ type Runner struct {
 	threadID  string
 	pid       string
 
-	mu      sync.Mutex
-	pending map[int]chan rpcResult
-	reqID   atomic.Int32
+	mu          sync.Mutex
+	pending     map[int]chan rpcResult
+	reqID       atomic.Int32
+	toolHandler DynamicToolHandler
 
 	notifCh         chan *Incoming
 	priorityNotifCh chan *Incoming
@@ -87,6 +100,13 @@ type Runner struct {
 	lastInput  int64
 	lastOutput int64
 	lastTotal  int64
+}
+
+// SetToolHandler registers a handler for dynamic tool invocations.
+func (r *Runner) SetToolHandler(h DynamicToolHandler) {
+	r.mu.Lock()
+	r.toolHandler = h
+	r.mu.Unlock()
 }
 
 func NewRunner() *Runner {
@@ -167,6 +187,9 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	}
 	if sb := resolveThreadSandbox(cfg); sb != "" {
 		threadParams["sandbox"] = sb
+	}
+	if len(cfg.DynamicTools) > 0 {
+		threadParams["dynamicTools"] = cfg.DynamicTools
 	}
 
 	threadStartTimeout := time.Duration(cfg.ThreadStartTimeoutMs) * time.Millisecond
@@ -331,6 +354,14 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
 			SessionID: r.sessionID, Message: req.Method})
 	case methodUserInput:
+		r.mu.Lock()
+		handler := r.toolHandler
+		r.mu.Unlock()
+		toolName, _ := req.Params["toolName"].(string)
+		if handler != nil && toolName != "" {
+			go r.handleDynamicTool(req.ID, toolName, req.Params)
+			return
+		}
 		slog.Warn("agent.user_input_unsupported")
 		data, _ := FormatErrorResponse(req.ID, -32601, "User input not supported")
 		_ = r.stdin.Write(data)
@@ -339,6 +370,43 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		data, _ := FormatErrorResponse(req.ID, -32601, "Unsupported: "+req.Method)
 		_ = r.stdin.Write(data)
 	}
+}
+
+func (r *Runner) handleDynamicTool(reqID any, toolName string, params map[string]any) {
+	r.mu.Lock()
+	handler := r.toolHandler
+	r.mu.Unlock()
+	if handler == nil {
+		data, _ := FormatErrorResponse(reqID, -32601, "No tool handler registered")
+		_ = r.stdin.Write(data)
+		return
+	}
+
+	input, _ := params["input"].(map[string]any)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := handler(ctx, toolName, input)
+	if err != nil {
+		slog.Warn("agent.dynamic_tool_error", "tool", toolName, "error", err)
+		data, _ := FormatErrorResponse(reqID, -32603, err.Error())
+		_ = r.stdin.Write(data)
+		return
+	}
+
+	var text string
+	if result != nil {
+		b, _ := json.Marshal(result)
+		text = string(b)
+	}
+	data, _ := FormatResponse(reqID, map[string]any{
+		"contentItems": []any{
+			map[string]any{"type": "text", "text": text},
+		},
+	})
+	_ = r.stdin.Write(data)
+	slog.Debug("agent.dynamic_tool_done", "tool", toolName)
 }
 
 // StopSession gracefully terminates: SIGTERM → 10s → SIGKILL.

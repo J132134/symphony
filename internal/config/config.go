@@ -193,6 +193,9 @@ func (c *SymphonyConfig) TrackerOnFailureState() string {
 func (c *SymphonyConfig) TrackerPRURLTemplate() string {
 	return strings.TrimSpace(c.getString("tracker.pr_url_template", ""))
 }
+func (c *SymphonyConfig) TrackerAssignee() string {
+	return c.getString("tracker.assignee", "")
+}
 func (c *SymphonyConfig) ActiveStates() []string {
 	v := c.get("tracker.active_states")
 	if v == nil {

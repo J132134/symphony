@@ -271,9 +271,17 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	o.mu.Lock()
 	wsMgr := o.wsMgr
 	wf := o.wf
+	tr := o.tracker
 	o.mu.Unlock()
 
 	runner := agent.NewRunner()
+	if tr != nil {
+		runner.SetToolHandler(func(hctx context.Context, toolName string, input map[string]any) (map[string]any, error) {
+			query, _ := input["query"].(string)
+			vars, _ := input["variables"].(map[string]any)
+			return tr.ExecuteGraphQL(hctx, query, vars)
+		})
+	}
 	runnerStarted := false
 	defer func() {
 		if runnerStarted {
@@ -449,6 +457,30 @@ func buildAgentConfig(cfg *config.SymphonyConfig) *agent.Config {
 		StallTimeoutMs:       cfg.StallTimeoutMs(),
 		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
 		ThreadSandbox:        cfg.ThreadSandbox(),
+		DynamicTools:         linearDynamicTools(),
+	}
+}
+
+func linearDynamicTools() []agent.DynamicToolSpec {
+	return []agent.DynamicToolSpec{
+		{
+			Name:        "linear_graphql",
+			Description: "Execute a Linear GraphQL query or mutation. Use this to read or update Linear issues, comments, states, and other data.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "GraphQL query or mutation string",
+					},
+					"variables": map[string]any{
+						"type":        "object",
+						"description": "GraphQL variables",
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
 	}
 }
 

@@ -105,22 +105,54 @@ query($projectSlug: String!) {
   }
 }`
 
+const viewerQuery = `query { viewer { id } }`
+
+const issuesQueryWithAssignee = `
+query($projectSlug: String!, $states: [String!], $after: String, $assigneeId: String!) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $states } }
+      assignee: { id: { eq: $assigneeId } }
+    }
+    first: 50
+    after: $after
+    orderBy: createdAt
+  ) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier title description priority
+      state { name }
+      branchName url
+      comments(last: 1, orderBy: updatedAt) {
+        nodes { body createdAt updatedAt }
+      }
+      labels { nodes { name } }
+      relations {
+        nodes { type relatedIssue { id identifier state { name } } }
+      }
+      createdAt updatedAt
+    }
+  }
+}`
+
 // LinearClient fetches issues from the Linear GraphQL API.
 type LinearClient struct {
 	endpoint     string
 	projectSlug  string
 	activeStates []string
+	assigneeID   string
 	client       *http.Client
 }
 
-func NewLinearClient(apiKey, endpoint, projectSlug string, activeStates []string) (*LinearClient, error) {
+func NewLinearClient(apiKey, endpoint, projectSlug string, activeStates []string, assignee string) (*LinearClient, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("Linear API key is required")
 	}
 	if projectSlug == "" {
 		return nil, fmt.Errorf("Linear project slug is required")
 	}
-	return &LinearClient{
+	c := &LinearClient{
 		endpoint:     endpoint,
 		projectSlug:  projectSlug,
 		activeStates: activeStates,
@@ -128,7 +160,35 @@ func NewLinearClient(apiKey, endpoint, projectSlug string, activeStates []string
 			Transport: &authTransport{key: apiKey, base: http.DefaultTransport},
 			Timeout:   30 * time.Second,
 		},
-	}, nil
+	}
+	if assignee == "me" {
+		id, err := c.fetchViewerID(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("fetch viewer id: %w", err)
+		}
+		c.assigneeID = id
+	} else {
+		c.assigneeID = assignee
+	}
+	return c, nil
+}
+
+func (c *LinearClient) fetchViewerID(ctx context.Context) (string, error) {
+	data, err := c.execute(ctx, viewerQuery, nil)
+	if err != nil {
+		return "", err
+	}
+	viewer, _ := data["viewer"].(map[string]any)
+	id := strVal(viewer["id"])
+	if id == "" {
+		return "", fmt.Errorf("viewer query returned empty id")
+	}
+	return id, nil
+}
+
+// ExecuteGraphQL executes an arbitrary GraphQL query or mutation against the Linear API.
+func (c *LinearClient) ExecuteGraphQL(ctx context.Context, query string, variables map[string]any) (map[string]any, error) {
+	return c.execute(ctx, query, variables)
 }
 
 type authTransport struct {
@@ -309,13 +369,21 @@ func (c *LinearClient) fetchPaginated(ctx context.Context, states []string) ([]*
 	var all []*types.Issue
 	var cursor string
 
+	query := issuesQuery
+	if c.assigneeID != "" {
+		query = issuesQueryWithAssignee
+	}
+
 	for {
 		vars := map[string]any{"projectSlug": c.projectSlug, "states": states}
 		if cursor != "" {
 			vars["after"] = cursor
 		}
+		if c.assigneeID != "" {
+			vars["assigneeId"] = c.assigneeID
+		}
 
-		data, err := c.execute(ctx, issuesQuery, vars)
+		data, err := c.execute(ctx, query, vars)
 		if err != nil {
 			return nil, err
 		}

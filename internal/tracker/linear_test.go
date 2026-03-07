@@ -105,7 +105,7 @@ func TestAddComment(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAddComment(t *testing.T) {
 func TestAddCommentRejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -147,7 +147,7 @@ func TestAddCommentRejectsEmptyBody(t *testing.T) {
 func TestAddCommentRejectsEmptyIssueID(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -170,7 +170,7 @@ func TestAddCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -193,7 +193,7 @@ func TestAddCommentReturnsGraphQLError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -215,7 +215,7 @@ func TestAddCommentReturnsHTTPStatusError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -247,7 +247,7 @@ func TestAddLink(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -273,7 +273,7 @@ func TestAddLink(t *testing.T) {
 func TestAddLinkRejectsMissingFields(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", "https://example.com", "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}
@@ -314,7 +314,7 @@ func TestAddLinkReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"})
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient() error = %v", err)
 	}

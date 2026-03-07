@@ -260,6 +260,40 @@ func TestSymphonyConfigValidateRejectsUncreatableWorkspaceRoot(t *testing.T) {
 	requireErrorContaining(t, errs, "workspace.root")
 }
 
+func TestTrackerAssigneeDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(nil)
+	if got := cfg.TrackerAssignee(); got != "" {
+		t.Fatalf("TrackerAssignee() = %q, want empty", got)
+	}
+}
+
+func TestTrackerAssigneeOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"tracker": map[string]any{
+			"assignee": "user-123",
+		},
+	})
+	if got := cfg.TrackerAssignee(); got != "user-123" {
+		t.Fatalf("TrackerAssignee() = %q, want user-123", got)
+	}
+}
+
+func TestTrackerAssigneeEnvVar(t *testing.T) {
+	t.Setenv("LINEAR_ASSIGNEE", "user-env-456")
+	cfg := New(map[string]any{
+		"tracker": map[string]any{
+			"assignee": "$LINEAR_ASSIGNEE",
+		},
+	})
+	if got := cfg.TrackerAssignee(); got != "user-env-456" {
+		t.Fatalf("TrackerAssignee() = %q, want user-env-456", got)
+	}
+}
+
 func requireErrorContaining(t *testing.T, errs []string, want string) {
 	t.Helper()
 

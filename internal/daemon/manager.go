@@ -376,6 +376,7 @@ func probeProjectHealth(ctx context.Context, proj config.ProjectConfig) error {
 		cfg.TrackerEndpoint(),
 		cfg.TrackerProjectSlug(),
 		cfg.ActiveStates(),
+		cfg.TrackerAssignee(),
 	)
 	if err != nil {
 		return fmt.Errorf("tracker: %w", err)

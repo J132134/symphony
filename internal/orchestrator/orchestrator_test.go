@@ -559,7 +559,7 @@ func TestReconcileCancelsManualHumanReviewIssue(t *testing.T) {
 	})
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
 	})
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	recorder, server := newLinearRecorderServer(t)
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1022,7 +1022,7 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	recorder, server := newLinearRecorderServer(t)
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1133,7 +1133,7 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	recorder, server := newLinearRecorderServer(t)
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1195,7 +1195,7 @@ func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
 	recorder, server := newLinearRecorderServer(t)
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1295,7 +1295,7 @@ func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1357,7 +1357,7 @@ func TestOnRetryTimerDefersNonUrgentWhileGlobalUrgentRuns(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1449,7 +1449,7 @@ func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 	})
 	defer server.Close()
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		t.Fatalf("NewLinearClient: %v", err)
 	}
@@ -1681,7 +1681,7 @@ func newLinearFailingClient(t *testing.T, status int, body string) (*tracker.Lin
 		http.Error(w, body, status)
 	}))
 
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"})
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
 	if err != nil {
 		server.Close()
 		t.Fatalf("NewLinearClient: %v", err)

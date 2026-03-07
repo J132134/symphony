@@ -156,6 +156,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	tr, err := tracker.NewLinearClient(
 		cfg.TrackerAPIKey(), cfg.TrackerEndpoint(),
 		cfg.TrackerProjectSlug(), cfg.ActiveStates(),
+		cfg.TrackerAssignee(),
 	)
 	if err != nil {
 		return fmt.Errorf("tracker: %w", err)
