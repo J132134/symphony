@@ -81,21 +81,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
-	states := s.source.GetAllStates()
-	result := make([]map[string]any, 0, len(states))
-	for name, st := range states {
-		st.Lock()
-		result = append(result, map[string]any{
-			"name":            name,
-			"running":         len(st.Running),
-			"retrying":        len(st.RetryQueue),
-			"completed_count": st.CompletedCount,
-			"total_tokens":    st.Totals.TotalTokens,
-		})
-		st.Unlock()
-	}
-	writeJSON(w, 200, result)
+	writeJSON(w, 200, BuildSummary(s.source.GetAllStates()).Projects)
 }
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if refresher, ok := s.source.(RefreshSource); ok {

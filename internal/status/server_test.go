@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"symphony/internal/orchestrator"
 )
@@ -117,5 +118,47 @@ func TestHandleProjectsPrefersProjectSource(t *testing.T) {
 	}
 	if payload[0].CrashCount != 3 {
 		t.Fatalf("crash_count = %d, want 3", payload[0].CrashCount)
+	}
+}
+
+func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
+	t.Parallel()
+
+	state := orchestrator.NewState()
+	now := time.Date(2026, 3, 9, 1, 0, 0, 0, time.UTC)
+	state.RecordTrackerSuccess(now)
+	attempt := &orchestrator.RunAttempt{
+		Identifier: "J-54",
+		StartedAt:  now,
+	}
+	attempt.SetStatus(orchestrator.StatusStreamingTurn)
+	attempt.SetTurnCount(2)
+	attempt.UpdateLastEvent(now.Add(time.Minute))
+	state.Running["run-1"] = attempt
+
+	server := New(&fakeSummarySource{
+		states: map[string]*orchestrator.State{"alpha": state},
+	}, 7777)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rec.Code)
+	}
+
+	var payload []ProjectSummary
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode projects: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("projects len = %d, want 1", len(payload))
+	}
+	if payload[0].SubprocessCount != 1 {
+		t.Fatalf("subprocess_count = %d, want 1", payload[0].SubprocessCount)
+	}
+	if len(payload[0].RunningIssues) != 1 || payload[0].RunningIssues[0].Identifier != "J-54" {
+		t.Fatalf("running_issues = %#v, want J-54 detail", payload[0].RunningIssues)
 	}
 }

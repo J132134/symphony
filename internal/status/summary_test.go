@@ -13,7 +13,15 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 
 	running := orchestrator.NewState()
 	running.RecordTrackerSuccess(now)
-	running.Running["1"] = &orchestrator.RunAttempt{Identifier: "J-17"}
+	lastEvent := now.Add(2 * time.Minute)
+	attempt := &orchestrator.RunAttempt{
+		Identifier: "J-17",
+		StartedAt:  now,
+	}
+	attempt.SetStatus(orchestrator.StatusStreamingTurn)
+	attempt.SetTurnCount(3)
+	attempt.UpdateLastEvent(lastEvent)
+	running.Running["1"] = attempt
 
 	networkLost := orchestrator.NewState()
 	networkLost.RecordTrackerFailure(now.Add(time.Minute), errors.New("dial tcp timeout"))
@@ -31,6 +39,19 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	}
 	if len(summary.RunningIssueIDs) != 1 || summary.RunningIssueIDs[0] != "J-17" {
 		t.Fatalf("running_issue_ids = %#v, want [J-17]", summary.RunningIssueIDs)
+	}
+	if got := summary.Projects[0].RunningIssues; len(got) != 1 {
+		t.Fatalf("running_issues len = %d, want 1", len(got))
+	} else {
+		if got[0].Status != string(orchestrator.StatusStreamingTurn) {
+			t.Fatalf("status = %q, want %q", got[0].Status, orchestrator.StatusStreamingTurn)
+		}
+		if got[0].TurnCount != 3 {
+			t.Fatalf("turn_count = %d, want 3", got[0].TurnCount)
+		}
+		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
+			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
+		}
 	}
 }
 
