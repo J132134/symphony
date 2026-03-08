@@ -161,6 +161,8 @@ symphony menubar
 
 `symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
 
+자동업데이트는 GitHub Releases의 `latest` 메타데이터를 읽되, stable semver release끼리만 비교하고 같은 release에 업로드된 대상 바이너리의 `.sha256` sidecar와 실제 다운로드한 바이너리의 SHA-256을 대조한다. checksum asset이 없거나 mismatch면 설치를 중단하고, 바이너리 교체 중 promote가 실패하면 직전 바이너리로 즉시 rollback한다. 별도 서명 키나 Developer ID 검증은 아직 포함하지 않으므로, 이 경로는 손상된 다운로드와 부분 교체 실패를 줄이는 최소 보강에 초점을 둔다.
+
 `config.yaml` 안의 상대 경로(`projects[].workflow`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다.
 
 `agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 제한`과 `데몬 전체 제한`을 모두 만족해야 한다.

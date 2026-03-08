@@ -18,7 +18,8 @@ jobs:
             -ldflags "-X symphony/internal/version.version=${GITHUB_REF_NAME}" \
             -o symphony-darwin-arm64 ./cmd/symphony
           codesign -s - symphony-darwin-arm64
+          shasum -a 256 symphony-darwin-arm64 > symphony-darwin-arm64.sha256
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create ${GITHUB_REF_NAME} --title "${GITHUB_REF_NAME}" --generate-notes symphony-darwin-arm64
+        run: gh release create ${GITHUB_REF_NAME} --title "${GITHUB_REF_NAME}" --generate-notes symphony-darwin-arm64 symphony-darwin-arm64.sha256
