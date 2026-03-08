@@ -18,9 +18,17 @@ done
 # Install binary
 mkdir -p "${INSTALL_DIR}"
 echo "Downloading symphony..."
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
 curl -fsSL "https://github.com/${REPO}/releases/latest/download/${BINARY}-darwin-arm64" \
-  -o "${INSTALL_DIR}/${BINARY}"
-chmod 755 "${INSTALL_DIR}/${BINARY}"
+  -o "${TMP_DIR}/${BINARY}-darwin-arm64"
+curl -fsSL "https://github.com/${REPO}/releases/latest/download/${BINARY}-darwin-arm64.sha256" \
+  -o "${TMP_DIR}/${BINARY}-darwin-arm64.sha256"
+(
+  cd "${TMP_DIR}"
+  shasum -a 256 -c "${BINARY}-darwin-arm64.sha256"
+)
+install -m 755 "${TMP_DIR}/${BINARY}-darwin-arm64" "${INSTALL_DIR}/${BINARY}"
 xattr -c "${INSTALL_DIR}/${BINARY}"
 codesign -s - --force "${INSTALL_DIR}/${BINARY}"
 echo "Installed $("${INSTALL_DIR}/${BINARY}" version) → ${INSTALL_DIR}/${BINARY}"

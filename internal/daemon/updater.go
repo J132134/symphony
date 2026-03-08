@@ -16,6 +16,8 @@ import (
 var (
 	prepareUpdateFn = defaultPrepareUpdate
 	updaterExitFn   = os.Exit
+	renameFileFn    = os.Rename
+	removeFileFn    = os.Remove
 )
 
 // CheckForUpdates checks GitHub Releases for a newer binary, installs it, and
@@ -61,11 +63,11 @@ func defaultPrepareUpdate() (bool, error) {
 	}
 	slog.Info("updater.update_available", "current", result.CurrentVer, "latest", result.LatestVer)
 
-	tempPath, err := checker.Download(result.DownloadURL)
+	tempPath, err := checker.Download(result.DownloadURL, result.ChecksumURL)
 	if err != nil {
 		return false, fmt.Errorf("download update: %w", err)
 	}
-	defer os.Remove(tempPath)
+	defer removeFileFn(tempPath)
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -85,17 +87,90 @@ func assetName() string {
 }
 
 func installBuiltBinary(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	dir := filepath.Dir(dst)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create install dir: %w", err)
 	}
 
-	staged := dst + ".new"
-	if err := copyFile(src, staged, 0o755); err != nil {
+	mode, err := installMode(dst)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(staged, dst); err != nil {
-		_ = os.Remove(staged)
+
+	staged, err := os.CreateTemp(dir, filepath.Base(dst)+".new-*")
+	if err != nil {
+		return fmt.Errorf("create staged binary: %w", err)
+	}
+	stagedPath := staged.Name()
+	if err := staged.Close(); err != nil {
+		removeFileFn(stagedPath)
+		return fmt.Errorf("close staged temp file: %w", err)
+	}
+	if err := copyFile(src, stagedPath, mode); err != nil {
+		return err
+	}
+
+	backupPath := dst + ".bak"
+	if err := ensureRollbackTarget(backupPath); err != nil {
+		removeFileFn(stagedPath)
+		return err
+	}
+
+	hadExisting := false
+	if _, err := os.Lstat(dst); err == nil {
+		hadExisting = true
+		if err := renameFileFn(dst, backupPath); err != nil {
+			removeFileFn(stagedPath)
+			return fmt.Errorf("move current binary to backup: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		removeFileFn(stagedPath)
+		return fmt.Errorf("stat current binary: %w", err)
+	}
+
+	if err := renameFileFn(stagedPath, dst); err != nil {
+		removeFileFn(stagedPath)
+		if hadExisting {
+			if restoreErr := renameFileFn(backupPath, dst); restoreErr != nil {
+				return fmt.Errorf("replace binary: %w (rollback failed: %v)", err, restoreErr)
+			}
+		}
 		return fmt.Errorf("replace binary: %w", err)
+	}
+
+	if hadExisting {
+		_ = removeFileFn(backupPath)
+	}
+	return nil
+}
+
+func installMode(dst string) (os.FileMode, error) {
+	info, err := os.Lstat(dst)
+	if os.IsNotExist(err) {
+		return 0o755, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("stat current binary: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("current binary is not a regular file: %s", dst)
+	}
+	return info.Mode().Perm(), nil
+}
+
+func ensureRollbackTarget(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat backup path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("backup path is not a regular file: %s", path)
+	}
+	if err := removeFileFn(path); err != nil {
+		return fmt.Errorf("remove stale backup: %w", err)
 	}
 	return nil
 }
@@ -114,15 +189,20 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
-		_ = os.Remove(dst)
+		_ = removeFileFn(dst)
 		return fmt.Errorf("copy binary: %w", err)
 	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = removeFileFn(dst)
+		return fmt.Errorf("sync staged binary: %w", err)
+	}
 	if err := out.Close(); err != nil {
-		_ = os.Remove(dst)
+		_ = removeFileFn(dst)
 		return fmt.Errorf("close staged binary: %w", err)
 	}
 	if err := os.Chmod(dst, mode); err != nil {
-		_ = os.Remove(dst)
+		_ = removeFileFn(dst)
 		return fmt.Errorf("chmod staged binary: %w", err)
 	}
 	return nil
