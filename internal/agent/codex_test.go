@@ -87,6 +87,61 @@ func TestParseRateLimitEventRetryAfterSeconds(t *testing.T) {
 	}
 }
 
+func TestParseRateLimitEventSkipsLowUsedPercent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	// primary: 1% used (not throttled), secondary: 0% used (not throttled).
+	// Neither window exceeds the threshold, so ResetAt must be nil.
+	event := parseRateLimitEvent(map[string]any{
+		"primary": map[string]any{
+			"used_percent":   1.0,
+			"window_minutes": 300,
+			"resets_at":      float64(now.Add(5 * time.Hour).Unix()),
+		},
+		"secondary": map[string]any{
+			"used_percent":   0.0,
+			"window_minutes": 10080,
+			"resets_at":      float64(now.Add(7 * 24 * time.Hour).Unix()),
+		},
+	}, now)
+
+	if event == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if event.ResetAt != nil {
+		t.Fatalf("ResetAt = %v, want nil (no window is throttled)", event.ResetAt)
+	}
+}
+
+func TestParseRateLimitEventUsesThrottledWindowOnly(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	primaryReset := now.Add(2 * time.Hour)
+	// primary: 100% used (throttled), secondary: 0% used (not throttled).
+	// Only the primary resets_at should be returned, not the later secondary one.
+	event := parseRateLimitEvent(map[string]any{
+		"primary": map[string]any{
+			"used_percent":   100.0,
+			"window_minutes": 300,
+			"resets_at":      float64(primaryReset.Unix()),
+		},
+		"secondary": map[string]any{
+			"used_percent":   0.0,
+			"window_minutes": 10080,
+			"resets_at":      float64(now.Add(7 * 24 * time.Hour).Unix()),
+		},
+	}, now)
+
+	if event == nil || event.ResetAt == nil {
+		t.Fatal("expected ResetAt to be set for throttled primary window")
+	}
+	if !event.ResetAt.Equal(primaryReset.UTC()) {
+		t.Fatalf("ResetAt = %v, want %v (primary reset, not secondary)", event.ResetAt, primaryReset.UTC())
+	}
+}
+
 func fillNotifQueue(r *Runner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}

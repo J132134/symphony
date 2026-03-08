@@ -440,7 +440,7 @@ func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e a
 		o.state.mu.Unlock()
 		attempt.AddTokens(e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.TotalTokens)
 	}
-	if e.Name == "rate_limit" {
+	if e.Name == "rate_limit" && e.RateLimit != nil && e.RateLimit.ResetAt != nil {
 		o.pauseForRateLimit(issueID, attempt, e)
 	}
 	slog.Debug("orchestrator.agent_event", "issue_id", issueID, "event", e.Name)

@@ -689,9 +689,20 @@ func parseRateLimitEvent(params map[string]any, now time.Time) *RateLimitEvent {
 	return &RateLimitEvent{ResetAt: &resetAt}
 }
 
+// rateLimitUsedThreshold is the minimum used_percent (0–100 scale) at which a
+// rate-limit window is considered throttled. Codex sends account/rateLimits/updated
+// as an informational update even when usage is low; only windows at or above this
+// threshold should trigger a dispatch pause.
+const rateLimitUsedThreshold = 90.0
+
 func findRateLimitResetAt(value any, now time.Time) (time.Time, bool) {
 	switch v := value.(type) {
 	case map[string]any:
+		// If this map advertises a used_percent below the throttle threshold, its
+		// resets_at should not contribute to the pause deadline.
+		if pct, ok := extractUsedPercent(v); ok && pct < rateLimitUsedThreshold {
+			return time.Time{}, false
+		}
 		var latest time.Time
 		var found bool
 		for key, raw := range v {
@@ -726,6 +737,20 @@ func findRateLimitResetAt(value any, now time.Time) (time.Time, bool) {
 	default:
 		return time.Time{}, false
 	}
+}
+
+// extractUsedPercent returns the used_percent value (0–100 scale) from a limit
+// map if the key is present in any casing/separator variant.
+func extractUsedPercent(m map[string]any) (float64, bool) {
+	for key, val := range m {
+		normalized := strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(key)))
+		if normalized == "usedpercent" {
+			if n, ok := asFloat64(val); ok {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func normalizeRateLimitResetKey(key string) (string, bool) {

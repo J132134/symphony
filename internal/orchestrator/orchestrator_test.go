@@ -724,9 +724,12 @@ func TestHandleAgentEventRateLimitPausesGlobalLimiter(t *testing.T) {
 	}
 }
 
-func TestHandleAgentEventRateLimitWithoutResetUsesBackoff(t *testing.T) {
+func TestHandleAgentEventRateLimitWithoutResetDoesNotPause(t *testing.T) {
 	t.Parallel()
 
+	// A rate_limit event with ResetAt == nil means no window is actually throttled
+	// (e.g. an informational account/rateLimits/updated notification with low
+	// used_percent). It must not trigger a dispatch pause or backoff.
 	o := New("", 0, "alpha", nil)
 	now := time.Now().UTC()
 
@@ -736,29 +739,9 @@ func TestHandleAgentEventRateLimitWithoutResetUsesBackoff(t *testing.T) {
 		RateLimit: &agent.RateLimitEvent{},
 	})
 
-	until, reason, paused := o.admissionPauseState(now)
-	if !paused {
-		t.Fatal("expected backoff pause to activate")
-	}
-	if reason != "rate_limit_backoff" {
-		t.Fatalf("pause reason = %q, want rate_limit_backoff", reason)
-	}
-	if until.Before(now.Add(29*time.Second)) || until.After(now.Add(31*time.Second)) {
-		t.Fatalf("first backoff until = %v, want about %v", until, now.Add(30*time.Second))
-	}
-
-	o.handleAgentEvent("issue-1", &RunAttempt{Identifier: "J-20"}, agent.Event{
-		Name:      "rate_limit",
-		Timestamp: now.Add(time.Second),
-		RateLimit: &agent.RateLimitEvent{},
-	})
-
-	until, _, paused = o.admissionPauseState(now.Add(time.Second))
-	if !paused {
-		t.Fatal("expected pause to remain active after repeated rate limit")
-	}
-	if until.Before(now.Add(60 * time.Second)) {
-		t.Fatalf("second backoff until = %v, want at least %v", until, now.Add(60*time.Second))
+	_, _, paused := o.admissionPauseState(now)
+	if paused {
+		t.Fatal("expected no pause when ResetAt is nil (no window throttled)")
 	}
 }
 
