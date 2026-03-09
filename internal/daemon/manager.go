@@ -614,6 +614,12 @@ func (m *Manager) GetProjects() []status.ProjectSummary {
 			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
 		}
 		sort.Strings(project.RunningIssueIDs)
+		failureRetryCount := 0
+		for _, entry := range st.RetryQueue {
+			if entry.Kind == orchestrator.RetryKindFailure {
+				failureRetryCount++
+			}
+		}
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
 		if project.RetryCount > 0 && project.LastError == "" {
 			for _, retry := range st.RetryQueue {
@@ -630,7 +636,7 @@ func (m *Manager) GetProjects() []status.ProjectSummary {
 			project.Status = "quarantined"
 		case !project.TrackerConnected:
 			project.Status = "network_lost"
-		case project.RetryCount > 0 || project.LastError != "":
+		case failureRetryCount > 0 || snapshot.LastErr != "":
 			project.Status = "error"
 		case project.SubprocessCount > 0:
 			project.Status = "running"

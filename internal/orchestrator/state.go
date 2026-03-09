@@ -29,8 +29,9 @@ const (
 )
 
 const (
-	RetryKindFailure  RetryKind = "failure"
-	RetryKindCapacity RetryKind = "capacity"
+	RetryKindFailure      RetryKind = "failure"
+	RetryKindCapacity     RetryKind = "capacity"
+	RetryKindContinuation RetryKind = "continuation"
 )
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
@@ -62,19 +63,21 @@ const (
 )
 
 type RunAttempt struct {
-	IssueID        string
-	Identifier     string
-	Attempt        int
-	FailureCount   int
-	WorkspacePath  string
-	StartedAt      time.Time
-	Error          string
-	Session        LiveSession
-	IssueState     string // last known tracker state for per-state concurrency
-	GlobalSlotHeld bool
-	Urgent         bool
-	Preempted      bool
-	Summary        *workspaceSummary // collected before FinishRun (after_run hook may reset workspace)
+	IssueID           string
+	Identifier        string
+	Attempt           int
+	FailureCount      int
+	Continuation      bool // true when this is a cross-session continuation (not a failure retry)
+	NeedsContinuation bool // true when the session hit max_turns and should continue in a new session
+	WorkspacePath     string
+	StartedAt         time.Time
+	Error             string
+	Session           LiveSession
+	IssueState        string // last known tracker state for per-state concurrency
+	GlobalSlotHeld    bool
+	Urgent            bool
+	Preempted         bool
+	Summary           *workspaceSummary // collected before FinishRun (after_run hook may reset workspace)
 
 	mu            sync.Mutex
 	status        RunStatus
@@ -146,6 +149,18 @@ func (a *RunAttempt) SessionSnapshot() LiveSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Session
+}
+
+func (a *RunAttempt) SetNeedsContinuation(needs bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.NeedsContinuation = needs
+}
+
+func (a *RunAttempt) ShouldContinue() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.NeedsContinuation
 }
 
 func (a *RunAttempt) SetCancelReason(reason WorkerCancelReason) {

@@ -26,6 +26,9 @@ func TestTrackerFeedbackConfigDefaults(t *testing.T) {
 	if got := cfg.MaxAttempts(); got != 3 {
 		t.Fatalf("MaxAttempts = %d, want 3", got)
 	}
+	if got := cfg.MaxTurns(); got != 20 {
+		t.Fatalf("MaxTurns = %d, want 20", got)
+	}
 }
 
 func TestTrackerFeedbackConfigOverrides(t *testing.T) {

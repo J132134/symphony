@@ -378,7 +378,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		}
 
 		if o.canDispatch(cfg, issue) {
-			if !o.dispatch(ctx, cfg, issue, 1, 0) && !isUrgentIssue(issue) {
+			if !o.dispatch(ctx, cfg, issue, 1, 0, false) && !isUrgentIssue(issue) {
 				break
 			}
 		}

@@ -39,7 +39,11 @@ func TestBuildSummaryMarksRetryAsError(t *testing.T) {
 
 	st := orchestrator.NewState()
 	st.RecordTrackerSuccess(now)
-	st.RetryQueue["1"] = &orchestrator.RetryEntry{Identifier: "J-18", Error: "agent crashed"}
+	st.RetryQueue["1"] = &orchestrator.RetryEntry{
+		Identifier: "J-18",
+		Kind:       orchestrator.RetryKindFailure,
+		Error:      "agent crashed",
+	}
 
 	summary := BuildSummary(map[string]*orchestrator.State{"alpha": st})
 	if summary.Status != "error" {
@@ -47,6 +51,42 @@ func TestBuildSummaryMarksRetryAsError(t *testing.T) {
 	}
 	if summary.RetryCount != 1 {
 		t.Fatalf("retry_count = %d, want 1", summary.RetryCount)
+	}
+}
+
+func TestBuildSummaryIgnoresNonFailureRetriesForErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		kind orchestrator.RetryKind
+	}{
+		{name: "capacity", kind: orchestrator.RetryKindCapacity},
+		{name: "continuation", kind: orchestrator.RetryKindContinuation},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			st := orchestrator.NewState()
+			st.RecordTrackerSuccess(now)
+			st.RetryQueue["1"] = &orchestrator.RetryEntry{
+				Identifier: "J-18",
+				Kind:       tc.kind,
+				Error:      "transient wait",
+			}
+
+			summary := BuildSummary(map[string]*orchestrator.State{"alpha": st})
+			if summary.Status != "idle" {
+				t.Fatalf("status = %q, want idle", summary.Status)
+			}
+			if summary.RetryCount != 1 {
+				t.Fatalf("retry_count = %d, want 1", summary.RetryCount)
+			}
+		})
 	}
 }
 
@@ -60,7 +100,11 @@ func TestBuildSummaryPrefersErrorOverNetworkLoss(t *testing.T) {
 
 	retrying := orchestrator.NewState()
 	retrying.RecordTrackerSuccess(now.Add(time.Minute))
-	retrying.RetryQueue["1"] = &orchestrator.RetryEntry{Identifier: "J-18", Error: "agent crashed"}
+	retrying.RetryQueue["1"] = &orchestrator.RetryEntry{
+		Identifier: "J-18",
+		Kind:       orchestrator.RetryKindFailure,
+		Error:      "agent crashed",
+	}
 
 	summary := BuildSummary(map[string]*orchestrator.State{
 		"alpha": networkLost,

@@ -67,6 +67,13 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		}
 		sort.Strings(project.RunningIssueIDs)
 
+		failureRetryCount := 0
+		for _, entry := range st.RetryQueue {
+			if entry.Kind == orchestrator.RetryKindFailure {
+				failureRetryCount++
+			}
+		}
+
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
 		if project.RetryCount > 0 {
 			for _, retry := range st.RetryQueue {
@@ -80,7 +87,7 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 
 		if !project.TrackerConnected {
 			project.Status = "network_lost"
-		} else if project.RetryCount > 0 {
+		} else if failureRetryCount > 0 {
 			project.Status = "error"
 		} else if project.SubprocessCount > 0 {
 			project.Status = "running"

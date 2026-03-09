@@ -960,10 +960,10 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 		t.Fatalf("completed count = %d, want 1", o.state.CompletedCount)
 	}
 	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
-		t.Fatal("success path should not schedule a follow-up retry")
+		t.Fatal("terminal success should not schedule a continuation retry")
 	}
 	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
-		t.Fatal("success path should release the claimed issue")
+		t.Fatal("terminal success should release the claimed issue")
 	}
 }
 
@@ -993,9 +993,131 @@ func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
 
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
 
+	o.state.mu.Lock()
+	o.state.mu.Unlock()
+
 	issue := &types.Issue{ID: attempt.IssueID, Identifier: attempt.Identifier, State: "In Progress"}
 	if !o.canDispatch(cfg, issue) {
 		t.Fatal("successful active issue should be eligible for natural redispatch on the next poll")
+	}
+}
+
+func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states":    []any{"In Progress"},
+			"on_success_state": "Human Review",
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-54",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		IssueState: "In Progress",
+	}
+	attempt.SetNeedsContinuation(true)
+	attempt.SetStatus(StatusSucceeded)
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	before := time.Now()
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue[attempt.IssueID]
+	if !ok {
+		t.Fatal("expected continuation retry to be scheduled after success")
+	}
+	if entry.Kind != RetryKindContinuation {
+		t.Fatalf("retry kind = %q, want continuation", entry.Kind)
+	}
+	if entry.Attempt != 1 {
+		t.Fatalf("retry attempt = %d, want 1", entry.Attempt)
+	}
+	delay := entry.DueAt.Sub(before)
+	if delay < 800*time.Millisecond || delay > 1200*time.Millisecond {
+		t.Fatalf("continuation retry delay = %v, want about 1s", delay)
+	}
+	if o.state.CompletedCount != 0 {
+		t.Fatalf("completed count = %d, want 0 while continuation is pending", o.state.CompletedCount)
+	}
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	if recorder.commentCount() != 0 {
+		t.Fatalf("comment count = %d, want 0 while continuation is pending", recorder.commentCount())
+	}
+	if got := recorder.lastState(); got != "" {
+		t.Fatalf("unexpected state transition while continuation is pending: %q", got)
+	}
+}
+
+func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return issue in "Human Review" state — not an active state
+		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-54","title":"done","description":"","priority":0,"state":{"name":"Human Review"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress"},
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+
+	entry := &RetryEntry{
+		IssueID:    "issue-1",
+		Identifier: "J-54",
+		Kind:       RetryKindContinuation,
+		Attempt:    1,
+		DueAt:      time.Now(),
+	}
+	o.state.mu.Lock()
+	o.state.RetryQueue[entry.IssueID] = entry
+	o.state.Claimed[entry.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onRetryTimer(context.Background(), cfg, entry.IssueID)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	if _, ok := o.state.RetryQueue[entry.IssueID]; ok {
+		t.Fatal("retry entry should be removed when issue is inactive")
+	}
+	if _, ok := o.state.Claimed[entry.IssueID]; ok {
+		t.Fatal("claim should be released when issue is inactive")
+	}
+	if len(o.state.Running) != 0 {
+		t.Fatalf("no issue should be dispatched for inactive state, got %d running", len(o.state.Running))
 	}
 }
 

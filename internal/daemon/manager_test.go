@@ -115,6 +115,55 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 }
 
+func TestManagerGetProjectsIgnoresNonFailureRetriesForErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		kind orchestrator.RetryKind
+	}{
+		{name: "capacity", kind: orchestrator.RetryKindCapacity},
+		{name: "continuation", kind: orchestrator.RetryKindContinuation},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			orch := orchestrator.New("", 0, "alpha", nil)
+			st := orch.GetState()
+			st.RecordTrackerSuccess(now)
+			st.Lock()
+			st.RetryQueue["issue-1"] = &orchestrator.RetryEntry{
+				Identifier: "J-18",
+				Kind:       tc.kind,
+				Error:      "waiting",
+			}
+			st.Unlock()
+
+			mgr := &Manager{
+				cfg: &config.DaemonConfig{},
+				runners: map[string]*projectRunner{
+					"alpha": {proj: config.ProjectConfig{Name: "alpha"}, orch: orch},
+				},
+			}
+
+			projects := mgr.GetProjects()
+			if len(projects) != 1 {
+				t.Fatalf("project count = %d, want 1", len(projects))
+			}
+			if projects[0].Status != "idle" {
+				t.Fatalf("status = %q, want idle", projects[0].Status)
+			}
+			if projects[0].RetryCount != 1 {
+				t.Fatalf("retry_count = %d, want 1", projects[0].RetryCount)
+			}
+		})
+	}
+}
+
 func TestProjectRunnerQuarantinesAfterRestartBudget(t *testing.T) {
 	t.Parallel()
 
