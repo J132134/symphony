@@ -212,6 +212,7 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	draining := o.isDraining()
 	reason := attempt.GetCancelReason()
 	cancelled := isWorkerCancelled(err)
+	needsContinuation := attempt.ShouldContinue()
 
 	if reason == CancelReasonTerminal || reason == CancelReasonReconcile || reason == CancelReasonShutdown {
 		o.releaseClaim(issueID)
@@ -220,11 +221,17 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	if err == nil {
-		o.state.mu.Lock()
-		o.state.CompletedCount++
-		o.state.mu.Unlock()
+		if needsContinuation {
+			slog.Info("orchestrator.worker_continuing", "project", o.name, "issue_id", issueID, "turns", attempt.SessionSnapshot().TurnCount)
+		} else {
+			o.state.mu.Lock()
+			o.state.CompletedCount++
+			o.state.mu.Unlock()
+		}
 		if draining {
 			slog.Info("orchestrator.worker_drained", "project", o.name, "issue_id", issueID)
+		} else if needsContinuation {
+			slog.Info("orchestrator.worker_session_exhausted", "project", o.name, "issue_id", issueID)
 		} else {
 			slog.Info("orchestrator.worker_completed", "project", o.name, "issue_id", issueID)
 		}
@@ -232,7 +239,7 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		slog.Error("orchestrator.worker_failed", "project", o.name, "issue_id", issueID, "error", err)
 	}
 
-	if err == nil {
+	if err == nil && !needsContinuation {
 		o.maybePostSuccessFeedback(ctx, cfg, tr, issueID, attempt)
 	} else if attempt.Attempt >= cfg.MaxAttempts() {
 		o.maybePostFinalFailureFeedback(ctx, cfg, tr, issueID, attempt, err)
@@ -257,7 +264,11 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	if err == nil {
-		o.scheduleContinuationRetry(ctx, cfg, issueID, attempt.Identifier)
+		if needsContinuation {
+			o.scheduleContinuationRetry(ctx, cfg, issueID, attempt.Identifier)
+		} else {
+			o.releaseClaim(issueID)
+		}
 	} else {
 		if attempt.Attempt >= cfg.MaxAttempts() {
 			o.releaseClaim(issueID)
@@ -345,6 +356,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	}
 	attempt.SetSessionIdentity(threadID, runner.SessionID(), runner.PID())
 
+	needsContinuation := false
 	for turnNum := 1; turnNum <= cfg.MaxTurns(); turnNum++ {
 		attempt.SetStatus(StatusStreamingTurn)
 		attempt.SetTurnCount(turnNum)
@@ -400,9 +412,20 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 				slog.Info("orchestrator.issue_no_longer_active", "issue", issue.Identifier)
 				break
 			}
+			continue
+		}
+
+		active, activeErr := o.isStillActive(ctx, cfg, issue.ID)
+		if activeErr != nil {
+			slog.Warn("orchestrator.issue_activity_check_failed", "issue", issue.Identifier, "error", activeErr)
+			active = true
+		}
+		if active {
+			needsContinuation = true
 		}
 	}
 
+	attempt.SetNeedsContinuation(needsContinuation)
 	attempt.SetStatus(StatusFinishing)
 	runner.StopSession()
 	runnerStarted = false
@@ -429,7 +452,6 @@ func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Mana
 	}
 	return turnContext
 }
-
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
 	attempt.UpdateLastEvent(e.Timestamp)

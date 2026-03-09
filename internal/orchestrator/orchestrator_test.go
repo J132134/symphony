@@ -959,18 +959,11 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	if o.state.CompletedCount != 1 {
 		t.Fatalf("completed count = %d, want 1", o.state.CompletedCount)
 	}
-	entry, ok := o.state.RetryQueue[attempt.IssueID]
-	if !ok {
-		t.Fatal("success path should schedule a continuation retry")
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
+		t.Fatal("terminal success should not schedule a continuation retry")
 	}
-	if entry.Kind != RetryKindContinuation {
-		t.Fatalf("retry kind = %q, want continuation", entry.Kind)
-	}
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	if _, ok := o.state.Claimed[attempt.IssueID]; !ok {
-		t.Fatal("claim should be maintained while continuation retry is pending")
+	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
+		t.Fatal("terminal success should release the claimed issue")
 	}
 }
 
@@ -1001,32 +994,34 @@ func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
 
 	o.state.mu.Lock()
-	defer o.state.mu.Unlock()
-	entry, ok := o.state.RetryQueue[attempt.IssueID]
-	if !ok {
-		t.Fatal("success should schedule a continuation retry entry")
-	}
-	if entry.Kind != RetryKindContinuation {
-		t.Fatalf("retry kind = %q, want continuation", entry.Kind)
-	}
-	if _, ok := o.state.Claimed[attempt.IssueID]; !ok {
-		t.Fatal("claim should be maintained while continuation retry is pending")
-	}
-	if entry.timer != nil {
-		entry.timer.Stop()
+	o.state.mu.Unlock()
+
+	issue := &types.Issue{ID: attempt.IssueID, Identifier: attempt.Identifier, State: "In Progress"}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("successful active issue should be eligible for natural redispatch on the next poll")
 	}
 }
 
-func TestOnWorkerDoneSuccessSchedulesContinuationRetry(t *testing.T) {
+func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *testing.T) {
 	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
-			"active_states": []any{"In Progress"},
+			"active_states":    []any{"In Progress"},
+			"on_success_state": "Human Review",
 		},
 	})
 
 	o := New("", 0, "alpha", nil)
+	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-54",
@@ -1034,6 +1029,7 @@ func TestOnWorkerDoneSuccessSchedulesContinuationRetry(t *testing.T) {
 		StartedAt:  time.Now().Add(-30 * time.Second),
 		IssueState: "In Progress",
 	}
+	attempt.SetNeedsContinuation(true)
 	attempt.SetStatus(StatusSucceeded)
 
 	o.state.mu.Lock()
@@ -1060,8 +1056,17 @@ func TestOnWorkerDoneSuccessSchedulesContinuationRetry(t *testing.T) {
 	if delay < 800*time.Millisecond || delay > 1200*time.Millisecond {
 		t.Fatalf("continuation retry delay = %v, want about 1s", delay)
 	}
+	if o.state.CompletedCount != 0 {
+		t.Fatalf("completed count = %d, want 0 while continuation is pending", o.state.CompletedCount)
+	}
 	if entry.timer != nil {
 		entry.timer.Stop()
+	}
+	if recorder.commentCount() != 0 {
+		t.Fatalf("comment count = %d, want 0 while continuation is pending", recorder.commentCount())
+	}
+	if got := recorder.lastState(); got != "" {
+		t.Fatalf("unexpected state transition while continuation is pending: %q", got)
 	}
 }
 
