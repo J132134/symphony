@@ -29,6 +29,7 @@ type Issue struct {
 	Identifier  string
 	Title       string
 	Description string
+	ProjectSlug string
 	Priority    *int
 	State       string
 	BranchName  string

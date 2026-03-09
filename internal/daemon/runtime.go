@@ -225,7 +225,7 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 	var wg sync.WaitGroup
 
 	if cfg.StatusServer.Enabled {
-		srv := status.New(mgr, cfg.StatusServer.Port)
+		srv := status.New(mgr, cfg.StatusServer.Port, cfg.StatusServer.WebhookSecret)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

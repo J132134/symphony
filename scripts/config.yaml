@@ -12,6 +12,7 @@ projects:
 status_server:
   enabled: true
   port: 7777
+  webhook_secret: $SYMPHONY_LINEAR_WEBHOOK_SECRET
 
 auto_update:
   enabled: true

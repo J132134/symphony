@@ -109,6 +109,69 @@ func TestLoadDaemonConfigOverridesProjectHealth(t *testing.T) {
 	}
 }
 
+func TestLoadDaemonConfigResolvesWebhookSecretFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	t.Setenv("SYMPHONY_LINEAR_WEBHOOK_SECRET", "super-secret")
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "" +
+		"projects:\n" +
+		"  - name: alpha\n" +
+		"    workflow: " + workflowPath + "\n" +
+		"status_server:\n" +
+		"  enabled: true\n" +
+		"  port: 7777\n" +
+		"  webhook_secret: $SYMPHONY_LINEAR_WEBHOOK_SECRET\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.StatusServer.WebhookSecret != "super-secret" {
+		t.Fatalf("WebhookSecret = %q, want super-secret", cfg.StatusServer.WebhookSecret)
+	}
+}
+
+func TestLoadDaemonConfigUsesWebhookSecretEnvFallback(t *testing.T) {
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	t.Setenv("SYMPHONY_LINEAR_WEBHOOK_SECRET", "fallback-secret")
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "" +
+		"projects:\n" +
+		"  - name: alpha\n" +
+		"    workflow: " + workflowPath + "\n" +
+		"status_server:\n" +
+		"  enabled: true\n" +
+		"  port: 7777\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.StatusServer.WebhookSecret != "fallback-secret" {
+		t.Fatalf("WebhookSecret = %q, want fallback-secret", cfg.StatusServer.WebhookSecret)
+	}
+}
+
 func TestDaemonConfigValidateRejectsInvalidConfiguredSessionLimit(t *testing.T) {
 	t.Parallel()
 

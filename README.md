@@ -144,6 +144,7 @@ agent:
 status_server:
   enabled: true
   port: 7777
+  webhook_secret: $SYMPHONY_LINEAR_WEBHOOK_SECRET
 
 auto_update:
   enabled: true
@@ -159,7 +160,7 @@ symphony daemon --config /path/to/config.yaml
 symphony menubar
 ```
 
-`symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
+`symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. `status_server.webhook_secret`을 바꾸는 경우도 여기에 포함된다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
 
 `config.yaml` 안의 상대 경로(`projects[].workflow`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다.
 
@@ -207,6 +208,34 @@ symphony status --json
 | `GET /api/v1/summary` | 메뉴바 UI용 데몬 요약 상태(JSON) |
 | `GET /api/v1/projects` | 프로젝트별 상태와 실행 중 이슈 상세(JSON) |
 | `POST /api/v1/refresh` | 즉시 폴링+조정 트리거 |
+| `POST /webhook/linear` | Linear issue state webhook. 유효한 서명과 active state update를 받으면 해당 프로젝트만 즉시 refresh |
+
+### Linear webhook 설정
+
+```bash
+export SYMPHONY_LINEAR_WEBHOOK_SECRET=replace-with-random-secret
+```
+
+```yaml
+status_server:
+  enabled: true
+  port: 7777
+  webhook_secret: $SYMPHONY_LINEAR_WEBHOOK_SECRET
+```
+
+Linear webhook payload는 raw body 기준 HMAC-SHA256 서명을 `X-Linear-Signature` 헤더(호환성 차원에서 `Linear-Signature`도 허용)에 담아 보내며, Symphony는 서명이 유효하고 `action=update`, `type=Issue`, `data.state.name`이 해당 프로젝트의 `tracker.active_states`에 포함될 때만 그 프로젝트 orchestrator에 즉시 refresh를 요청한다. webhook이 설정되지 않았거나 검증에 실패해도 기존 polling은 계속 동작하므로 fallback은 자동으로 유지된다.
+
+### macOS 로컬 수신 예시: Tailscale Funnel
+
+로컬 맥에서 daemon이 `127.0.0.1:7777`으로 상태 서버를 띄운 상태라면 Tailscale Funnel로 Linear webhook을 받아 전달할 수 있다.
+
+```bash
+# Tailscale에 로그인되어 있다고 가정
+tailscale funnel 7777
+tailscale funnel status
+```
+
+`tailscale funnel 7777` 실행 후 표시되는 HTTPS URL에 `/webhook/linear`를 붙여 Linear webhook URL로 등록한다. 예를 들어 `https://your-machine.ts.net/webhook/linear` 형태다. secret은 Linear webhook 설정 화면과 `SYMPHONY_LINEAR_WEBHOOK_SECRET`에 같은 값을 넣는다. 테스트 이벤트를 보낸 뒤 `GET /api/v1/summary`나 daemon 로그에서 즉시 refresh 로그가 찍히는지 확인하면 된다.
 
 `symphony menubar`는 macOS 메뉴바에서 데몬 상태를 보여준다. 정상 실행 중에는 회전하는 원형 인디케이터를, 에러가 있으면 경고 아이콘을, status server 또는 tracker 연결이 끊기면 일시정지 아이콘을 표시한다. 마우스 오버 툴팁과 메뉴 항목에서 현재 버전, 실행 중인 서브프로세스 수, 이슈 ID 목록을 확인할 수 있다.
 

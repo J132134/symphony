@@ -26,6 +26,8 @@ type managedOrchestrator interface {
 	TriggerRefresh(context.Context)
 }
 
+type projectIssueMatcher func(context.Context, config.ProjectConfig, string, string) (bool, error)
+
 type runnerHealthState string
 
 const (
@@ -229,6 +231,12 @@ func (pr *projectRunner) snapshot() (*orchestrator.State, string) {
 	return pr.orch.GetState(), pr.lastErr
 }
 
+func (pr *projectRunner) currentOrchestrator() managedOrchestrator {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	return pr.orch
+}
+
 func (pr *projectRunner) projectSnapshot() projectRunnerSnapshot {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
@@ -399,6 +407,8 @@ type Manager struct {
 	restartRequested bool
 	restartReady     chan struct{}
 	done             chan struct{}
+
+	matchProjectIssue projectIssueMatcher
 }
 
 func NewManager(cfg *config.DaemonConfig) *Manager {
@@ -410,9 +420,10 @@ func NewManagerWithLimiter(cfg *config.DaemonConfig, limiter *orchestrator.Sessi
 		limiter = orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions())
 	}
 	return &Manager{
-		cfg:     cfg,
-		runners: make(map[string]*projectRunner, len(cfg.Projects)),
-		limiter: limiter,
+		cfg:               cfg,
+		runners:           make(map[string]*projectRunner, len(cfg.Projects)),
+		limiter:           limiter,
+		matchProjectIssue: matchLinearIssueToProject,
 	}
 }
 
@@ -559,13 +570,47 @@ func (m *Manager) RequestRestartWhenIdle() <-chan struct{} {
 // TriggerRefresh asks each running orchestrator to poll immediately.
 func (m *Manager) TriggerRefresh(ctx context.Context) {
 	for _, pr := range m.runnersSnapshot() {
-		pr.mu.Lock()
-		orch := pr.orch
-		pr.mu.Unlock()
+		orch := pr.currentOrchestrator()
 		if orch != nil {
 			orch.TriggerRefresh(ctx)
 		}
 	}
+}
+
+func (m *Manager) TriggerRefreshForIssue(ctx context.Context, issueID, stateName string) bool {
+	issueID = strings.TrimSpace(issueID)
+	stateName = strings.TrimSpace(stateName)
+	if issueID == "" || stateName == "" {
+		return false
+	}
+
+	matcher := m.matchProjectIssue
+	if matcher == nil {
+		matcher = matchLinearIssueToProject
+	}
+
+	for _, pr := range m.runnersSnapshot() {
+		matched, err := matcher(ctx, pr.proj, stateName, issueID)
+		if err != nil {
+			slog.Warn("daemon.linear_webhook_match_failed", "project", pr.proj.Name, "issue_id", issueID, "state", stateName, "error", err)
+			continue
+		}
+		if !matched {
+			continue
+		}
+
+		orch := pr.currentOrchestrator()
+		if orch == nil {
+			slog.Warn("daemon.linear_webhook_project_unavailable", "project", pr.proj.Name, "issue_id", issueID)
+			return false
+		}
+
+		orch.TriggerRefresh(ctx)
+		slog.Info("daemon.linear_webhook_refresh_triggered", "project", pr.proj.Name, "issue_id", issueID, "state", stateName)
+		return true
+	}
+
+	return false
 }
 
 // GetAllStates returns state for all running projects.
@@ -578,6 +623,35 @@ func (m *Manager) GetAllStates() map[string]*orchestrator.State {
 		}
 	}
 	return result
+}
+
+func matchLinearIssueToProject(ctx context.Context, proj config.ProjectConfig, stateName, issueID string) (bool, error) {
+	wf, err := workflow.Load(proj.Workflow)
+	if err != nil {
+		return false, fmt.Errorf("load workflow: %w", err)
+	}
+
+	cfg := config.New(wf.Config)
+	if !cfg.ActiveNorm()[config.NormalizeState(stateName)] {
+		return false, nil
+	}
+
+	tr, err := tracker.NewLinearClient(
+		cfg.TrackerAPIKey(),
+		cfg.TrackerEndpoint(),
+		cfg.TrackerProjectSlug(),
+		cfg.ActiveStates(),
+		cfg.TrackerAssignee(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("tracker: %w", err)
+	}
+
+	found, err := tr.HasIssueInProject(ctx, issueID)
+	if err != nil {
+		return false, fmt.Errorf("lookup issue: %w", err)
+	}
+	return found, nil
 }
 
 func (m *Manager) GetProjects() []status.ProjectSummary {

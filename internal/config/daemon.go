@@ -21,8 +21,9 @@ type AutoUpdateConfig struct {
 }
 
 type StatusServerConfig struct {
-	Enabled bool
-	Port    int
+	Enabled       bool
+	Port          int
+	WebhookSecret string
 }
 
 type ProjectHealthConfig struct {
@@ -115,6 +116,12 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		if port, ok := ss["port"]; ok {
 			cfg.StatusServer.Port = toInt(port, 7777)
 		}
+		if secret, ok := ss["webhook_secret"].(string); ok {
+			cfg.StatusServer.WebhookSecret = resolveString(secret)
+		}
+	}
+	if cfg.StatusServer.WebhookSecret == "" {
+		cfg.StatusServer.WebhookSecret = os.Getenv("SYMPHONY_LINEAR_WEBHOOK_SECRET")
 	}
 
 	cfg.ProjectHealth = ProjectHealthConfig{
@@ -184,7 +191,6 @@ func (c *DaemonConfig) MaxTotalConcurrentSessions() int {
 	return c.Agent.MaxTotalConcurrentSessions
 }
 
-
 func DefaultMaxTotalConcurrentSessions() int {
 	cpus := runtime.NumCPU()
 	switch {
@@ -205,9 +211,7 @@ func resolvePath(baseDir, v string) string {
 	if strings.TrimSpace(v) == "" {
 		return ""
 	}
-	if len(v) > 0 && v[0] == '$' {
-		v = os.Getenv(v[1:])
-	}
+	v = resolveString(v)
 	if len(v) > 0 && v[0] == '~' {
 		home, _ := os.UserHomeDir()
 		v = home + v[1:]
@@ -220,6 +224,13 @@ func resolvePath(baseDir, v string) string {
 		return v
 	}
 	return abs
+}
+
+func resolveString(v string) string {
+	if len(v) > 0 && v[0] == '$' {
+		return os.Getenv(v[1:])
+	}
+	return v
 }
 
 func toInt(v any, def int) int {

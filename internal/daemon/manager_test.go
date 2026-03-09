@@ -12,8 +12,9 @@ import (
 )
 
 type fakeManagedOrchestrator struct {
-	state *orchestrator.State
-	run   func(context.Context) error
+	state        *orchestrator.State
+	run          func(context.Context) error
+	refreshCalls int
 }
 
 func (f *fakeManagedOrchestrator) Run(ctx context.Context) error {
@@ -24,11 +25,13 @@ func (f *fakeManagedOrchestrator) Run(ctx context.Context) error {
 	return f.run(ctx)
 }
 
-func (f *fakeManagedOrchestrator) BeginDrain()                    {}
-func (f *fakeManagedOrchestrator) DrainAndStop()                  {}
-func (f *fakeManagedOrchestrator) IsIdle() bool                   { return true }
-func (f *fakeManagedOrchestrator) GetState() *orchestrator.State  { return f.state }
-func (f *fakeManagedOrchestrator) TriggerRefresh(context.Context) {}
+func (f *fakeManagedOrchestrator) BeginDrain()                   {}
+func (f *fakeManagedOrchestrator) DrainAndStop()                 {}
+func (f *fakeManagedOrchestrator) IsIdle() bool                  { return true }
+func (f *fakeManagedOrchestrator) GetState() *orchestrator.State { return f.state }
+func (f *fakeManagedOrchestrator) TriggerRefresh(context.Context) {
+	f.refreshCalls++
+}
 
 func TestRequestRestartWhenIdleWaitsForRunningWork(t *testing.T) {
 	t.Parallel()
@@ -478,6 +481,38 @@ func TestManagerWaitBlocksUntilRunStops(t *testing.T) {
 	}
 
 	<-done
+}
+
+func TestTriggerRefreshForIssueRefreshesMatchingProjectOnly(t *testing.T) {
+	t.Parallel()
+
+	alphaOrch := &fakeManagedOrchestrator{state: orchestrator.NewState()}
+	betaOrch := &fakeManagedOrchestrator{state: orchestrator.NewState()}
+
+	mgr := &Manager{
+		cfg: &config.DaemonConfig{},
+		runners: map[string]*projectRunner{
+			"alpha": {proj: config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"}, orch: alphaOrch},
+			"beta":  {proj: config.ProjectConfig{Name: "beta", Workflow: "/tmp/beta"}, orch: betaOrch},
+		},
+		matchProjectIssue: func(_ context.Context, proj config.ProjectConfig, stateName, issueID string) (bool, error) {
+			if issueID != "issue-123" || stateName != "In Progress" {
+				return false, nil
+			}
+			return proj.Name == "beta", nil
+		},
+	}
+
+	handled := mgr.TriggerRefreshForIssue(context.Background(), "issue-123", "In Progress")
+	if !handled {
+		t.Fatal("TriggerRefreshForIssue() = false, want true")
+	}
+	if alphaOrch.refreshCalls != 0 {
+		t.Fatalf("alpha refresh_calls = %d, want 0", alphaOrch.refreshCalls)
+	}
+	if betaOrch.refreshCalls != 1 {
+		t.Fatalf("beta refresh_calls = %d, want 1", betaOrch.refreshCalls)
+	}
 }
 
 func closedDone() chan struct{} {

@@ -1,7 +1,11 @@
 package status
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +16,14 @@ import (
 )
 
 type fakeSummarySource struct {
-	summary      Summary
-	projects     []ProjectSummary
-	states       map[string]*orchestrator.State
-	refreshCalls int
+	summary            Summary
+	projects           []ProjectSummary
+	states             map[string]*orchestrator.State
+	refreshCalls       int
+	webhookCalls       int
+	lastWebhookIssueID string
+	lastWebhookState   string
+	webhookHandled     bool
 }
 
 func (f *fakeSummarySource) GetAllStates() map[string]*orchestrator.State {
@@ -37,6 +45,13 @@ func (f *fakeSummarySource) TriggerRefresh(context.Context) {
 	f.refreshCalls++
 }
 
+func (f *fakeSummarySource) TriggerRefreshForIssue(_ context.Context, issueID, stateName string) bool {
+	f.webhookCalls++
+	f.lastWebhookIssueID = issueID
+	f.lastWebhookState = stateName
+	return f.webhookHandled
+}
+
 func TestHandleSummaryPrefersSourceSummary(t *testing.T) {
 	t.Parallel()
 
@@ -45,7 +60,7 @@ func TestHandleSummaryPrefersSourceSummary(t *testing.T) {
 			Status:          "error",
 			SubprocessCount: 2,
 		},
-	}, 7777)
+	}, 7777, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil)
 	rec := httptest.NewRecorder()
@@ -71,7 +86,7 @@ func TestHandleRefreshTriggersSource(t *testing.T) {
 	t.Parallel()
 
 	source := &fakeSummarySource{}
-	server := New(source, 7777)
+	server := New(source, 7777, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
 	rec := httptest.NewRecorder()
@@ -96,7 +111,7 @@ func TestHandleProjectsPrefersProjectSource(t *testing.T) {
 			CrashCount:    3,
 			QuarantinedAt: "2026-03-06T14:00:00Z",
 		}},
-	}, 7777)
+	}, 7777, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
 	rec := httptest.NewRecorder()
@@ -138,7 +153,7 @@ func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
 
 	server := New(&fakeSummarySource{
 		states: map[string]*orchestrator.State{"alpha": state},
-	}, 7777)
+	}, 7777, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
 	rec := httptest.NewRecorder()
@@ -161,4 +176,118 @@ func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
 	if len(payload[0].RunningIssues) != 1 || payload[0].RunningIssues[0].Identifier != "J-54" {
 		t.Fatalf("running_issues = %#v, want J-54 detail", payload[0].RunningIssues)
 	}
+}
+
+func TestHandleLinearWebhookTriggersIssueRefresh(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"action":"update","type":"Issue","data":{"id":"issue-123","state":{"name":"In Progress"}}}`)
+	secret := "super-secret"
+	source := &fakeSummarySource{webhookHandled: true}
+	server := New(source, 7777, secret)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", bytes.NewReader(body))
+	req.Header.Set("X-Linear-Signature", signedBody(body, secret))
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want 202", rec.Code)
+	}
+	if source.webhookCalls != 1 {
+		t.Fatalf("webhook_calls = %d, want 1", source.webhookCalls)
+	}
+	if source.lastWebhookIssueID != "issue-123" {
+		t.Fatalf("issue_id = %q, want issue-123", source.lastWebhookIssueID)
+	}
+	if source.lastWebhookState != "In Progress" {
+		t.Fatalf("state = %q, want In Progress", source.lastWebhookState)
+	}
+}
+
+func TestHandleLinearWebhookRejectsInvalidSignature(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"action":"update","type":"Issue","data":{"id":"issue-123","state":{"name":"In Progress"}}}`)
+	source := &fakeSummarySource{webhookHandled: true}
+	server := New(source, 7777, "super-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", bytes.NewReader(body))
+	req.Header.Set("X-Linear-Signature", "not-valid")
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want 401", rec.Code)
+	}
+	if source.webhookCalls != 0 {
+		t.Fatalf("webhook_calls = %d, want 0", source.webhookCalls)
+	}
+}
+
+func TestHandleLinearWebhookIgnoresNonIssueUpdate(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"action":"create","type":"Issue","data":{"id":"issue-123","state":{"name":"In Progress"}}}`)
+	secret := "super-secret"
+	source := &fakeSummarySource{webhookHandled: true}
+	server := New(source, 7777, secret)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", bytes.NewReader(body))
+	req.Header.Set("Linear-Signature", "sha256="+signedBody(body, secret))
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want 202", rec.Code)
+	}
+	if source.webhookCalls != 0 {
+		t.Fatalf("webhook_calls = %d, want 0", source.webhookCalls)
+	}
+}
+
+func TestHandleLinearWebhookReturnsIgnoredWhenSourceDoesNotHandle(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"action":"update","type":"Issue","data":{"id":"issue-123","state":{"name":"Backlog"}}}`)
+	secret := "super-secret"
+	source := &fakeSummarySource{webhookHandled: false}
+	server := New(source, 7777, secret)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", bytes.NewReader(body))
+	req.Header.Set("X-Linear-Signature", signedBody(body, secret))
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status code = %d, want 202", rec.Code)
+	}
+	if source.webhookCalls != 1 {
+		t.Fatalf("webhook_calls = %d, want 1", source.webhookCalls)
+	}
+}
+
+func TestHandleLinearWebhookRequiresConfiguredSecret(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"action":"update","type":"Issue","data":{"id":"issue-123","state":{"name":"In Progress"}}}`)
+	source := &fakeSummarySource{webhookHandled: true}
+	server := New(source, 7777, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.srv.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want 503", rec.Code)
+	}
+	if source.webhookCalls != 0 {
+		t.Fatalf("webhook_calls = %d, want 0", source.webhookCalls)
+	}
+}
+
+func signedBody(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }

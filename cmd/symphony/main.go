@@ -83,7 +83,7 @@ func cmdRun(args []string) {
 		var port int
 		fmt.Sscanf(portStr, "%d", &port)
 		if port > 0 {
-			srv := status.New(&singleSource{o}, port)
+			srv := status.New(&singleSource{o}, port, "")
 			go func() {
 				if err := srv.Run(ctx); err != nil {
 					slog.Error("status_server.error", "error", err)

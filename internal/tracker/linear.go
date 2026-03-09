@@ -53,6 +53,7 @@ const issueByIDQuery = `
 query($id: String!) {
   issue(id: $id) {
     id identifier title description priority
+    project { slugId }
     state { name }
     branchName url
     comments(last: 50, orderBy: updatedAt) {
@@ -63,6 +64,19 @@ query($id: String!) {
       nodes { type relatedIssue { id identifier state { name } } }
     }
     createdAt updatedAt
+  }
+}`
+
+const issueInProjectQuery = `
+query($projectSlug: String!, $id: String!) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      id: { eq: $id }
+    }
+    first: 1
+  ) {
+    nodes { id }
   }
 }`
 
@@ -227,6 +241,22 @@ func (c *LinearClient) FetchIssueByID(ctx context.Context, id string) (*types.Is
 		return nil, nil
 	}
 	return normalizeIssue(node), nil
+}
+
+func (c *LinearClient) HasIssueInProject(ctx context.Context, id string) (bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return false, fmt.Errorf("issue ID is required")
+	}
+	data, err := c.execute(ctx, issueInProjectQuery, map[string]any{
+		"projectSlug": c.projectSlug,
+		"id":          id,
+	})
+	if err != nil {
+		return false, err
+	}
+	issuesData, _ := data["issues"].(map[string]any)
+	nodes, _ := issuesData["nodes"].([]any)
+	return len(nodes) > 0, nil
 }
 
 func (c *LinearClient) FetchIssuesByStates(ctx context.Context, states []string) ([]*types.Issue, error) {
@@ -482,6 +512,7 @@ func (c *LinearClient) execute(ctx context.Context, query string, vars map[strin
 }
 
 func normalizeIssue(node map[string]any) *types.Issue {
+	projectMap, _ := node["project"].(map[string]any)
 	stateMap, _ := node["state"].(map[string]any)
 
 	var labels []string
@@ -520,6 +551,7 @@ func normalizeIssue(node map[string]any) *types.Issue {
 		Identifier:  strVal(node["identifier"]),
 		Title:       strVal(node["title"]),
 		Description: strVal(node["description"]),
+		ProjectSlug: strVal(projectMap["slugId"]),
 		State:       strVal(stateMap["name"]),
 		BranchName:  strVal(node["branchName"]),
 		URL:         strVal(node["url"]),
