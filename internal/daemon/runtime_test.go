@@ -432,6 +432,54 @@ func TestRuntimeSwapStopsOldBeforeStartingNewWhenStatusServerPortIsReused(t *tes
 	}
 }
 
+func TestRuntimeSwapStopsOldBeforeStartingNewWhenWebhookSecretChanges(t *testing.T) {
+	t.Parallel()
+
+	port := 7777
+	alpha := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port, WebhookSecret: "alpha-secret"},
+	}
+	beta := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port, WebhookSecret: "beta-secret"},
+	}
+
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "stop:alpha", "start:beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
 func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
 	t.Parallel()
 
