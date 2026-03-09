@@ -231,6 +231,8 @@ hooks:
 
 스크립트 실행 시 `SYMPHONY_WORKSPACE` 환경변수로 현재 워크스페이스 절대경로가 전달된다.
 
+`codex.turn_sandbox_policy: workspace-write`를 사용할 때 Symphony는 워크스페이스 디렉터리만 믿지 않고, 실행 직전 `git rev-parse --git-dir`와 `--git-common-dir`로 실제 git admin 경로를 해석해 `codex --add-dir`로 함께 전달한다. 따라서 일반 clone과 linked worktree 모두에서 `.git` metadata 쓰기가 가능하고, 워크스페이스를 프로젝트 하위로 옮기는 것만으로 해결되지는 않는다.
+
 ## Linear 피드백
 
 기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, `tracker.on_success_state`가 pause state(`tracker.pause_states`)일 때는 PR 링크를 Add link에도 함께 등록한다. GitHub에서 브랜치 기준 기존 PR을 찾을 수 있으면 실제 PR URL을 사용하고, 찾지 못하면 설정된 `tracker.pr_url_template`(또는 기본 `pull/new/<branch>`)로 폴백한다. 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남기며, 코멘트/링크/상태 전환 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.

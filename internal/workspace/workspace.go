@@ -162,6 +162,46 @@ func (m *Manager) GetTurnContext(ws *Workspace) (string, error) {
 	return strings.Join(sections, "\n\n"), nil
 }
 
+// GitWritablePaths returns git admin directories that must be writable for
+// sandboxed git operations in the workspace. Non-git directories return nil.
+func GitWritablePaths(wsPath string) ([]string, error) {
+	if strings.TrimSpace(wsPath) == "" {
+		return nil, fmt.Errorf("workspace path is required")
+	}
+
+	var paths []string
+	seen := make(map[string]struct{}, 2)
+	for _, args := range [][]string{
+		{"rev-parse", "--path-format=absolute", "--git-dir"},
+		{"rev-parse", "--path-format=absolute", "--git-common-dir"},
+	} {
+		out, err := GitOutput(wsPath, args...)
+		if err != nil {
+			if isPlainNotGitRepositoryError(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		path := strings.TrimSpace(out)
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(wsPath, path)
+		}
+		path = filepath.Clean(path)
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("git metadata path %s: %w", path, err)
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
 func (m *Manager) runHook(ctx context.Context, name, script, wsPath string) (string, error) {
 	timeout := time.Duration(m.hooksTimeoutMs) * time.Millisecond
 	hctx, cancel := context.WithTimeout(ctx, timeout)
@@ -236,6 +276,10 @@ func signalProcessGroup(pid int, sig syscall.Signal) error {
 		return err
 	}
 	return nil
+}
+
+func isPlainNotGitRepositoryError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not a git repository (or any of the parent directories): .git")
 }
 
 func (m *Manager) persistAfterRunOutput(wsPath, stdout string) error {

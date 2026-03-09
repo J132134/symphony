@@ -794,8 +794,34 @@ func TestBuildAgentConfigUsesDefaultCommand(t *testing.T) {
 		},
 	})
 
-	if got := buildAgentConfig(cfg).Command; got != "codex app-server --model gpt-5" {
+	gotCfg, err := buildAgentConfig(cfg, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildAgentConfig() error = %v", err)
+	}
+	if got := gotCfg.Command; got != "codex app-server --model gpt-5" {
 		t.Fatalf("buildAgentConfig().Command = %q", got)
+	}
+}
+
+func TestBuildAgentConfigIncludesGitWritableDirs(t *testing.T) {
+	t.Parallel()
+
+	wsPath := initGitWorkspace(t)
+	cfg := config.New(nil)
+
+	gotCfg, err := buildAgentConfig(cfg, wsPath)
+	if err != nil {
+		t.Fatalf("buildAgentConfig() error = %v", err)
+	}
+	if len(gotCfg.AdditionalWritableDirs) != 1 {
+		t.Fatalf("len(buildAgentConfig().AdditionalWritableDirs) = %d, want 1 (%v)", len(gotCfg.AdditionalWritableDirs), gotCfg.AdditionalWritableDirs)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(wsPath, ".git"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(.git): %v", err)
+	}
+	if got := gotCfg.AdditionalWritableDirs[0]; got != want {
+		t.Fatalf("buildAgentConfig().AdditionalWritableDirs[0] = %q, want %q", got, want)
 	}
 }
 
