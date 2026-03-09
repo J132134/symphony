@@ -134,6 +134,45 @@ func TestAddComment(t *testing.T) {
 	}
 }
 
+func TestHasIssueInProjectUsesIDVariable(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"issue-1"}]}}}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+
+	found, err := client.HasIssueInProject(context.Background(), "issue-1")
+	if err != nil {
+		t.Fatalf("HasIssueInProject() error = %v", err)
+	}
+	if !found {
+		t.Fatal("HasIssueInProject() = false, want true")
+	}
+	if !strings.Contains(capturedBody, "query($projectSlug: String!, $id: ID!)") {
+		t.Fatalf("request body missing ID variable declaration: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, `"projectSlug":"proj"`) {
+		t.Fatalf("request body missing projectSlug: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, `"id":"issue-1"`) {
+		t.Fatalf("request body missing id: %s", capturedBody)
+	}
+}
+
 func TestAddCommentRejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 

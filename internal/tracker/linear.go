@@ -68,7 +68,7 @@ query($id: String!) {
 }`
 
 const issueInProjectQuery = `
-query($projectSlug: String!, $id: String!) {
+query($projectSlug: String!, $id: ID!) {
   issues(
     filter: {
       project: { slugId: { eq: $projectSlug } }
