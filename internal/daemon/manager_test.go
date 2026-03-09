@@ -79,7 +79,12 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	runningState := running.GetState()
 	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
 	runningState.RecordTrackerSuccess(now)
-	runningState.Running["1"] = &orchestrator.RunAttempt{Identifier: "J-17"}
+	lastEvent := now.Add(time.Minute)
+	attempt := &orchestrator.RunAttempt{Identifier: "J-17", StartedAt: now}
+	attempt.SetStatus(orchestrator.StatusStreamingTurn)
+	attempt.SetTurnCount(2)
+	attempt.UpdateLastEvent(lastEvent)
+	runningState.Running["1"] = attempt
 
 	networkLost := orchestrator.New("", 0, "beta", nil)
 	networkState := networkLost.GetState()
@@ -106,6 +111,19 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 	if len(summary.RunningIssueIDs) != 1 || summary.RunningIssueIDs[0] != "J-17" {
 		t.Fatalf("running_issue_ids = %#v, want [J-17]", summary.RunningIssueIDs)
+	}
+	if got := summary.Projects[0].RunningIssues; len(got) != 1 {
+		t.Fatalf("running_issues len = %d, want 1", len(got))
+	} else {
+		if got[0].Status != string(orchestrator.StatusStreamingTurn) {
+			t.Fatalf("status = %q, want %q", got[0].Status, orchestrator.StatusStreamingTurn)
+		}
+		if got[0].TurnCount != 2 {
+			t.Fatalf("turn_count = %d, want 2", got[0].TurnCount)
+		}
+		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
+			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
+		}
 	}
 	if summary.Projects[2].Name != "gamma" || summary.Projects[2].Status != "error" {
 		t.Fatalf("unexpected gamma project summary: %+v", summary.Projects[2])

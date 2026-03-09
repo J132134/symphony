@@ -181,13 +181,31 @@ codex:
   command: claude
 ```
 
-## HTTP 상태 API
+## 상태 확인
 
-`--port` 옵션 또는 `server.port` 설정 시 활성화된다.
+단일 프로젝트 실행(`symphony run`)에서는 `--port` 옵션으로 status server를 켤 수 있고, 멀티 프로젝트 데몬(`symphony daemon`)에서는 `status_server.port` 설정으로 항상 같은 API를 노출한다.
+
+```bash
+# 기본 daemon 설정(~/.config/symphony/config.yaml)의 status_server.port 사용
+symphony status
+
+# 다른 호스트나 SSH 포트 포워딩 대상 조회
+symphony status --url http://127.0.0.1:7777
+
+# 자동화용 JSON 출력
+symphony status --json
+```
+
+`--url`을 주지 않으면 daemon 설정 파일에서 `status_server.port`를 읽고, 설정 파일이 없으면 기본값 `http://127.0.0.1:7777`로 조회한다. 실행 중 이슈는 현재 단계(`status`), turn 수, 마지막 이벤트 시각까지 함께 출력한다.
+
+원격 웹 대시보드는 이번 범위에 포함하지 않는다. 필요하면 동일한 status API를 SSH 포트 포워딩, Tailscale, reverse proxy 같은 운영 경로로 노출해 후속으로 붙일 수 있다.
+
+## HTTP 상태 API
 
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /api/v1/summary` | 메뉴바 UI용 데몬 요약 상태(JSON) |
+| `GET /api/v1/projects` | 프로젝트별 상태와 실행 중 이슈 상세(JSON) |
 | `POST /api/v1/refresh` | 즉시 폴링+조정 트리거 |
 
 `symphony menubar`는 macOS 메뉴바에서 데몬 상태를 보여준다. 정상 실행 중에는 회전하는 원형 인디케이터를, 에러가 있으면 경고 아이콘을, status server 또는 tracker 연결이 끊기면 일시정지 아이콘을 표시한다. 마우스 오버 툴팁과 메뉴 항목에서 현재 버전, 실행 중인 서브프로세스 수, 이슈 ID 목록을 확인할 수 있다.

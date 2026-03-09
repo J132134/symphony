@@ -21,23 +21,32 @@ type Summary struct {
 	UpdatedAt       string           `json:"updated_at"`
 }
 
+type RunningIssueSummary struct {
+	Identifier  string `json:"identifier"`
+	Status      string `json:"status"`
+	TurnCount   int    `json:"turn_count,omitempty"`
+	LastEventAt string `json:"last_event_at,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+}
+
 type SummarySource interface {
 	GetSummary() Summary
 }
 
 type ProjectSummary struct {
-	Name               string   `json:"name"`
-	Status             string   `json:"status"`
-	Health             string   `json:"health,omitempty"`
-	SubprocessCount    int      `json:"subprocess_count"`
-	RunningIssueIDs    []string `json:"running_issue_ids"`
-	RetryCount         int      `json:"retry_count"`
-	CrashCount         int      `json:"crash_count,omitempty"`
-	QuarantinedAt      string   `json:"quarantined_at,omitempty"`
-	TrackerConnected   bool     `json:"tracker_connected"`
-	LastTrackerSuccess string   `json:"last_tracker_success,omitempty"`
-	LastTrackerError   string   `json:"last_tracker_error,omitempty"`
-	LastError          string   `json:"last_error,omitempty"`
+	Name               string                `json:"name"`
+	Status             string                `json:"status"`
+	Health             string                `json:"health,omitempty"`
+	SubprocessCount    int                   `json:"subprocess_count"`
+	RunningIssueIDs    []string              `json:"running_issue_ids"`
+	RunningIssues      []RunningIssueSummary `json:"running_issues,omitempty"`
+	RetryCount         int                   `json:"retry_count"`
+	CrashCount         int                   `json:"crash_count,omitempty"`
+	QuarantinedAt      string                `json:"quarantined_at,omitempty"`
+	TrackerConnected   bool                  `json:"tracker_connected"`
+	LastTrackerSuccess string                `json:"last_tracker_success,omitempty"`
+	LastTrackerError   string                `json:"last_tracker_error,omitempty"`
+	LastError          string                `json:"last_error,omitempty"`
 }
 
 func BuildSummary(states map[string]*orchestrator.State) Summary {
@@ -64,8 +73,12 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 		}
 		for _, attempt := range st.Running {
 			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
+			project.RunningIssues = append(project.RunningIssues, SummarizeRunningIssue(attempt))
 		}
 		sort.Strings(project.RunningIssueIDs)
+		sort.Slice(project.RunningIssues, func(i, j int) bool {
+			return project.RunningIssues[i].Identifier < project.RunningIssues[j].Identifier
+		})
 
 		failureRetryCount := 0
 		for _, entry := range st.RetryQueue {
@@ -96,6 +109,28 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 	}
 
 	return BuildSummaryFromProjects(projects)
+}
+
+func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary {
+	if attempt == nil {
+		return RunningIssueSummary{}
+	}
+
+	issue := RunningIssueSummary{
+		Identifier: attempt.Identifier,
+		Status:     string(attempt.GetStatus()),
+	}
+	if !attempt.StartedAt.IsZero() {
+		issue.StartedAt = attempt.StartedAt.UTC().Format(time.RFC3339)
+	}
+
+	session := attempt.SessionSnapshot()
+	issue.TurnCount = session.TurnCount
+	if session.LastEventAt != nil {
+		issue.LastEventAt = session.LastEventAt.UTC().Format(time.RFC3339)
+	}
+
+	return issue
 }
 
 func BuildSummaryFromProjects(projects []ProjectSummary) Summary {

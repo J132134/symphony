@@ -612,8 +612,12 @@ func (m *Manager) GetProjects() []status.ProjectSummary {
 		project.RetryCount = len(st.RetryQueue)
 		for _, attempt := range st.Running {
 			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
+			project.RunningIssues = append(project.RunningIssues, status.SummarizeRunningIssue(attempt))
 		}
 		sort.Strings(project.RunningIssueIDs)
+		sort.Slice(project.RunningIssues, func(i, j int) bool {
+			return project.RunningIssues[i].Identifier < project.RunningIssues[j].Identifier
+		})
 		failureRetryCount := 0
 		for _, entry := range st.RetryQueue {
 			if entry.Kind == orchestrator.RetryKindFailure {
