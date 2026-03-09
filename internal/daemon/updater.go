@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"symphony/internal/update"
@@ -16,6 +17,7 @@ import (
 var (
 	prepareUpdateFn = defaultPrepareUpdate
 	updaterExitFn   = os.Exit
+	updaterExecFn   = syscall.Exec
 )
 
 // CheckForUpdates checks GitHub Releases for a newer binary, installs it, and
@@ -39,7 +41,16 @@ func CheckForUpdates(mgr *Manager) {
 	slog.Info("updater.updated_draining")
 	mgr.Shutdown()
 	mgr.Wait()
-	slog.Info("updater.updated_restarting_via_supervisor")
+
+	exe, err := os.Executable()
+	if err == nil {
+		slog.Info("updater.restarting_via_exec")
+		if err = updaterExecFn(exe, os.Args, os.Environ()); err == nil {
+			return // process image replaced; unreachable in production
+		}
+		slog.Warn("updater.exec_failed", "error", err)
+	}
+	slog.Info("updater.restarting_via_supervisor")
 	updaterExitFn(0)
 }
 

@@ -1,41 +1,45 @@
 package daemon
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 )
 
-func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
-	t.Parallel()
-
-	prevPrepare := prepareUpdateFn
-	prevExit := updaterExitFn
-	t.Cleanup(func() {
-		prepareUpdateFn = prevPrepare
-		updaterExitFn = prevExit
-	})
-
-	prepareUpdateFn = func() (bool, error) {
-		return true, nil
-	}
-
+func newTestMgr() (*Manager, <-chan struct{}) {
 	var cancelOnce sync.Once
 	stopped := make(chan struct{})
-	exited := make(chan int, 1)
 	done := make(chan struct{})
 	close(done)
-
 	mgr := &Manager{
 		cancel:           func() { cancelOnce.Do(func() { close(stopped) }) },
 		done:             done,
 		restartRequested: true,
 		restartReady:     make(chan struct{}),
 	}
+	return mgr, stopped
+}
 
-	updaterExitFn = func(code int) {
-		exited <- code
-	}
+func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
+	t.Parallel()
+
+	prevPrepare := prepareUpdateFn
+	prevExit := updaterExitFn
+	prevExec := updaterExecFn
+	t.Cleanup(func() {
+		prepareUpdateFn = prevPrepare
+		updaterExitFn = prevExit
+		updaterExecFn = prevExec
+	})
+
+	prepareUpdateFn = func() (bool, error) { return true, nil }
+	// exec fails → falls back to exit
+	updaterExecFn = func(string, []string, []string) error { return errors.New("exec disabled in test") }
+
+	mgr, stopped := newTestMgr()
+	exited := make(chan int, 1)
+	updaterExitFn = func(code int) { exited <- code }
 
 	finished := make(chan struct{})
 	go func() {
@@ -62,5 +66,48 @@ func TestCheckForUpdatesUsesShutdownPathWithoutWaitingForIdle(t *testing.T) {
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("CheckForUpdates should return after updaterExitFn")
+	}
+}
+
+func TestCheckForUpdatesExecSuccessSkipsExit(t *testing.T) {
+
+	prevPrepare := prepareUpdateFn
+	prevExit := updaterExitFn
+	prevExec := updaterExecFn
+	t.Cleanup(func() {
+		prepareUpdateFn = prevPrepare
+		updaterExitFn = prevExit
+		updaterExecFn = prevExec
+	})
+
+	prepareUpdateFn = func() (bool, error) { return true, nil }
+
+	execCalled := make(chan struct{}, 1)
+	// exec succeeds: signal and block (simulates process replacement)
+	updaterExecFn = func(string, []string, []string) error {
+		execCalled <- struct{}{}
+		// In real execve this never returns; return nil to simulate success path
+		return nil
+	}
+
+	exited := make(chan int, 1)
+	updaterExitFn = func(code int) { exited <- code }
+
+	mgr, _ := newTestMgr()
+
+	go CheckForUpdates(mgr)
+
+	select {
+	case <-execCalled:
+	case <-time.After(time.Second):
+		t.Fatal("updaterExecFn should have been called")
+	}
+
+	// exit should NOT be called when exec returns nil
+	select {
+	case code := <-exited:
+		t.Fatalf("updaterExitFn should not be called after successful exec, got code %d", code)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no exit
 	}
 }
