@@ -82,6 +82,89 @@ func TestGetTurnContextReturnsErrorWhenGitMetadataUnavailable(t *testing.T) {
 	}
 }
 
+func TestGitWritablePathsReturnsStandardRepoGitDirOnce(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+	initGitWorkspace(t, wsPath)
+
+	got, err := GitWritablePaths(wsPath)
+	if err != nil {
+		t.Fatalf("GitWritablePaths: %v", err)
+	}
+
+	want := gitOutput(t, wsPath, "rev-parse", "--path-format=absolute", "--git-dir")
+	if len(got) != 1 {
+		t.Fatalf("len(GitWritablePaths) = %d, want 1 (%v)", len(got), got)
+	}
+	if got[0] != want {
+		t.Fatalf("GitWritablePaths[0] = %q, want %q", got[0], want)
+	}
+}
+
+func TestGitWritablePathsReturnsWorktreeAdminAndCommonDirs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	mainPath := filepath.Join(root, "main")
+	if err := os.MkdirAll(mainPath, 0o755); err != nil {
+		t.Fatalf("mkdir main repo: %v", err)
+	}
+	initGitWorkspace(t, mainPath)
+
+	worktreePath := filepath.Join(root, "linked-worktree")
+	runGit(t, mainPath, "branch", "feature/worktree")
+	runGit(t, mainPath, "worktree", "add", worktreePath, "feature/worktree")
+
+	got, err := GitWritablePaths(worktreePath)
+	if err != nil {
+		t.Fatalf("GitWritablePaths: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(GitWritablePaths) = %d, want 2 (%v)", len(got), got)
+	}
+
+	wantGitDir := gitOutput(t, worktreePath, "rev-parse", "--path-format=absolute", "--git-dir")
+	wantCommonDir := gitOutput(t, worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if got[0] != wantGitDir {
+		t.Fatalf("GitWritablePaths[0] = %q, want %q", got[0], wantGitDir)
+	}
+	if got[1] != wantCommonDir {
+		t.Fatalf("GitWritablePaths[1] = %q, want %q", got[1], wantCommonDir)
+	}
+}
+
+func TestGitWritablePathsReturnsNilForPlainDirectory(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+
+	got, err := GitWritablePaths(wsPath)
+	if err != nil {
+		t.Fatalf("GitWritablePaths: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("GitWritablePaths = %v, want nil", got)
+	}
+}
+
+func TestGitWritablePathsReturnsErrorWhenGitMetadataUnavailable(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wsPath, ".git"), []byte("gitdir: "+filepath.Join(wsPath, ".missing")+"\n"), 0o644); err != nil {
+		t.Fatalf("write fake git file: %v", err)
+	}
+
+	_, err := GitWritablePaths(wsPath)
+	if err == nil {
+		t.Fatal("GitWritablePaths() error = nil, want git failure")
+	}
+	if !strings.Contains(err.Error(), "git rev-parse --path-format=absolute --git-dir") {
+		t.Fatalf("GitWritablePaths() error = %q, want git rev-parse context", err)
+	}
+}
+
 func TestFinishRunHonorsParentDrainDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -207,4 +290,15 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

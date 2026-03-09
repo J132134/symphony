@@ -341,7 +341,12 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	}
 
 	attempt.SetStatus(StatusLaunchingAgent)
-	agentCfg := buildAgentConfig(cfg)
+	agentCfg, err := buildAgentConfig(cfg, ws.Path)
+	if err != nil {
+		attempt.SetStatus(StatusFailed)
+		attempt.Error = err.Error()
+		return fmt.Errorf("build agent config: %w", err)
+	}
 
 	attempt.SetStatus(StatusInitializingSession)
 	threadID, err := runner.StartSession(ctx, ws.Path, agentCfg)
@@ -470,19 +475,25 @@ func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e a
 	slog.Debug("orchestrator.agent_event", "issue_id", issueID, "event", e.Name)
 }
 
-func buildAgentConfig(cfg *config.SymphonyConfig) *agent.Config {
-	return &agent.Config{
-		Command:              cfg.CodexCommand(),
-		ApprovalPolicy:       cfg.ApprovalPolicy(),
-		MaxTurns:             cfg.MaxTurns(),
-		TurnTimeoutMs:        cfg.TurnTimeoutMs(),
-		ReadTimeoutMs:        cfg.ReadTimeoutMs(),
-		ThreadStartTimeoutMs: cfg.ThreadStartTimeoutMs(),
-		StallTimeoutMs:       cfg.StallTimeoutMs(),
-		TurnSandboxPolicy:    cfg.TurnSandboxPolicy(),
-		ThreadSandbox:        cfg.ThreadSandbox(),
-		DynamicTools:         linearDynamicTools(),
+func buildAgentConfig(cfg *config.SymphonyConfig, workspacePath string) (*agent.Config, error) {
+	writableDirs, err := workspace.GitWritablePaths(workspacePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git writable paths: %w", err)
 	}
+
+	return &agent.Config{
+		Command:                cfg.CodexCommand(),
+		ApprovalPolicy:         cfg.ApprovalPolicy(),
+		MaxTurns:               cfg.MaxTurns(),
+		TurnTimeoutMs:          cfg.TurnTimeoutMs(),
+		ReadTimeoutMs:          cfg.ReadTimeoutMs(),
+		ThreadStartTimeoutMs:   cfg.ThreadStartTimeoutMs(),
+		StallTimeoutMs:         cfg.StallTimeoutMs(),
+		TurnSandboxPolicy:      cfg.TurnSandboxPolicy(),
+		ThreadSandbox:          cfg.ThreadSandbox(),
+		AdditionalWritableDirs: writableDirs,
+		DynamicTools:           linearDynamicTools(),
+	}, nil
 }
 
 func linearDynamicTools() []agent.DynamicToolSpec {

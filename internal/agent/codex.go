@@ -33,16 +33,17 @@ type DynamicToolHandler func(ctx context.Context, toolName string, input map[str
 
 // Config is passed to the runner per session.
 type Config struct {
-	Command              string
-	ApprovalPolicy       string
-	MaxTurns             int
-	TurnTimeoutMs        int
-	ReadTimeoutMs        int
-	ThreadStartTimeoutMs int
-	StallTimeoutMs       int
-	TurnSandboxPolicy    string
-	ThreadSandbox        string
-	DynamicTools         []DynamicToolSpec
+	Command                string
+	ApprovalPolicy         string
+	MaxTurns               int
+	TurnTimeoutMs          int
+	ReadTimeoutMs          int
+	ThreadStartTimeoutMs   int
+	StallTimeoutMs         int
+	TurnSandboxPolicy      string
+	ThreadSandbox          string
+	AdditionalWritableDirs []string
+	DynamicTools           []DynamicToolSpec
 }
 
 // TokenUsage is an alias for types.TokenUsage.
@@ -128,7 +129,7 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	r.sessionID = fmt.Sprintf("%d", time.Now().UnixNano())
 	r.lastInput, r.lastOutput, r.lastTotal = 0, 0, 0
 
-	launchCmd := buildLaunchCommand(cfg.Command)
+	launchCmd := buildLaunchCommand(cfg.Command, cfg.AdditionalWritableDirs)
 	slog.Info("agent.launch", "command", launchCmd, "session", r.sessionID)
 
 	cmd := exec.Command("bash", "-lc", launchCmd)
@@ -655,15 +656,39 @@ func (r *Runner) sendNotification(method string, params map[string]any) error {
 
 // -- helpers --
 
-func buildLaunchCommand(command string) string {
+func buildLaunchCommand(command string, writableDirs []string) string {
 	cmd := strings.TrimSpace(command)
 	if parts := strings.Fields(cmd); len(parts) > 0 {
 		base := parts[0]
 		if base == "codex" || strings.HasSuffix(base, "/codex") {
-			return cmd + " -c 'notify=[]'"
+			rest := strings.TrimSpace(strings.TrimPrefix(cmd, base))
+			var b strings.Builder
+			b.WriteString(base)
+			for _, dir := range writableDirs {
+				dir = strings.TrimSpace(dir)
+				if dir == "" {
+					continue
+				}
+				b.WriteString(" --add-dir ")
+				b.WriteString(shellQuote(dir))
+			}
+			if rest != "" {
+				b.WriteString(" ")
+				b.WriteString(rest)
+			}
+			b.WriteString(" -c ")
+			b.WriteString(shellQuote("notify=[]"))
+			return b.String()
 		}
 	}
 	return cmd
+}
+
+func shellQuote(v string) string {
+	if v == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(v, "'", `'"'"'`) + "'"
 }
 
 func resolveThreadSandbox(cfg *Config) string {

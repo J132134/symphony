@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,6 +140,35 @@ func TestParseRateLimitEventUsesThrottledWindowOnly(t *testing.T) {
 	}
 	if !event.ResetAt.Equal(primaryReset.UTC()) {
 		t.Fatalf("ResetAt = %v, want %v (primary reset, not secondary)", event.ResetAt, primaryReset.UTC())
+	}
+}
+
+func TestBuildLaunchCommandAddsWritableDirsForCodex(t *testing.T) {
+	got := buildLaunchCommand("codex app-server", []string{
+		"/tmp/repo/.git",
+		"/tmp/repo with space/.git/worktrees/foo",
+	})
+
+	for _, want := range []string{
+		"codex",
+		"app-server",
+		"-c 'notify=[]'",
+		"--add-dir '/tmp/repo/.git'",
+		"--add-dir '/tmp/repo with space/.git/worktrees/foo'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("buildLaunchCommand() = %q, want substring %q", got, want)
+		}
+	}
+	if strings.Index(got, "--add-dir '/tmp/repo/.git'") > strings.Index(got, "app-server") {
+		t.Fatalf("buildLaunchCommand() = %q, want --add-dir before app-server", got)
+	}
+}
+
+func TestBuildLaunchCommandSkipsWritableDirsForNonCodex(t *testing.T) {
+	got := buildLaunchCommand("claude", []string{"/tmp/repo/.git"})
+	if got != "claude" {
+		t.Fatalf("buildLaunchCommand() = %q, want %q", got, "claude")
 	}
 }
 
