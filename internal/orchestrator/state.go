@@ -29,8 +29,9 @@ const (
 )
 
 const (
-	RetryKindFailure  RetryKind = "failure"
-	RetryKindCapacity RetryKind = "capacity"
+	RetryKindFailure      RetryKind = "failure"
+	RetryKindCapacity     RetryKind = "capacity"
+	RetryKindContinuation RetryKind = "continuation"
 )
 
 const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
@@ -66,6 +67,7 @@ type RunAttempt struct {
 	Identifier     string
 	Attempt        int
 	FailureCount   int
+	Continuation   bool // true when this is a cross-session continuation (not a failure retry)
 	WorkspacePath  string
 	StartedAt      time.Time
 	Error          string

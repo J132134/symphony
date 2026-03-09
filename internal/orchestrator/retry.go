@@ -17,6 +17,10 @@ func (o *Orchestrator) scheduleCapacityRetry(ctx context.Context, cfg *config.Sy
 	o.scheduleRetry(ctx, cfg, RetryKindCapacity, issueID, identifier, attemptNum, failureCount, deferCount, errMsg)
 }
 
+func (o *Orchestrator) scheduleContinuationRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string) {
+	o.scheduleRetry(ctx, cfg, RetryKindContinuation, issueID, identifier, 1, 0, 0, "")
+}
+
 func (o *Orchestrator) rescheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, entry *RetryEntry, errMsg string) {
 	if entry == nil {
 		return
@@ -37,6 +41,8 @@ func (o *Orchestrator) scheduleRetry(ctx context.Context, cfg *config.SymphonyCo
 		maxBackoff := float64(cfg.MaxRetryBackoffMs())
 		backoffAttempt := max(failureCount, 1)
 		delayMs = int(math.Min(float64(10_000)*math.Pow(2, float64(backoffAttempt-1)), maxBackoff))
+	case RetryKindContinuation:
+		delayMs = 1000 // SPEC: short fixed delay of 1000 ms
 	case RetryKindCapacity:
 		delayMs = capacityRetryDelayMs
 	default:
@@ -163,7 +169,8 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 
 	o.releaseClaim(issueID)
 
-	if !o.dispatch(ctx, cfg, issue, entry.Attempt, entry.FailureCount) {
+	continuation := entry.Kind == RetryKindContinuation
+	if !o.dispatch(ctx, cfg, issue, entry.Attempt, entry.FailureCount, continuation) {
 		if until, _, paused := o.admissionPauseState(time.Now().UTC()); paused {
 			entry.Error = "rate limit pause"
 			o.scheduleRetryAfter(ctx, cfg, entry, time.Until(until))

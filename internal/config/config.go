@@ -277,7 +277,7 @@ func (c *SymphonyConfig) MaxAttempts() int {
 	return c.getInt("agent.max_attempts", 3)
 }
 func (c *SymphonyConfig) MaxTurns() int {
-	return c.getInt("agent.max_turns", 3)
+	return c.getInt("agent.max_turns", 20)
 }
 func (c *SymphonyConfig) MaxRetryBackoffMs() int {
 	return c.getInt("agent.max_retry_backoff_ms", 300_000)

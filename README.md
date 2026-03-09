@@ -259,7 +259,7 @@ agent:
 | `workspace.root` | `~/.symphony/workspaces` |
 | `agent.max_concurrent_agents` | `10` |
 | `agent.max_attempts` | `3` |
-| `agent.max_turns` | `3` |
+| `agent.max_turns` | `20` |
 | `agent.max_retry_backoff_ms` | `300000` (5분) |
 | `tracker.post_comments` | `true` |
 | `codex.command` | `codex app-server` |

@@ -97,7 +97,7 @@ func sortCandidates(issues []*types.Issue) {
 	})
 }
 
-func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum, failureCount int) bool {
+func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig, issue *types.Issue, attemptNum, failureCount int, continuation bool) bool {
 	if until, reason, paused := o.admissionPauseState(time.Now().UTC()); paused {
 		slog.Info("orchestrator.dispatch_paused", "project", o.name, "issue", issue.Identifier, "resume_at", until.Format(time.RFC3339), "reason", reason)
 		return false
@@ -133,6 +133,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		Identifier:     issue.Identifier,
 		Attempt:        attemptNum,
 		FailureCount:   failureCount,
+		Continuation:   continuation,
 		StartedAt:      time.Now().UTC(),
 		IssueState:     issue.State,
 		GlobalSlotHeld: globalSlotHeld,
@@ -256,7 +257,7 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 	}
 
 	if err == nil {
-		o.releaseClaim(issueID)
+		o.scheduleContinuationRetry(ctx, cfg, issueID, attempt.Identifier)
 	} else {
 		if attempt.Attempt >= cfg.MaxAttempts() {
 			o.releaseClaim(issueID)
@@ -310,16 +311,17 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	attempt.SetStatus(StatusBuildingPrompt)
 	initialTurnContext := o.loadTurnContext(issue, wsMgr, ws)
 	prompt, err := workflow.Render(wf, workflow.IssueContext{
-		ID:          issue.ID,
-		Identifier:  issue.Identifier,
-		Title:       issue.Title,
-		Description: issue.Description,
-		Priority:    issue.Priority,
-		State:       issue.State,
-		Labels:      issue.Labels,
-		URL:         issue.URL,
-		BranchName:  issue.BranchName,
-		TurnContext: initialTurnContext,
+		ID:           issue.ID,
+		Identifier:   issue.Identifier,
+		Title:        issue.Title,
+		Description:  issue.Description,
+		Priority:     issue.Priority,
+		State:        issue.State,
+		Labels:       issue.Labels,
+		URL:          issue.URL,
+		BranchName:   issue.BranchName,
+		TurnContext:  initialTurnContext,
+		Continuation: attempt.Continuation,
 	}, attempt.Attempt)
 	if err != nil {
 		attempt.SetStatus(StatusFailed)
