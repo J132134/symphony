@@ -136,6 +136,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		Continuation:   continuation,
 		StartedAt:      time.Now().UTC(),
 		IssueState:     issue.State,
+		IssueBranch:    issue.BranchName,
 		GlobalSlotHeld: globalSlotHeld,
 		Urgent:         urgent,
 		cancel:         cancel,
@@ -435,7 +436,8 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	runner.StopSession()
 	runnerStarted = false
 
-	if summary, err := collectWorkspaceSummary(ws.Path, cfg); err == nil {
+	attempt.FinishedAt = time.Now().UTC()
+	if summary, err := collectWorkspaceSummary(ws.Path, issue.BranchName); err == nil {
 		attempt.Summary = &summary
 	}
 

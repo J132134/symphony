@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -21,11 +20,13 @@ const feedbackCommentMarker = "<!-- symphony:feedback -->"
 
 type workspaceSummary struct {
 	Branch            string
+	IssueBranch       string
 	ModifiedFiles     []string
 	LastCommitHash    string
 	LastCommitSubject string
 	RemoteURL         string
 	PRURL             string
+	PRBranch          string
 }
 
 func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config.SymphonyConfig, tr *tracker.LinearClient, issueID string, attempt *RunAttempt) {
@@ -38,7 +39,7 @@ func (o *Orchestrator) maybePostSuccessFeedback(ctx context.Context, cfg *config
 	if attempt.Summary != nil {
 		summary = *attempt.Summary
 	} else {
-		summary, summaryErr = collectWorkspaceSummary(attempt.WorkspacePath, cfg)
+		summary, summaryErr = collectWorkspaceSummary(attempt.WorkspacePath, attempt.IssueBranch)
 	}
 
 	if cfg.TrackerPostComments() {
@@ -86,25 +87,31 @@ func (o *Orchestrator) maybePostFinalFailureFeedback(ctx context.Context, cfg *c
 
 func buildSuccessComment(cfg *config.SymphonyConfig, attempt *RunAttempt, summary workspaceSummary) (string, error) {
 	session := attempt.SessionSnapshot()
+	finishedAt := attempt.FinishedAt
+	if finishedAt.IsZero() {
+		finishedAt = time.Now().UTC()
+	}
 
 	lines := []string{
 		fmt.Sprintf("✅ **Symphony agent completed** (attempt %d, turn %d/%d)", attempt.Attempt, max(1, session.TurnCount), cfg.MaxTurns()),
 		"",
-		fmt.Sprintf("**Duration:** %s", humanDuration(time.Since(attempt.StartedAt))),
-		fmt.Sprintf("**Tokens:** %s (in: %s / out: %s)", formatInt(session.TotalTokens), formatInt(session.InputTokens), formatInt(session.OutputTokens)),
-		"",
-		"**Changes:**",
-		fmt.Sprintf("- Modified: %s", joinOrDefault(summary.ModifiedFiles, "none detected")),
+		fmt.Sprintf("**Duration:** %s", humanDuration(finishedAt.Sub(attempt.StartedAt))),
 	}
 
 	if summary.LastCommitHash != "" || summary.LastCommitSubject != "" {
-		lines = append(lines, fmt.Sprintf("- Last commit: `%s`", formatLastCommit(summary.LastCommitHash, summary.LastCommitSubject)))
+		lines = append(lines, fmt.Sprintf("**Last commit:** `%s`", formatLastCommit(summary.LastCommitHash, summary.LastCommitSubject)))
+	}
+	if hasTokenUsage(session) {
+		lines = append(lines, fmt.Sprintf("**Tokens:** %s (in: %s / out: %s)", formatInt(session.TotalTokens), formatInt(session.InputTokens), formatInt(session.OutputTokens)))
 	}
 	if summary.PRURL != "" {
-		lines = append(lines, fmt.Sprintf("- PR: %s", summary.PRURL))
+		lines = append(lines, fmt.Sprintf("**PR:** %s", summary.PRURL))
 	}
-	if summary.Branch != "" {
-		lines = append(lines, "", fmt.Sprintf("**Branch:** `%s`", escapeCode(summary.Branch)))
+	if branch := displayBranch(summary); branch != "" {
+		lines = append(lines, fmt.Sprintf("**Branch:** `%s`", escapeCode(branch)))
+	}
+	if len(summary.ModifiedFiles) > 0 {
+		lines = append(lines, "", "**Changes:**", fmt.Sprintf("- Modified: %s", strings.Join(summary.ModifiedFiles, ", ")))
 	}
 
 	return withFeedbackMarker(strings.Join(lines, "\n")), nil
@@ -118,14 +125,7 @@ func shouldAttachPRLink(cfg *config.SymphonyConfig, state string, summary worksp
 }
 
 func resolvePRLinkURL(summary workspaceSummary, lookup func(owner, repo, branch string) string) string {
-	owner, repo := parseGitHubRemote(summary.RemoteURL)
-	branch := strings.TrimSpace(summary.Branch)
-	if lookup != nil && owner != "" && repo != "" && branch != "" {
-		if actual := strings.TrimSpace(lookup(owner, repo, branch)); actual != "" {
-			return actual
-		}
-	}
-	return summary.PRURL
+	return strings.TrimSpace(summary.PRURL)
 }
 
 func lookupGitHubPRURL(owner, repo, branch string) string {
@@ -251,7 +251,7 @@ func latestFeedbackCommentTime(comment *types.Comment) time.Time {
 	return time.Time{}
 }
 
-func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (workspaceSummary, error) {
+func collectWorkspaceSummary(workspacePath, issueBranch string) (workspaceSummary, error) {
 	if strings.TrimSpace(workspacePath) == "" {
 		return workspaceSummary{}, fmt.Errorf("workspace path is empty")
 	}
@@ -279,12 +279,13 @@ func collectWorkspaceSummary(workspacePath string, cfg *config.SymphonyConfig) (
 
 	summary := workspaceSummary{
 		Branch:            strings.TrimSpace(branch),
+		IssueBranch:       strings.TrimSpace(issueBranch),
 		ModifiedFiles:     modified,
 		LastCommitHash:    strings.TrimSpace(firstLine(lastCommitLines, 0)),
 		LastCommitSubject: strings.TrimSpace(firstLine(lastCommitLines, 1)),
 		RemoteURL:         strings.TrimSpace(remoteURL),
 	}
-	summary.PRURL = buildPRURL(cfg, summary)
+	summary.PRURL, summary.PRBranch = resolveConfirmedPR(summary, lookupGitHubPRURL)
 	return summary, nil
 }
 
@@ -293,17 +294,7 @@ func changedFiles(workspacePath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	files := parseStatusPaths(statusOut)
-	if len(files) > 0 {
-		return files, nil
-	}
-
-	showOut, err := workspace.GitOutput(workspacePath, "show", "--pretty=format:", "--name-only", "HEAD")
-	if err != nil {
-		return nil, nil
-	}
-	return uniqueNonEmpty(strings.Split(showOut, "\n")), nil
+	return parseStatusPaths(statusOut), nil
 }
 
 func parseStatusPaths(out string) []string {
@@ -325,33 +316,17 @@ func parseStatusPaths(out string) []string {
 	return uniqueNonEmpty(files)
 }
 
-func buildPRURL(cfg *config.SymphonyConfig, summary workspaceSummary) string {
-	branch := strings.TrimSpace(summary.Branch)
-	if branch == "" {
-		return ""
-	}
-
-	if tpl := cfg.TrackerPRURLTemplate(); tpl != "" {
-		owner, repo := parseGitHubRemote(summary.RemoteURL)
-		repoPath := strings.TrimPrefix(strings.TrimSuffix(summary.RemoteURL, ".git"), "https://github.com/")
-		repoPath = strings.TrimPrefix(repoPath, "git@github.com:")
-		replacer := strings.NewReplacer(
-			"{branch}", url.PathEscape(branch),
-			"{branch_raw}", branch,
-			"{commit}", summary.LastCommitHash,
-			"{owner}", owner,
-			"{repo}", repo,
-			"{repo_path}", repoPath,
-			"{remote_url}", summary.RemoteURL,
-		)
-		return replacer.Replace(tpl)
-	}
-
+func resolveConfirmedPR(summary workspaceSummary, lookup func(owner, repo, branch string) string) (string, string) {
 	owner, repo := parseGitHubRemote(summary.RemoteURL)
-	if owner == "" || repo == "" {
-		return ""
+	if lookup == nil || owner == "" || repo == "" {
+		return "", ""
 	}
-	return fmt.Sprintf("https://github.com/%s/%s/pull/new/%s", owner, repo, url.PathEscape(branch))
+	for _, branch := range uniqueNonEmpty([]string{summary.IssueBranch, summary.Branch}) {
+		if actual := strings.TrimSpace(lookup(owner, repo, branch)); actual != "" {
+			return actual, branch
+		}
+	}
+	return "", ""
 }
 
 func parseGitHubRemote(raw string) (string, string) {
@@ -397,6 +372,29 @@ func formatLastCommit(hash, subject string) string {
 		return subject
 	default:
 		return shortHash
+	}
+}
+
+func hasTokenUsage(session LiveSession) bool {
+	return session.TotalTokens > 0 || session.InputTokens > 0 || session.OutputTokens > 0
+}
+
+func displayBranch(summary workspaceSummary) string {
+	if branch := strings.TrimSpace(summary.PRBranch); branch != "" {
+		return branch
+	}
+
+	workspaceBranch := strings.TrimSpace(summary.Branch)
+	issueBranch := strings.TrimSpace(summary.IssueBranch)
+	switch {
+	case workspaceBranch != "" && issueBranch != "" && workspaceBranch == issueBranch:
+		return workspaceBranch
+	case workspaceBranch != "" && issueBranch == "":
+		return workspaceBranch
+	case workspaceBranch == "" && issueBranch != "":
+		return issueBranch
+	default:
+		return ""
 	}
 }
 

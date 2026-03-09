@@ -911,7 +911,6 @@ func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	t.Parallel()
 
-	wsPath := initGitWorkspace(t)
 	recorder, server := newLinearRecorderServer(t)
 	defer server.Close()
 
@@ -933,16 +932,25 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	o := New("", 0, "alpha", nil)
 	o.tracker = client
 	attempt := &RunAttempt{
-		IssueID:       "issue-1",
-		Identifier:    "J-29",
-		Attempt:       1,
-		WorkspacePath: wsPath,
-		StartedAt:     time.Now().Add(-(3*time.Minute + 4*time.Second)),
+		IssueID:    "issue-1",
+		Identifier: "J-29",
+		Attempt:    1,
+		StartedAt:  time.Now().Add(-(3*time.Minute + 4*time.Second)),
+		FinishedAt: time.Now(),
 		Session: LiveSession{
 			TurnCount:    2,
 			InputTokens:  28000,
 			OutputTokens: 14100,
 			TotalTokens:  42100,
+		},
+		Summary: &workspaceSummary{
+			Branch:            "j-29-test",
+			IssueBranch:       "j-29-test",
+			ModifiedFiles:     []string{"foo.txt"},
+			LastCommitHash:    "1234567890abcdef",
+			LastCommitSubject: "feat: add foo",
+			PRURL:             "https://github.com/example/nonexistent-symphony-test/pull/123",
+			PRBranch:          "j-29-test",
 		},
 	}
 	attempt.SetStatus(StatusSucceeded)
@@ -961,10 +969,11 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	for _, want := range []string{
 		"✅ **Symphony agent completed** (attempt 1, turn 2/3)",
 		"**Tokens:** 42,100 (in: 28,000 / out: 14,100)",
-		"- Modified: foo.txt",
-		"- Last commit: `feat: add foo (",
-		"- PR: https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test",
+		"**Last commit:** `feat: add foo (1234567)`",
+		"**PR:** https://github.com/example/nonexistent-symphony-test/pull/123",
 		"**Branch:** `j-29-test`",
+		"**Changes:**",
+		"- Modified: foo.txt",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("comment body missing %q:\n%s", want, body)
@@ -976,7 +985,7 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	if recorder.linkCount() != 1 {
 		t.Fatalf("link count = %d, want 1", recorder.linkCount())
 	}
-	if got := recorder.lastLink(); got != "https://github.com/example/nonexistent-symphony-test/pull/new/j-29-test" {
+	if got := recorder.lastLink(); got != "https://github.com/example/nonexistent-symphony-test/pull/123" {
 		t.Fatalf("link url = %q, want PR url", got)
 	}
 
@@ -1219,42 +1228,85 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestResolvePRLinkURLPrefersExistingGitHubPR(t *testing.T) {
+func TestResolveConfirmedPRPrefersIssueBranch(t *testing.T) {
 	t.Parallel()
 
 	summary := workspaceSummary{
-		Branch:    "j-36-test",
-		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
-		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+		Branch:      "main",
+		IssueBranch: "j-36-test",
+		RemoteURL:   "https://github.com/example/nonexistent-symphony-test.git",
 	}
 
-	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
+	url, branch := resolveConfirmedPR(summary, func(owner, repo, branch string) string {
 		if owner != "example" || repo != "nonexistent-symphony-test" || branch != "j-36-test" {
 			t.Fatalf("unexpected lookup args: %s %s %s", owner, repo, branch)
 		}
 		return "https://github.com/example/nonexistent-symphony-test/pull/123"
 	})
 
-	if got != "https://github.com/example/nonexistent-symphony-test/pull/123" {
-		t.Fatalf("resolvePRLinkURL() = %q", got)
+	if url != "https://github.com/example/nonexistent-symphony-test/pull/123" {
+		t.Fatalf("resolveConfirmedPR() url = %q", url)
+	}
+	if branch != "j-36-test" {
+		t.Fatalf("resolveConfirmedPR() branch = %q", branch)
 	}
 }
 
-func TestResolvePRLinkURLFallsBackToSummaryPRURL(t *testing.T) {
+func TestBuildSuccessCommentOmitsUntrustedFields(t *testing.T) {
 	t.Parallel()
 
-	summary := workspaceSummary{
-		Branch:    "j-36-test",
-		RemoteURL: "https://github.com/example/nonexistent-symphony-test.git",
-		PRURL:     "https://github.com/example/nonexistent-symphony-test/pull/new/j-36-test",
+	cfg := config.New(map[string]any{
+		"agent": map[string]any{
+			"max_turns": 20,
+		},
+	})
+	finishedAt := time.Date(2026, 3, 9, 6, 0, 0, 0, time.UTC)
+	attempt := &RunAttempt{
+		Attempt:    1,
+		StartedAt:  finishedAt.Add(-(9*time.Minute + 44*time.Second)),
+		FinishedAt: finishedAt,
+		Session: LiveSession{
+			TurnCount: 20,
+		},
 	}
 
-	got := resolvePRLinkURL(summary, func(owner, repo, branch string) string {
-		return ""
+	body, err := buildSuccessComment(cfg, attempt, workspaceSummary{
+		Branch:            "main",
+		IssueBranch:       "j132134/j-54-status",
+		LastCommitHash:    "147e34f012345678",
+		LastCommitSubject: "fix: skip rate limit pause when no window is throttled",
 	})
+	if err != nil {
+		t.Fatalf("buildSuccessComment() error = %v", err)
+	}
 
-	if got != summary.PRURL {
-		t.Fatalf("resolvePRLinkURL() = %q, want %q", got, summary.PRURL)
+	for _, unwanted := range []string{
+		"**Tokens:**",
+		"**PR:**",
+		"**Branch:**",
+		"**Changes:**",
+		"`main`",
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("comment body unexpectedly contained %q:\n%s", unwanted, body)
+		}
+	}
+	if !strings.Contains(body, "**Last commit:** `fix: skip rate limit pause when no window is throttled (147e34f)`") {
+		t.Fatalf("comment body missing last commit:\n%s", body)
+	}
+}
+
+func TestChangedFilesDoesNotFallbackToHeadWhenWorktreeIsClean(t *testing.T) {
+	t.Parallel()
+
+	wsPath := initGitWorkspace(t)
+
+	files, err := changedFiles(wsPath)
+	if err != nil {
+		t.Fatalf("changedFiles() error = %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("changedFiles() = %v, want no files for a clean worktree", files)
 	}
 }
 

@@ -71,9 +71,11 @@ type RunAttempt struct {
 	NeedsContinuation bool // true when the session hit max_turns and should continue in a new session
 	WorkspacePath     string
 	StartedAt         time.Time
+	FinishedAt        time.Time
 	Error             string
 	Session           LiveSession
 	IssueState        string // last known tracker state for per-state concurrency
+	IssueBranch       string
 	GlobalSlotHeld    bool
 	Urgent            bool
 	Preempted         bool
