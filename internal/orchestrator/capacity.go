@@ -20,6 +20,37 @@ func (o *Orchestrator) runningConcurrentCountLocked(cfg *config.SymphonyConfig) 
 	return count
 }
 
+func (o *Orchestrator) runningConcurrentCountForStateLocked(cfg *config.SymphonyConfig, state string) int {
+	normState := config.NormalizeState(state)
+	count := 0
+	for _, attempt := range o.state.Running {
+		if attempt == nil || !countsTowardConcurrency(cfg, attempt.IssueState) {
+			continue
+		}
+		if config.NormalizeState(attempt.IssueState) == normState {
+			count++
+		}
+	}
+	return count
+}
+
+func (o *Orchestrator) hasProjectCapacityLocked(cfg *config.SymphonyConfig, issue *types.Issue) (bool, string) {
+	if issue == nil || isUrgentIssue(issue) || !countsTowardConcurrency(cfg, issue.State) {
+		return true, ""
+	}
+	if o.runningConcurrentCountLocked(cfg) >= o.state.MaxConcurrentAgents {
+		return false, "no slots"
+	}
+
+	byState := cfg.MaxConcurrentAgentsByState()
+	if limit, ok := byState[config.NormalizeState(issue.State)]; ok {
+		if o.runningConcurrentCountForStateLocked(cfg, issue.State) >= limit {
+			return false, "state quota reached"
+		}
+	}
+	return true, ""
+}
+
 func countsTowardConcurrency(cfg *config.SymphonyConfig, state string) bool {
 	return !isPauseState(cfg, state)
 }

@@ -2,6 +2,8 @@
 package config
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -282,31 +284,63 @@ func (c *SymphonyConfig) MaxTurns() int {
 func (c *SymphonyConfig) MaxRetryBackoffMs() int {
 	return c.getInt("agent.max_retry_backoff_ms", 300_000)
 }
-func (c *SymphonyConfig) MaxConcurrentAgentsByState() map[string]int {
-	v := c.get("agent.max_concurrent_agents_by_state")
+
+func parsePositiveInt(v any) (int, bool) {
+	switch t := v.(type) {
+	case int:
+		return t, t > 0
+	case int64:
+		n := int(t)
+		return n, n > 0
+	case float64:
+		if t <= 0 || math.Trunc(t) != t {
+			return 0, false
+		}
+		return int(t), true
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(t))
+		if err != nil || n <= 0 {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
+func parseStateQuotaMap(v any) (map[string]int, []string) {
+	if v == nil {
+		return nil, nil
+	}
 	m, ok := v.(map[string]any)
 	if !ok {
-		return nil
+		return nil, []string{"agent.max_concurrent_agents_by_state must be a map of state names to positive integers"}
 	}
-	result := make(map[string]int)
-	for k, val := range m {
-		key := NormalizeState(k)
-		switch t := val.(type) {
-		case int:
-			if t > 0 {
-				result[key] = t
-			}
-		case float64:
-			if int(t) > 0 {
-				result[key] = int(t)
-			}
-		case string:
-			n, err := strconv.Atoi(t)
-			if err == nil && n > 0 {
-				result[key] = n
-			}
+
+	result := make(map[string]int, len(m))
+	var errs []string
+	for rawState, rawLimit := range m {
+		state := NormalizeState(rawState)
+		if state == "" {
+			errs = append(errs, "agent.max_concurrent_agents_by_state contains an empty state name")
+			continue
 		}
+
+		limit, ok := parsePositiveInt(rawLimit)
+		if !ok {
+			errs = append(errs, fmt.Sprintf("agent.max_concurrent_agents_by_state.%s must be a positive integer", rawState))
+			continue
+		}
+		result[state] = limit
 	}
+	if len(result) == 0 {
+		return nil, errs
+	}
+	return result, errs
+}
+
+func (c *SymphonyConfig) MaxConcurrentAgentsByState() map[string]int {
+	result, _ := parseStateQuotaMap(c.get("agent.max_concurrent_agents_by_state"))
 	return result
 }
 
@@ -377,6 +411,8 @@ func (c *SymphonyConfig) Validate() []string {
 	if c.MaxConcurrentAgents() <= 0 {
 		errs = append(errs, "agent.max_concurrent_agents must be greater than 0")
 	}
+	_, quotaErrs := parseStateQuotaMap(c.get("agent.max_concurrent_agents_by_state"))
+	errs = append(errs, quotaErrs...)
 	if raw := c.get("daemon.drain_timeout_ms"); raw != nil && c.getInt("daemon.drain_timeout_ms", 0) <= 0 {
 		errs = append(errs, "daemon.drain_timeout_ms must be greater than 0")
 	}

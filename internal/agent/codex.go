@@ -240,8 +240,8 @@ func (r *Runner) RunTurn(
 		"title":          fmt.Sprintf("%s: %s", issueIdentifier, issueTitle),
 		"approvalPolicy": cfg.ApprovalPolicy,
 	}
-	if policy := normalizeSandboxPolicy(cfg.TurnSandboxPolicy); policy != "" {
-		turnParams["sandboxPolicy"] = map[string]any{"type": policy}
+	if policy := buildTurnSandboxPolicy(cfg); policy != nil {
+		turnParams["sandboxPolicy"] = policy
 	}
 
 	readTimeout := time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
@@ -704,6 +704,48 @@ func normalizeSandboxPolicy(p string) string {
 		return p
 	}
 	return ""
+}
+
+func buildTurnSandboxPolicy(cfg *Config) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+
+	switch normalizeSandboxPolicy(cfg.TurnSandboxPolicy) {
+	case "read-only":
+		return map[string]any{"type": "readOnly"}
+	case "workspace-write":
+		policy := map[string]any{"type": "workspaceWrite"}
+		if roots := sanitizeWritableRoots(cfg.AdditionalWritableDirs); len(roots) > 0 {
+			policy["writableRoots"] = roots
+		}
+		return policy
+	case "external-sandbox":
+		return map[string]any{"type": "externalSandbox"}
+	default:
+		return nil
+	}
+}
+
+func sanitizeWritableRoots(dirs []string) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+
+	roots := make([]string, 0, len(dirs))
+	seen := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		roots = append(roots, dir)
+	}
+	return roots
 }
 
 func parseRateLimitEvent(params map[string]any, now time.Time) *RateLimitEvent {

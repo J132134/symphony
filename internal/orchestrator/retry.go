@@ -156,13 +156,18 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 		return
 	}
 
+	capacityReason := ""
 	if !isUrgentIssue(issue) {
 		o.state.mu.Lock()
-		slots := o.state.MaxConcurrentAgents - o.runningConcurrentCountLocked(cfg)
+		hasCapacity, reason := o.hasProjectCapacityLocked(cfg, issue)
 		o.state.mu.Unlock()
+		capacityReason = reason
 
-		if slots <= 0 || !o.hasGlobalCapacityForIssue(cfg, issue) {
-			o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, "no slots")
+		if !hasCapacity || !o.hasGlobalCapacityForIssue(cfg, issue) {
+			if capacityReason == "" {
+				capacityReason = "no slots"
+			}
+			o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, capacityReason)
 			return
 		}
 	}
@@ -176,7 +181,17 @@ func (o *Orchestrator) onRetryTimer(ctx context.Context, cfg *config.SymphonyCon
 			o.scheduleRetryAfter(ctx, cfg, entry, time.Until(until))
 			return
 		}
-		o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, "no global slots")
+		if !o.hasGlobalCapacityForIssue(cfg, issue) {
+			o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, "no global slots")
+			return
+		}
+		o.state.mu.Lock()
+		_, capacityReason = o.hasProjectCapacityLocked(cfg, issue)
+		o.state.mu.Unlock()
+		if capacityReason == "" {
+			capacityReason = "no slots"
+		}
+		o.scheduleCapacityRetry(ctx, cfg, issueID, entry.Identifier, entry.Attempt, entry.FailureCount, entry.DeferCount+1, capacityReason)
 	}
 }
 

@@ -46,23 +46,9 @@ func (o *Orchestrator) canDispatch(cfg *config.SymphonyConfig, issue *types.Issu
 	if o.isBlockedByRunningUrgentLocked(cfg, issue) {
 		return false
 	}
-	if !urgent && o.runningConcurrentCountLocked(cfg) >= o.state.MaxConcurrentAgents {
-		return false
-	}
-
 	if !urgent {
-		if byState := cfg.MaxConcurrentAgentsByState(); len(byState) > 0 {
-			if limit, ok := byState[normState]; ok {
-				count := 0
-				for _, r := range o.state.Running {
-					if config.NormalizeState(r.IssueState) == normState {
-						count++
-					}
-				}
-				if count >= limit {
-					return false
-				}
-			}
+		if hasCapacity, _ := o.hasProjectCapacityLocked(cfg, issue); !hasCapacity {
+			return false
 		}
 	}
 
