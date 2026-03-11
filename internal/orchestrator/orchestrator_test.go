@@ -395,6 +395,68 @@ func TestCanDispatchAllowsUrgentWhenConcurrencyLimitReached(t *testing.T) {
 	}
 }
 
+func TestCanDispatchBlocksWhenStateQuotaReached(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 3
+	o.state.Running["issue-merging"] = &RunAttempt{
+		IssueID:    "issue-merging",
+		Identifier: "J-50",
+		IssueState: "Merging",
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress", "Merging"},
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents_by_state": map[string]any{
+				"Merging": 1,
+			},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-51", State: "Merging"}
+	if o.canDispatch(cfg, issue) {
+		t.Fatal("state-scoped quota should block another merging issue")
+	}
+}
+
+func TestCanDispatchAllowsOtherStatesToUseSharedSlots(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 2
+	o.state.Running["issue-merging"] = &RunAttempt{
+		IssueID:    "issue-merging",
+		Identifier: "J-50",
+		IssueState: "Merging",
+	}
+	o.state.mu.Unlock()
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"In Progress", "Merging"},
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents_by_state": map[string]any{
+				"Merging": 1,
+			},
+		},
+	})
+
+	issue := &types.Issue{ID: "issue-2", Identifier: "J-52", State: "In Progress"}
+	if !o.canDispatch(cfg, issue) {
+		t.Fatal("unspecified active states should keep using the shared project slots")
+	}
+}
+
 func TestCanDispatchBlocksNonUrgentWhileUrgentRunning(t *testing.T) {
 	t.Parallel()
 
@@ -1685,6 +1747,80 @@ func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 	}
 	if entry.DeferCount != 1 {
 		t.Fatalf("retry defer_count = %d, want 1", entry.DeferCount)
+	}
+	delay := entry.DueAt.Sub(before)
+	if delay < 4*time.Second || delay > 6*time.Second {
+		t.Fatalf("capacity retry delay = %v, want about 5s", delay)
+	}
+}
+
+func TestOnRetryTimerDefersWhenStateQuotaReached(t *testing.T) {
+	t.Parallel()
+
+	server := newLinearIssueStateServer(t, []*types.Issue{
+		{ID: "issue-1", Identifier: "J-62", State: "Merging"},
+	})
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Merging"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"project_slug":  "proj",
+			"active_states": []any{"Merging"},
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents": 2,
+			"max_concurrent_agents_by_state": map[string]any{
+				"Merging": 1,
+			},
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+
+	o.state.mu.Lock()
+	o.state.MaxConcurrentAgents = 2
+	o.state.Running["issue-busy"] = &RunAttempt{IssueID: "issue-busy", Identifier: "J-99", IssueState: "Merging"}
+	o.state.RetryQueue["issue-1"] = &RetryEntry{
+		IssueID:      "issue-1",
+		Identifier:   "J-62",
+		Kind:         RetryKindFailure,
+		Attempt:      2,
+		FailureCount: 1,
+		DueAt:        time.Now(),
+	}
+	o.state.Claimed["issue-1"] = struct{}{}
+	o.state.mu.Unlock()
+
+	before := time.Now()
+	o.onRetryTimer(context.Background(), cfg, "issue-1")
+	stopRetryTimer(t, o, "issue-1")
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+	entry, ok := o.state.RetryQueue["issue-1"]
+	if !ok {
+		t.Fatal("state quota wait should keep the issue in retry queue")
+	}
+	if entry.Kind != RetryKindCapacity {
+		t.Fatalf("retry kind = %q, want %q", entry.Kind, RetryKindCapacity)
+	}
+	if entry.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", entry.Attempt)
+	}
+	if entry.FailureCount != 1 {
+		t.Fatalf("retry failure_count = %d, want 1", entry.FailureCount)
+	}
+	if entry.DeferCount != 1 {
+		t.Fatalf("retry defer_count = %d, want 1", entry.DeferCount)
+	}
+	if entry.Error != "state quota reached" {
+		t.Fatalf("retry error = %q, want state quota reached", entry.Error)
 	}
 	delay := entry.DueAt.Sub(before)
 	if delay < 4*time.Second || delay > 6*time.Second {

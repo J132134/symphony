@@ -146,6 +146,30 @@ func TestDrainTimeoutHonorsExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestMaxConcurrentAgentsByStateNormalizesPositiveValues(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"agent": map[string]any{
+			"max_concurrent_agents_by_state": map[string]any{
+				" Merging ":   1,
+				"In Progress": "2",
+			},
+		},
+	})
+
+	got := cfg.MaxConcurrentAgentsByState()
+	if len(got) != 2 {
+		t.Fatalf("MaxConcurrentAgentsByState() len = %d, want 2 (%v)", len(got), got)
+	}
+	if got["merging"] != 1 {
+		t.Fatalf("MaxConcurrentAgentsByState()[merging] = %d, want 1", got["merging"])
+	}
+	if got["in progress"] != 2 {
+		t.Fatalf("MaxConcurrentAgentsByState()[in progress] = %d, want 2", got["in progress"])
+	}
+}
+
 func TestSymphonyConfigValidateRejectsEmptyWorkspaceRoot(t *testing.T) {
 	t.Parallel()
 
@@ -261,6 +285,44 @@ func TestSymphonyConfigValidateRejectsUncreatableWorkspaceRoot(t *testing.T) {
 
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "workspace.root")
+}
+
+func TestSymphonyConfigValidateRejectsInvalidStateConcurrencyLimits(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"tracker": map[string]any{
+			"kind":         "linear",
+			"api_key":      "token",
+			"project_slug": "proj",
+		},
+		"workspace": map[string]any{
+			"root": t.TempDir(),
+		},
+		"polling": map[string]any{
+			"interval_ms":      1000,
+			"idle_interval_ms": 1000,
+		},
+		"agent": map[string]any{
+			"max_concurrent_agents": 1,
+			"max_concurrent_agents_by_state": map[string]any{
+				"":            1,
+				"Merging":     0,
+				"In Progress": "two",
+				"QA":          1.5,
+			},
+			"max_turns": 1,
+		},
+		"codex": map[string]any{
+			"command": "codex app-server",
+		},
+	})
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "agent.max_concurrent_agents_by_state contains an empty state name")
+	requireErrorContaining(t, errs, "agent.max_concurrent_agents_by_state.Merging")
+	requireErrorContaining(t, errs, "agent.max_concurrent_agents_by_state.In Progress")
+	requireErrorContaining(t, errs, "agent.max_concurrent_agents_by_state.QA")
 }
 
 func TestTrackerAssigneeDefault(t *testing.T) {
