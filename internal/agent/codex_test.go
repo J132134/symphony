@@ -172,6 +172,69 @@ func TestBuildLaunchCommandSkipsWritableDirsForNonCodex(t *testing.T) {
 	}
 }
 
+func TestBuildTurnSandboxPolicyUsesWorkspaceWriteWritableRoots(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		TurnSandboxPolicy: "workspace-write",
+		AdditionalWritableDirs: []string{
+			"/tmp/repo/.git",
+			"  /tmp/repo/.git/worktrees/j-62  ",
+			"/tmp/repo/.git",
+			"",
+		},
+	}
+
+	got := buildTurnSandboxPolicy(cfg)
+	wantRoots := []string{
+		"/tmp/repo/.git",
+		"/tmp/repo/.git/worktrees/j-62",
+	}
+
+	if got["type"] != "workspaceWrite" {
+		t.Fatalf("sandboxPolicy.type = %v, want workspaceWrite", got["type"])
+	}
+	roots, ok := got["writableRoots"].([]string)
+	if !ok {
+		t.Fatalf("sandboxPolicy.writableRoots type = %T, want []string", got["writableRoots"])
+	}
+	if len(roots) != len(wantRoots) {
+		t.Fatalf("len(writableRoots) = %d, want %d (%v)", len(roots), len(wantRoots), roots)
+	}
+	for i, want := range wantRoots {
+		if roots[i] != want {
+			t.Fatalf("writableRoots[%d] = %q, want %q", i, roots[i], want)
+		}
+	}
+}
+
+func TestBuildTurnSandboxPolicyMapsSandboxTypesToProtocolValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{name: "read-only", input: "read-only", expect: "readOnly"},
+		{name: "external-sandbox", input: "external-sandbox", expect: "externalSandbox"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := buildTurnSandboxPolicy(&Config{TurnSandboxPolicy: tt.input})
+			if got["type"] != tt.expect {
+				t.Fatalf("sandboxPolicy.type = %v, want %s", got["type"], tt.expect)
+			}
+			if _, ok := got["writableRoots"]; ok {
+				t.Fatalf("sandboxPolicy.writableRoots present for %s, want omitted", tt.input)
+			}
+		})
+	}
+}
+
 func fillNotifQueue(r *Runner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}
