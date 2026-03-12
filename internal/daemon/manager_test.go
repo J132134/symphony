@@ -12,8 +12,9 @@ import (
 )
 
 type fakeManagedOrchestrator struct {
-	state *orchestrator.State
-	run   func(context.Context) error
+	state          *orchestrator.State
+	run            func(context.Context) error
+	webhookEnabled bool
 }
 
 func (f *fakeManagedOrchestrator) Run(ctx context.Context) error {
@@ -28,6 +29,7 @@ func (f *fakeManagedOrchestrator) BeginDrain()                    {}
 func (f *fakeManagedOrchestrator) DrainAndStop()                  {}
 func (f *fakeManagedOrchestrator) IsIdle() bool                   { return true }
 func (f *fakeManagedOrchestrator) GetState() *orchestrator.State  { return f.state }
+func (f *fakeManagedOrchestrator) SetWebhookMode(enabled bool)    { f.webhookEnabled = enabled }
 func (f *fakeManagedOrchestrator) TriggerRefresh(context.Context) {}
 
 func TestRequestRestartWhenIdleWaitsForRunningWork(t *testing.T) {
@@ -133,6 +135,42 @@ func TestManagerGetSummaryIncludesRunnerFailures(t *testing.T) {
 	}
 }
 
+func TestProjectRunnerEnablesWebhookModeOnOrchestrator(t *testing.T) {
+	t.Parallel()
+
+	var fake *fakeManagedOrchestrator
+	pr := newProjectRunner(
+		config.ProjectConfig{Name: "alpha", Workflow: "/tmp/alpha"},
+		nil,
+		config.ProjectHealthConfig{
+			RestartBudgetCount:         3,
+			RestartBudgetWindowMinutes: 15,
+			ProbeIntervalSeconds:       60,
+		},
+		true,
+	)
+	pr.newOrch = func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator {
+		fake = &fakeManagedOrchestrator{
+			state: orchestrator.NewState(),
+			run: func(ctx context.Context) error {
+				<-ctx.Done()
+				return nil
+			},
+		}
+		return fake
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pr.start(ctx)
+	waitFor(t, func() bool { return fake != nil && fake.webhookEnabled })
+	cancel()
+	pr.stop()
+
+	if fake == nil || !fake.webhookEnabled {
+		t.Fatal("expected project runner to enable webhook mode on orchestrator")
+	}
+}
+
 func TestManagerGetProjectsIgnoresNonFailureRetriesForErrorStatus(t *testing.T) {
 	t.Parallel()
 
@@ -195,6 +233,7 @@ func TestProjectRunnerQuarantinesAfterRestartBudget(t *testing.T) {
 			RestartBudgetWindowMinutes: 15,
 			ProbeIntervalSeconds:       11,
 		},
+		false,
 	)
 	pr.now = func() time.Time {
 		ts := base.Add(time.Duration(step) * time.Second)
@@ -257,6 +296,7 @@ func TestProjectRunnerProbeRecoversAndResetsCrashBudget(t *testing.T) {
 			RestartBudgetWindowMinutes: 15,
 			ProbeIntervalSeconds:       11,
 		},
+		false,
 	)
 	pr.now = func() time.Time {
 		ts := base.Add(time.Duration(step) * time.Second)

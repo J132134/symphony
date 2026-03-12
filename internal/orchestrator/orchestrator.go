@@ -43,10 +43,15 @@ type Orchestrator struct {
 
 	workers sync.WaitGroup
 
+	webhookMode bool
+	refreshCh   chan struct{}
+
 	// workersByIssue maps issue_id → running worker handle.
 	workersByIssue map[string]*workerHandle
 
 	workflowWatchDebounce time.Duration
+	after                 func(time.Duration) <-chan time.Time
+	tickFn                func(context.Context)
 	stopCh                chan struct{}
 	doneCh                chan struct{}
 }
@@ -69,8 +74,10 @@ func New(workflowPath string, port int, name string, globalLimiter *SessionLimit
 		name:                  name,
 		globalLimiter:         globalLimiter,
 		state:                 NewState(),
+		refreshCh:             make(chan struct{}, 1),
 		workersByIssue:        make(map[string]*workerHandle),
 		workflowWatchDebounce: filewatch.DefaultDebounce,
+		after:                 time.After,
 		stopCh:                make(chan struct{}),
 		doneCh:                make(chan struct{}),
 	}
@@ -175,6 +182,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.state.mu.Lock()
 	o.state.PollIntervalMs = cfg.PollIntervalMs()
 	o.state.PollIntervalIdleMs = cfg.PollIntervalIdleMs()
+	o.state.PollWebhookFallbackIntervalMs = cfg.PollWebhookFallbackIntervalMs()
 	o.state.MaxConcurrentAgents = cfg.MaxConcurrentAgents()
 	o.state.mu.Unlock()
 
@@ -244,7 +252,20 @@ func (o *Orchestrator) IsIdle() bool {
 	return len(o.state.Running) == 0 && len(o.state.RetryQueue) == 0
 }
 
-func (o *Orchestrator) TriggerRefresh(ctx context.Context) { go o.tick(ctx) }
+func (o *Orchestrator) TriggerRefresh(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case o.refreshCh <- struct{}{}:
+	default:
+	}
+}
+
+func (o *Orchestrator) SetWebhookMode(enabled bool) {
+	o.mu.Lock()
+	o.webhookMode = enabled
+	o.mu.Unlock()
+}
 
 func (o *Orchestrator) currentConfig() *config.SymphonyConfig {
 	o.mu.Lock()
@@ -269,28 +290,50 @@ func isPauseState(cfg *config.SymphonyConfig, state string) bool {
 	return cfg.PauseNorm()[config.NormalizeState(state)]
 }
 
+func (o *Orchestrator) runTick(ctx context.Context) {
+	if o.tickFn != nil {
+		o.tickFn(ctx)
+		return
+	}
+	o.tick(ctx)
+}
+
+func (o *Orchestrator) computeInterval() int {
+	o.mu.Lock()
+	webhookMode := o.webhookMode
+	o.mu.Unlock()
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if webhookMode {
+		return o.state.PollWebhookFallbackIntervalMs
+	}
+
+	active := len(o.state.Running) > 0 || len(o.state.RetryQueue) > 0
+	if active {
+		return o.state.PollIntervalMs
+	}
+	return o.state.PollIntervalIdleMs
+}
+
 // -- poll loop --
 
 func (o *Orchestrator) pollLoop(ctx context.Context) error {
-	o.tick(ctx)
+	o.runTick(ctx)
 
 	for {
-		o.state.mu.Lock()
-		active := len(o.state.Running) > 0 || len(o.state.RetryQueue) > 0
-		intervalMs := o.state.PollIntervalIdleMs
-		if active {
-			intervalMs = o.state.PollIntervalMs
-		}
-		o.state.mu.Unlock()
+		intervalMs := o.computeInterval()
 
 		select {
 		case <-o.stopCh:
 			return o.gracefulStop(o.isDraining())
 		case <-ctx.Done():
 			return o.gracefulStop(false)
-		case <-time.After(time.Duration(intervalMs) * time.Millisecond):
+		case <-o.refreshCh:
+		case <-o.after(time.Duration(intervalMs) * time.Millisecond):
 		}
-		o.tick(ctx)
+		o.runTick(ctx)
 	}
 }
 
@@ -451,6 +494,7 @@ func (o *Orchestrator) reloadWorkflow() error {
 	o.state.mu.Lock()
 	o.state.PollIntervalMs = cfg.PollIntervalMs()
 	o.state.PollIntervalIdleMs = cfg.PollIntervalIdleMs()
+	o.state.PollWebhookFallbackIntervalMs = cfg.PollWebhookFallbackIntervalMs()
 	o.state.MaxConcurrentAgents = cfg.MaxConcurrentAgents()
 	o.state.mu.Unlock()
 	return nil

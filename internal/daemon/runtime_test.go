@@ -432,6 +432,54 @@ func TestRuntimeSwapStopsOldBeforeStartingNewWhenStatusServerPortIsReused(t *tes
 	}
 }
 
+func TestRuntimeSwapStopsOldBeforeStartingNewWhenWebhookPortIsReused(t *testing.T) {
+	t.Parallel()
+
+	port := 7778
+	alpha := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		Webhook:  config.WebhookConfig{Enabled: true, Port: port, BindAddress: "127.0.0.1"},
+	}
+	beta := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		Webhook:  config.WebhookConfig{Enabled: true, Port: port, BindAddress: "127.0.0.1"},
+	}
+
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "stop:alpha", "start:beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
 func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
 	t.Parallel()
 
@@ -452,9 +500,9 @@ func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
 
 			done := make(chan struct{})
 			return &managedRuntime{
-				cfg: cfg,
+				cfg:    cfg,
 				cancel: func() { close(done) },
-				done: done,
+				done:   done,
 			}, nil
 		},
 	}
@@ -482,6 +530,27 @@ func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
 	}
 	if len(ptrs) != 2 || ptrs[0] != ptrs[1] {
 		t.Fatalf("expected limiter pointer to be shared, got %v", ptrs)
+	}
+}
+
+func TestCanReloadProjectsIncrementallyRejectsWebhookChanges(t *testing.T) {
+	t.Parallel()
+
+	prev := &config.DaemonConfig{
+		AutoUpdate:    config.AutoUpdateConfig{Enabled: true, IntervalMinutes: 30},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:       config.WebhookConfig{Enabled: false, Port: 7778, BindAddress: "127.0.0.1"},
+		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
+	}
+	next := &config.DaemonConfig{
+		AutoUpdate:    prev.AutoUpdate,
+		StatusServer:  prev.StatusServer,
+		Webhook:       config.WebhookConfig{Enabled: true, Port: 7778, BindAddress: "127.0.0.1"},
+		ProjectHealth: prev.ProjectHealth,
+	}
+
+	if canReloadProjectsIncrementally(prev, next) {
+		t.Fatal("webhook config changes should require full runtime reload")
 	}
 }
 

@@ -109,6 +109,24 @@ func TestPauseStatesOverrideAndNormalize(t *testing.T) {
 	}
 }
 
+func TestPollWebhookFallbackIntervalDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	defaults := New(nil)
+	if got := defaults.PollWebhookFallbackIntervalMs(); got != 300_000 {
+		t.Fatalf("PollWebhookFallbackIntervalMs() = %d, want 300000", got)
+	}
+
+	override := New(map[string]any{
+		"polling": map[string]any{
+			"webhook_fallback_interval_ms": 123_000,
+		},
+	})
+	if got := override.PollWebhookFallbackIntervalMs(); got != 123_000 {
+		t.Fatalf("PollWebhookFallbackIntervalMs() = %d, want 123000", got)
+	}
+}
+
 func TestDrainTimeoutDefaultsToStallPlusHooks(t *testing.T) {
 	t.Parallel()
 
@@ -201,8 +219,9 @@ func TestSymphonyConfigValidateRejectsInvalidRuntimeValues(t *testing.T) {
 			"root": t.TempDir(),
 		},
 		"polling": map[string]any{
-			"interval_ms":      0,
-			"idle_interval_ms": -1,
+			"interval_ms":                  0,
+			"idle_interval_ms":             -1,
+			"webhook_fallback_interval_ms": 0,
 		},
 		"agent": map[string]any{
 			"max_concurrent_agents": 0,
@@ -216,6 +235,7 @@ func TestSymphonyConfigValidateRejectsInvalidRuntimeValues(t *testing.T) {
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "polling.interval_ms")
 	requireErrorContaining(t, errs, "idle_interval_ms")
+	requireErrorContaining(t, errs, "polling.webhook_fallback_interval_ms")
 	requireErrorContaining(t, errs, "agent.max_concurrent_agents")
 	requireErrorContaining(t, errs, "agent.max_turns")
 }

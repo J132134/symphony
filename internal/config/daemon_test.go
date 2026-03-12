@@ -109,6 +109,82 @@ func TestLoadDaemonConfigOverridesProjectHealth(t *testing.T) {
 	}
 }
 
+func TestLoadDaemonConfigUsesWebhookDefaults(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "projects:\n  - name: alpha\n    workflow: " + workflowPath + "\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Webhook.Enabled {
+		t.Fatal("Webhook.Enabled should default to false")
+	}
+	if got := cfg.Webhook.Port; got != 7778 {
+		t.Fatalf("Webhook.Port = %d, want 7778", got)
+	}
+	if got := cfg.Webhook.BindAddress; got != "127.0.0.1" {
+		t.Fatalf("Webhook.BindAddress = %q, want 127.0.0.1", got)
+	}
+	if got := cfg.Webhook.SigningSecret; got != "" {
+		t.Fatalf("Webhook.SigningSecret = %q, want empty", got)
+	}
+}
+
+func TestLoadDaemonConfigOverridesWebhook(t *testing.T) {
+	t.Setenv("LINEAR_WEBHOOK_SECRET", "top-secret")
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "" +
+		"projects:\n" +
+		"  - name: alpha\n" +
+		"    workflow: " + workflowPath + "\n" +
+		"webhook:\n" +
+		"  enabled: true\n" +
+		"  port: 8787\n" +
+		"  bind_address: 0.0.0.0\n" +
+		"  signing_secret: $LINEAR_WEBHOOK_SECRET\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadDaemonConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if !cfg.Webhook.Enabled {
+		t.Fatal("Webhook.Enabled = false, want true")
+	}
+	if got := cfg.Webhook.Port; got != 8787 {
+		t.Fatalf("Webhook.Port = %d, want 8787", got)
+	}
+	if got := cfg.Webhook.BindAddress; got != "0.0.0.0" {
+		t.Fatalf("Webhook.BindAddress = %q, want 0.0.0.0", got)
+	}
+	if got := cfg.Webhook.SigningSecret; got != "top-secret" {
+		t.Fatalf("Webhook.SigningSecret = %q, want top-secret", got)
+	}
+}
+
 func TestDaemonConfigValidateRejectsInvalidConfiguredSessionLimit(t *testing.T) {
 	t.Parallel()
 
@@ -140,6 +216,29 @@ func TestDaemonConfigValidateRejectsInvalidProjectHealth(t *testing.T) {
 	if len(errs) < 3 {
 		t.Fatalf("Validate() = %v, want project health errors", errs)
 	}
+}
+
+func TestDaemonConfigValidateRejectsInvalidWebhookConfiguration(t *testing.T) {
+	t.Parallel()
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{Name: "alpha", Workflow: "/tmp/workflow.md"}},
+		StatusServer: StatusServerConfig{
+			Enabled: true,
+			Port:    7778,
+		},
+		Webhook: WebhookConfig{
+			Enabled: true,
+			Port:    0,
+		},
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "webhook.port is required")
+
+	cfg.Webhook.Port = 7778
+	errs = cfg.Validate()
+	requireErrorContaining(t, errs, "webhook.port must not match status_server.port")
 }
 
 func TestLoadDaemonConfigPreservesEmptyWorkflowForValidation(t *testing.T) {

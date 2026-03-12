@@ -228,6 +228,9 @@ func (c *SymphonyConfig) PollIntervalMs() int {
 func (c *SymphonyConfig) PollIntervalIdleMs() int {
 	return c.getInt("polling.idle_interval_ms", 60_000)
 }
+func (c *SymphonyConfig) PollWebhookFallbackIntervalMs() int {
+	return c.getInt("polling.webhook_fallback_interval_ms", 300_000)
+}
 
 // -- Workspace --
 
@@ -404,6 +407,9 @@ func (c *SymphonyConfig) Validate() []string {
 	}
 	if c.PollIntervalIdleMs() < c.PollIntervalMs() {
 		errs = append(errs, "polling.idle_interval_ms must be greater than or equal to polling.interval_ms")
+	}
+	if raw := c.get("polling.webhook_fallback_interval_ms"); raw != nil && c.PollWebhookFallbackIntervalMs() <= 0 {
+		errs = append(errs, "polling.webhook_fallback_interval_ms must be greater than 0")
 	}
 	if c.MaxTurns() <= 0 {
 		errs = append(errs, "agent.max_turns must be greater than 0")

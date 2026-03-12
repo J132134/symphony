@@ -147,6 +147,12 @@ status_server:
   enabled: true
   port: 7777
 
+webhook:
+  enabled: false
+  port: 7778
+  bind_address: 127.0.0.1
+  signing_secret: $LINEAR_WEBHOOK_SECRET
+
 auto_update:
   enabled: true
   interval_minutes: 30
@@ -161,13 +167,31 @@ symphony daemon --config /path/to/config.yaml
 symphony menubar
 ```
 
-`symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버와 update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
+`symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `webhook`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버, webhook 서버, update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
 
 `config.yaml` 안의 상대 경로(`projects[].workflow`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다.
 
 `agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`와 `agent.max_concurrent_agents_by_state`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 전체 제한`, `상태별 제한`, `데몬 전체 제한`을 모두 만족해야 한다.
 
 각 프로젝트의 `WORKFLOW.md`에는 `daemon.drain_timeout_ms`를 둘 수 있다. graceful drain의 기본값은 `codex.stall_timeout_ms + hooks.timeout_ms`이며, hot-reload나 shutdown 중에는 새 작업을 막은 뒤 현재 turn/tool call과 `after_run`, `before_remove` 훅이 이 상한 안에서 끝나기를 기다린다. 상한을 넘기면 Codex subprocess는 `SIGTERM`, 10초 후 `SIGKILL` 순서로 종료된다. full runtime reload는 `new runtime start -> old runtime drain` 순서로 실행돼 세션 공백을 줄인다.
+
+## Webhook 연동
+
+Linear webhook은 데몬 모드에서만 사용된다. webhook이 켜지면 각 프로젝트 orchestrator는 짧은 active/idle 폴링 대신 `polling.webhook_fallback_interval_ms` 간격의 장주기 폴백 폴링만 유지하고, 실제 즉시 refresh는 `/webhook/linear` 요청으로 트리거된다.
+
+```yaml
+webhook:
+  enabled: true
+  port: 7778
+  bind_address: 127.0.0.1
+  signing_secret: $LINEAR_WEBHOOK_SECRET
+```
+
+Linear에서 `Settings -> API -> Webhooks`로 들어가 URL을 `https://<public-host>/symphony/webhook/linear` 형태로 등록하면 된다. Symphony는 `/webhook/linear`를 직접 수신하고, reverse proxy가 `/symphony` 접두사를 제거하는 구조를 가정한다.
+
+외부 공개 HTTPS 엔드포인트와 reverse proxy(Caddy, Tailscale Funnel 등)는 Symphony 저장소 범위 밖에서 관리한다. 일반적인 구성은 `handle_path /symphony/*`를 `127.0.0.1:7778`로 프록시하고, Caddy 헬스체크는 `GET /symphony/webhook/health`에 연결하는 방식이다.
+
+`webhook.signing_secret`를 비워두면 개발 모드로 동작하며, 서명 검증 없이 200을 반환하고 refresh를 수행한다. 값이 있으면 `Linear-Signature` HMAC-SHA256 검증에 성공한 Issue 이벤트만 refresh를 트리거한다. 검증 실패나 잘못된 payload는 재시도를 피하기 위해 항상 200으로 응답하고 로그만 남긴다.
 
 ## 에이전트 선택
 
@@ -279,6 +303,7 @@ agent:
 | 항목 | 기본값 |
 |---|---|
 | `polling.interval_ms` | `10000` (10초) |
+| `polling.webhook_fallback_interval_ms` | `300000` (5분) |
 | `workspace.root` | `~/.symphony/workspaces` |
 | `agent.max_concurrent_agents` | `10` |
 | `agent.max_concurrent_agents_by_state` | `없음` |
@@ -297,13 +322,23 @@ agent:
 | 항목 | 기본값 |
 |---|---|
 | `agent.max_total_concurrent_sessions` | `동적` (`NumCPU() <= 2` → `1`, `<= 4` → `2`, 그 외 `NumCPU()/2`, 최대 `8`) |
+| `webhook.enabled` | `false` |
+| `webhook.port` | `7778` |
+| `webhook.bind_address` | `127.0.0.1` |
+| `webhook.signing_secret` | `없음` |
 
 ## 동작 흐름
 
 ```
-Linear 폴링 (interval_ms마다)
+Linear webhook (`/webhook/linear`)
+  ↓
+즉시 refresh trigger
   ↓
 활성 이슈 fetch (active_states 필터)
+  ↑
+폴백 폴링 (`webhook_fallback_interval_ms`, daemon webhook 모드일 때)
+  또는
+일반 폴링 (`interval_ms` / `idle_interval_ms`)
   ↓
 우선순위 정렬: priority 오름차순 → 생성일 오래된 순 → identifier 사전순
   ↓
@@ -357,6 +392,7 @@ symphony/
 │   ├── tracker/        # Linear GraphQL 클라이언트
 │   ├── update/         # GitHub Releases 업데이트 체커
 │   ├── version/        # 버전 정보
+│   ├── webhook/        # Linear webhook 수신 서버
 │   ├── workflow/       # WORKFLOW.md 로드 + 템플릿 렌더링
 │   └── workspace/      # 이슈별 디렉토리 관리 + hooks
 ├── scripts/            # LaunchAgent plist 템플릿

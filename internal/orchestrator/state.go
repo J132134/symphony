@@ -300,10 +300,11 @@ func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {
 type State struct {
 	mu sync.Mutex
 
-	PollIntervalMs      int
-	PollIntervalIdleMs  int
-	MaxConcurrentAgents int
-	Draining            bool
+	PollIntervalMs                int
+	PollIntervalIdleMs            int
+	PollWebhookFallbackIntervalMs int
+	MaxConcurrentAgents           int
+	Draining                      bool
 
 	Running    map[string]*RunAttempt
 	Claimed    map[string]struct{}
@@ -324,13 +325,14 @@ type State struct {
 
 func NewState() *State {
 	return &State{
-		PollIntervalMs:      10_000,
-		PollIntervalIdleMs:  60_000,
-		MaxConcurrentAgents: 10,
-		Running:             make(map[string]*RunAttempt),
-		Claimed:             make(map[string]struct{}),
-		RetryQueue:          make(map[string]*RetryEntry),
-		Abandoned:           make(map[string]*AbandonedEntry),
+		PollIntervalMs:                10_000,
+		PollIntervalIdleMs:            60_000,
+		PollWebhookFallbackIntervalMs: 300_000,
+		MaxConcurrentAgents:           10,
+		Running:                       make(map[string]*RunAttempt),
+		Claimed:                       make(map[string]struct{}),
+		RetryQueue:                    make(map[string]*RetryEntry),
+		Abandoned:                     make(map[string]*AbandonedEntry),
 	}
 }
 

@@ -25,6 +25,13 @@ type StatusServerConfig struct {
 	Port    int
 }
 
+type WebhookConfig struct {
+	Enabled       bool
+	Port          int
+	BindAddress   string
+	SigningSecret string
+}
+
 type ProjectHealthConfig struct {
 	RestartBudgetCount         int
 	RestartBudgetWindowMinutes int
@@ -40,6 +47,7 @@ type DaemonConfig struct {
 	AutoUpdate    AutoUpdateConfig
 	Agent         DaemonAgentConfig
 	StatusServer  StatusServerConfig
+	Webhook       WebhookConfig
 	ProjectHealth ProjectHealthConfig
 	ConfigPath    string
 
@@ -117,6 +125,28 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 		}
 	}
 
+	// webhook
+	cfg.Webhook = WebhookConfig{
+		Enabled:       false,
+		Port:          7778,
+		BindAddress:   "127.0.0.1",
+		SigningSecret: "",
+	}
+	if wh, ok := raw["webhook"].(map[string]any); ok {
+		if enabled, ok := wh["enabled"].(bool); ok {
+			cfg.Webhook.Enabled = enabled
+		}
+		if port, ok := wh["port"]; ok {
+			cfg.Webhook.Port = toInt(port, cfg.Webhook.Port)
+		}
+		if bind, ok := wh["bind_address"].(string); ok {
+			cfg.Webhook.BindAddress = bind
+		}
+		if secret, ok := wh["signing_secret"].(string); ok {
+			cfg.Webhook.SigningSecret = resolveEnvString(secret)
+		}
+	}
+
 	cfg.ProjectHealth = ProjectHealthConfig{
 		RestartBudgetCount:         3,
 		RestartBudgetWindowMinutes: 15,
@@ -162,6 +192,15 @@ func (c *DaemonConfig) Validate() []string {
 	if c.StatusServer.Enabled {
 		errs = append(errs, validateTCPPortAvailable(c.StatusServer.Port, "status_server.port")...)
 	}
+	if c.Webhook.Enabled {
+		if c.Webhook.Port == 0 {
+			errs = append(errs, "webhook.port is required when webhook.enabled is true")
+		}
+		if c.StatusServer.Enabled && c.Webhook.Port == c.StatusServer.Port {
+			errs = append(errs, "webhook.port must not match status_server.port when both servers are enabled")
+		}
+		errs = append(errs, validateTCPPortAvailable(c.Webhook.Port, "webhook.port")...)
+	}
 	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
 		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
 	}
@@ -184,7 +223,6 @@ func (c *DaemonConfig) MaxTotalConcurrentSessions() int {
 	return c.Agent.MaxTotalConcurrentSessions
 }
 
-
 func DefaultMaxTotalConcurrentSessions() int {
 	cpus := runtime.NumCPU()
 	switch {
@@ -205,9 +243,7 @@ func resolvePath(baseDir, v string) string {
 	if strings.TrimSpace(v) == "" {
 		return ""
 	}
-	if len(v) > 0 && v[0] == '$' {
-		v = os.Getenv(v[1:])
-	}
+	v = resolveEnvString(v)
 	if len(v) > 0 && v[0] == '~' {
 		home, _ := os.UserHomeDir()
 		v = home + v[1:]
@@ -220,6 +256,13 @@ func resolvePath(baseDir, v string) string {
 		return v
 	}
 	return abs
+}
+
+func resolveEnvString(v string) string {
+	if strings.HasPrefix(v, "$") {
+		return os.Getenv(v[1:])
+	}
+	return v
 }
 
 func toInt(v any, def int) int {

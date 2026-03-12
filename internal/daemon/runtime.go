@@ -12,6 +12,7 @@ import (
 	"symphony/internal/filewatch"
 	"symphony/internal/orchestrator"
 	"symphony/internal/status"
+	"symphony/internal/webhook"
 )
 
 const defaultConfigWatchDebounce = filewatch.DefaultDebounce
@@ -121,12 +122,20 @@ func (r *Runtime) validateReloadConfig(cfg *config.DaemonConfig) []string {
 	current := r.current
 	r.mu.Unlock()
 
-	if current == nil || current.cfg == nil || !reuseCurrentStatusServerPort(current.cfg, cfg) {
+	if current == nil || current.cfg == nil {
+		return cfg.Validate()
+	}
+	if !reuseCurrentStatusServerPort(current.cfg, cfg) && !reuseCurrentWebhookPort(current.cfg, cfg) {
 		return cfg.Validate()
 	}
 
 	cloned := *cfg
-	cloned.StatusServer.Enabled = false
+	if reuseCurrentStatusServerPort(current.cfg, cfg) {
+		cloned.StatusServer.Enabled = false
+	}
+	if reuseCurrentWebhookPort(current.cfg, cfg) {
+		cloned.Webhook.Enabled = false
+	}
 	return cloned.Validate()
 }
 
@@ -139,6 +148,15 @@ func reuseCurrentStatusServerPort(current, next *config.DaemonConfig) bool {
 		current.StatusServer.Port == next.StatusServer.Port
 }
 
+func reuseCurrentWebhookPort(current, next *config.DaemonConfig) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	return current.Webhook.Enabled &&
+		next.Webhook.Enabled &&
+		current.Webhook.Port == next.Webhook.Port
+}
+
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
 	if r.limiter == nil {
 		r.limiter = orchestrator.NewSessionLimiter(cfg.MaxTotalConcurrentSessions())
@@ -147,14 +165,14 @@ func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
 
 	r.mu.Lock()
 	prev := r.current
-	sameStatusPort := prev != nil && reuseCurrentStatusServerPort(prev.cfg, cfg)
-	if sameStatusPort {
+	sameBoundPort := prev != nil && (reuseCurrentStatusServerPort(prev.cfg, cfg) || reuseCurrentWebhookPort(prev.cfg, cfg))
+	if sameBoundPort {
 		r.current = nil
 	}
 	r.mu.Unlock()
 
 	nextParent := context.WithValue(parent, runtimeLimiterKey{}, r.limiter)
-	if sameStatusPort {
+	if sameBoundPort {
 		prev.stop()
 		next, err := r.startRuntime(nextParent, cfg)
 		if err != nil {
@@ -235,6 +253,25 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 		}()
 	}
 
+	if cfg.Webhook.Enabled {
+		if strings.TrimSpace(cfg.Webhook.SigningSecret) == "" {
+			slog.Warn("webhook_server.signing_secret_missing", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress)
+		}
+		srv := webhook.NewServer(
+			webhook.NewHandler(cfg.Webhook.SigningSecret, mgr),
+			cfg.Webhook.Port,
+			cfg.Webhook.BindAddress,
+		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("webhook_server.error", "error", err)
+			}
+		}()
+		slog.Info("webhook_server.started", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress)
+	}
+
 	var stopUpdate chan struct{}
 	if cfg.AutoUpdate.Enabled {
 		stopUpdate = make(chan struct{})
@@ -259,6 +296,7 @@ func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
 	}
 	return prev.AutoUpdate == next.AutoUpdate &&
 		prev.StatusServer == next.StatusServer &&
+		prev.Webhook == next.Webhook &&
 		prev.ProjectHealth == next.ProjectHealth
 }
 

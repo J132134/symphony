@@ -23,6 +23,7 @@ type managedOrchestrator interface {
 	DrainAndStop()
 	IsIdle() bool
 	GetState() *orchestrator.State
+	SetWebhookMode(bool)
 	TriggerRefresh(context.Context)
 }
 
@@ -44,13 +45,14 @@ type projectRunnerSnapshot struct {
 
 // projectRunner manages the lifecycle of one Orchestrator with auto-restart.
 type projectRunner struct {
-	proj      config.ProjectConfig
-	limiter   *orchestrator.SessionLimiter
-	healthCfg config.ProjectHealthConfig
-	now       func() time.Time
-	after     func(time.Duration) <-chan time.Time
-	newOrch   func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator
-	probe     func(context.Context, config.ProjectConfig) error
+	proj           config.ProjectConfig
+	limiter        *orchestrator.SessionLimiter
+	healthCfg      config.ProjectHealthConfig
+	now            func() time.Time
+	after          func(time.Duration) <-chan time.Time
+	newOrch        func(config.ProjectConfig, *orchestrator.SessionLimiter) managedOrchestrator
+	probe          func(context.Context, config.ProjectConfig) error
+	webhookEnabled bool
 
 	mu            sync.Mutex
 	orch          managedOrchestrator
@@ -64,16 +66,17 @@ type projectRunner struct {
 	quarantinedAt *time.Time
 }
 
-func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter, healthCfg config.ProjectHealthConfig) *projectRunner {
+func newProjectRunner(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter, healthCfg config.ProjectHealthConfig, webhookEnabled bool) *projectRunner {
 	return &projectRunner{
-		proj:        proj,
-		limiter:     limiter,
-		healthCfg:   healthCfg,
-		now:         time.Now,
-		after:       time.After,
-		newOrch:     newManagedOrchestrator,
-		probe:       probeProjectHealth,
-		healthState: runnerHealthHealthy,
+		proj:           proj,
+		limiter:        limiter,
+		healthCfg:      healthCfg,
+		now:            time.Now,
+		after:          time.After,
+		newOrch:        newManagedOrchestrator,
+		probe:          probeProjectHealth,
+		webhookEnabled: webhookEnabled,
+		healthState:    runnerHealthHealthy,
 	}
 }
 
@@ -108,6 +111,9 @@ func (pr *projectRunner) run(ctx context.Context) {
 		}
 
 		o := pr.newOrch(pr.proj, pr.limiter)
+		if pr.webhookEnabled {
+			o.SetWebhookMode(true)
+		}
 
 		pr.mu.Lock()
 		pr.orch = o
@@ -509,7 +515,7 @@ func (m *Manager) ApplyConfig(cfg *config.DaemonConfig) {
 			toStop = append(toStop, runner)
 		}
 
-		nextRunner := newProjectRunner(proj, m.limiter, cfg.ProjectHealth)
+		nextRunner := newProjectRunner(proj, m.limiter, cfg.ProjectHealth, cfg.Webhook.Enabled)
 		if restartRequested {
 			nextRunner.beginDrain()
 		}

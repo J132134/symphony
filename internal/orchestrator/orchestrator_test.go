@@ -136,6 +136,81 @@ func TestGracefulStopDrainWaitsForWorkerWaitGroup(t *testing.T) {
 	}
 }
 
+func TestTriggerRefreshWakesPollLoopImmediately(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	o.after = func(time.Duration) <-chan time.Time {
+		return make(chan time.Time)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ticks := make(chan int, 2)
+	var mu sync.Mutex
+	count := 0
+	o.tickFn = func(context.Context) {
+		mu.Lock()
+		count++
+		current := count
+		mu.Unlock()
+		ticks <- current
+		if current == 2 {
+			cancel()
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- o.pollLoop(ctx)
+	}()
+
+	select {
+	case <-ticks:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected initial tick")
+	}
+
+	o.TriggerRefresh(context.Background())
+
+	select {
+	case <-ticks:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected webhook refresh to wake pollLoop immediately")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("pollLoop returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pollLoop shutdown")
+	}
+}
+
+func TestComputeIntervalUsesWebhookFallbackMode(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	o.state.mu.Lock()
+	o.state.PollIntervalMs = 10_000
+	o.state.PollIntervalIdleMs = 60_000
+	o.state.PollWebhookFallbackIntervalMs = 300_000
+	o.state.Running["issue-1"] = &RunAttempt{IssueID: "issue-1"}
+	o.state.mu.Unlock()
+
+	if got := o.computeInterval(); got != 10_000 {
+		t.Fatalf("computeInterval() = %d, want 10000 before webhook mode", got)
+	}
+
+	o.SetWebhookMode(true)
+	if got := o.computeInterval(); got != 300_000 {
+		t.Fatalf("computeInterval() = %d, want 300000 in webhook mode", got)
+	}
+}
+
 func TestOnRetryTimerWithoutTrackerReleasesClaim(t *testing.T) {
 	t.Parallel()
 
