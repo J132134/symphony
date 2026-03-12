@@ -698,6 +698,16 @@ func resolveThreadSandbox(cfg *Config) string {
 	return normalizeSandboxPolicy(cfg.TurnSandboxPolicy)
 }
 
+func resolveTurnSandbox(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if policy := normalizeSandboxPolicy(cfg.TurnSandboxPolicy); policy != "" {
+		return policy
+	}
+	return normalizeSandboxPolicy(cfg.ThreadSandbox)
+}
+
 func normalizeSandboxPolicy(p string) string {
 	switch p {
 	case "read-only", "workspace-write", "external-sandbox":
@@ -711,7 +721,7 @@ func buildTurnSandboxPolicy(cfg *Config) map[string]any {
 		return nil
 	}
 
-	switch normalizeSandboxPolicy(cfg.TurnSandboxPolicy) {
+	switch resolveTurnSandbox(cfg) {
 	case "read-only":
 		return map[string]any{"type": "readOnly"}
 	case "workspace-write":

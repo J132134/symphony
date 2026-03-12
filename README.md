@@ -255,7 +255,7 @@ hooks:
 
 스크립트 실행 시 `SYMPHONY_WORKSPACE` 환경변수로 현재 워크스페이스 절대경로가 전달된다.
 
-`codex.turn_sandbox_policy: workspace-write`를 사용할 때 Symphony는 워크스페이스 디렉터리만 믿지 않고, 실행 직전 `git rev-parse --git-dir`와 `--git-common-dir`로 실제 git admin 경로를 해석해 `codex --add-dir`로 함께 전달한다. 따라서 일반 clone과 linked worktree 모두에서 `.git` metadata 쓰기가 가능하고, 워크스페이스를 프로젝트 하위로 옮기는 것만으로 해결되지는 않는다.
+`codex.turn_sandbox_policy: workspace-write` 또는 `codex.thread_sandbox: workspace-write`를 사용할 때 Symphony는 워크스페이스 디렉터리만 믿지 않고, 실행 직전 `git rev-parse --git-dir`와 `--git-common-dir`로 실제 git admin 경로를 해석해 `codex --add-dir`와 turn `writableRoots`로 함께 전달한다. 따라서 일반 clone과 linked worktree 모두에서 `.git` metadata 쓰기가 가능하고, 워크스페이스를 프로젝트 하위로 옮기는 것만으로 해결되지는 않는다.
 
 ## Linear 피드백
 

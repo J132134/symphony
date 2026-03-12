@@ -208,6 +208,39 @@ func TestBuildTurnSandboxPolicyUsesWorkspaceWriteWritableRoots(t *testing.T) {
 	}
 }
 
+func TestBuildTurnSandboxPolicyFallsBackToThreadSandboxWorkspaceWrite(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		ThreadSandbox: "workspace-write",
+		AdditionalWritableDirs: []string{
+			"/tmp/repo/.git",
+			"/tmp/repo/.git/worktrees/j-62",
+		},
+	}
+
+	got := buildTurnSandboxPolicy(cfg)
+	if got["type"] != "workspaceWrite" {
+		t.Fatalf("sandboxPolicy.type = %v, want workspaceWrite", got["type"])
+	}
+	roots, ok := got["writableRoots"].([]string)
+	if !ok {
+		t.Fatalf("sandboxPolicy.writableRoots type = %T, want []string", got["writableRoots"])
+	}
+	want := []string{
+		"/tmp/repo/.git",
+		"/tmp/repo/.git/worktrees/j-62",
+	}
+	if len(roots) != len(want) {
+		t.Fatalf("len(writableRoots) = %d, want %d (%v)", len(roots), len(want), roots)
+	}
+	for i, root := range want {
+		if roots[i] != root {
+			t.Fatalf("writableRoots[%d] = %q, want %q", i, roots[i], root)
+		}
+	}
+}
+
 func TestBuildTurnSandboxPolicyMapsSandboxTypesToProtocolValues(t *testing.T) {
 	t.Parallel()
 
