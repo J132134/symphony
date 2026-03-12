@@ -21,7 +21,13 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.SetTurnCount(3)
 	attempt.UpdateLastEvent(lastEvent)
+	attempt.SetSessionIdentity("thread-1", "session-1234567890", "4321")
+	attempt.AddTokens(100, 20, 120)
+	attempt.SetLastEventDetail("item.completed", "done")
 	running.Running["1"] = attempt
+	running.Totals.InputTokens = 100
+	running.Totals.OutputTokens = 20
+	running.Totals.TotalTokens = 120
 
 	networkLost := orchestrator.NewState()
 	networkLost.RecordTrackerFailure(now.Add(time.Minute), errors.New("dial tcp timeout"))
@@ -37,6 +43,9 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	if summary.SubprocessCount != 1 {
 		t.Fatalf("subprocess_count = %d, want 1", summary.SubprocessCount)
 	}
+	if summary.TotalTokens != 120 {
+		t.Fatalf("total_tokens = %d, want 120", summary.TotalTokens)
+	}
 	if len(summary.RunningIssueIDs) != 1 || summary.RunningIssueIDs[0] != "J-17" {
 		t.Fatalf("running_issue_ids = %#v, want [J-17]", summary.RunningIssueIDs)
 	}
@@ -51,6 +60,15 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		}
 		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
 			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
+		}
+		if got[0].LastEvent != "item.completed: done" {
+			t.Fatalf("last_event = %q, want item.completed: done", got[0].LastEvent)
+		}
+		if got[0].SessionID != "session-1234567890" {
+			t.Fatalf("session_id = %q, want session-1234567890", got[0].SessionID)
+		}
+		if got[0].TotalTokens != 120 {
+			t.Fatalf("total_tokens = %d, want 120", got[0].TotalTokens)
 		}
 	}
 }
@@ -97,6 +115,7 @@ func TestBuildSummaryIgnoresNonFailureRetriesForErrorStatus(t *testing.T) {
 			st.RetryQueue["1"] = &orchestrator.RetryEntry{
 				Identifier: "J-18",
 				Kind:       tc.kind,
+				DueAt:      now.Add(time.Minute),
 				Error:      "transient wait",
 			}
 

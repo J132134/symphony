@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"symphony/internal/status"
 )
@@ -137,5 +138,54 @@ func TestResolveStatusBaseURLFallsBackToDefault(t *testing.T) {
 	}
 	if baseURL != status.DefaultBaseURL {
 		t.Fatalf("baseURL = %q, want %q", baseURL, status.DefaultBaseURL)
+	}
+}
+
+func TestRenderStatusDashboardIncludesRunningAndBackoff(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
+	priority := 1
+	out := renderStatusDashboard(status.Summary{
+		Status:       "running",
+		Version:      "v0.4.0",
+		ProjectCount: 1,
+		Projects: []status.ProjectSummary{{
+			Name:            "symphony",
+			SubprocessCount: 1,
+			RetryCount:      1,
+			RunningIssues: []status.RunningIssueSummary{{
+				Identifier:  "SYM-12",
+				Status:      "streaming_turn",
+				Priority:    &priority,
+				TurnCount:   2,
+				StartedAt:   now.Add(-2 * time.Minute).Format(time.RFC3339),
+				LastEvent:   "item.completed: patch applied",
+				SessionID:   "019ce23639d97ea097f22d7883fe9820",
+				TotalTokens: 42100,
+			}},
+			RetryEntries: []status.RetrySummary{{
+				Identifier: "SYM-99",
+				Kind:       "failure",
+				DueAt:      now.Add(15 * time.Second).Format(time.RFC3339),
+				Error:      "agent crashed",
+			}},
+		}},
+		TotalTokens: 42100,
+	}, nil, now, now.Add(3*time.Second), 3*time.Second)
+
+	for _, want := range []string{
+		"SYMPHONY STATUS",
+		"Next refresh: 3s",
+		"Running",
+		"SYM-12",
+		"42.1k",
+		"Backoff queue",
+		"SYM-99",
+		"agent crashed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dashboard missing %q:\n%s", want, out)
+		}
 	}
 }

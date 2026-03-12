@@ -49,6 +49,7 @@ type LiveSession struct {
 	TotalTokens  int64
 	TurnCount    int
 	LastEventAt  *time.Time
+	LastEvent    string
 }
 
 type WorkerCancelReason string
@@ -75,6 +76,7 @@ type RunAttempt struct {
 	Error             string
 	Session           LiveSession
 	IssueState        string // last known tracker state for per-state concurrency
+	IssuePriority     *int
 	IssueBranch       string
 	GlobalSlotHeld    bool
 	Urgent            bool
@@ -106,6 +108,21 @@ func (a *RunAttempt) UpdateLastEvent(t time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.Session.LastEventAt = &t
+}
+
+func (a *RunAttempt) SetLastEventDetail(name, message string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name = strings.TrimSpace(name)
+	message = strings.TrimSpace(message)
+	switch {
+	case name != "" && message != "":
+		a.Session.LastEvent = name + ": " + message
+	case name != "":
+		a.Session.LastEvent = name
+	default:
+		a.Session.LastEvent = message
+	}
 }
 
 func (a *RunAttempt) GetLastEventAt() *time.Time {

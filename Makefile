@@ -22,12 +22,8 @@ install-launchagents:
 	sed -e 's|__HOME__|$(HOME)|g' -e 's|__LOG_DIR__|$(LOG_DIR)|g' \
 		-e 's|__LINEAR_API_KEY__|$(LINEAR_API_KEY)|g' \
 		scripts/com.symphony.daemon.plist > $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist
-	sed -e 's|__HOME__|$(HOME)|g' -e 's|__LOG_DIR__|$(LOG_DIR)|g' \
-		scripts/com.symphony.menubar.plist > $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist
 	launchctl unload $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist 2>/dev/null || true
-	launchctl unload $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist 2>/dev/null || true
 	launchctl load $(HOME)/Library/LaunchAgents/com.symphony.daemon.plist 2>/dev/null || true
-	launchctl load $(HOME)/Library/LaunchAgents/com.symphony.menubar.plist 2>/dev/null || true
 	@echo "Installed. Check status: launchctl list | grep symphony"
 
 clean:

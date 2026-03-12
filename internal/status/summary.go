@@ -2,6 +2,7 @@ package status
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"symphony/internal/orchestrator"
@@ -16,17 +17,37 @@ type Summary struct {
 	SubprocessCount int              `json:"subprocess_count"`
 	RunningIssueIDs []string         `json:"running_issue_ids"`
 	RetryCount      int              `json:"retry_count"`
+	InputTokens     int64            `json:"input_tokens,omitempty"`
+	OutputTokens    int64            `json:"output_tokens,omitempty"`
+	TotalTokens     int64            `json:"total_tokens,omitempty"`
+	PausedUntil     string           `json:"paused_until,omitempty"`
+	PauseReason     string           `json:"pause_reason,omitempty"`
 	ProjectCount    int              `json:"project_count"`
 	Projects        []ProjectSummary `json:"projects"`
 	UpdatedAt       string           `json:"updated_at"`
 }
 
 type RunningIssueSummary struct {
-	Identifier  string `json:"identifier"`
-	Status      string `json:"status"`
-	TurnCount   int    `json:"turn_count,omitempty"`
-	LastEventAt string `json:"last_event_at,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
+	Identifier   string `json:"identifier"`
+	IssueState   string `json:"issue_state,omitempty"`
+	Status       string `json:"status"`
+	Priority     *int   `json:"priority,omitempty"`
+	TurnCount    int    `json:"turn_count,omitempty"`
+	LastEventAt  string `json:"last_event_at,omitempty"`
+	LastEvent    string `json:"last_event,omitempty"`
+	StartedAt    string `json:"started_at,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	PID          string `json:"pid,omitempty"`
+	InputTokens  int64  `json:"input_tokens,omitempty"`
+	OutputTokens int64  `json:"output_tokens,omitempty"`
+	TotalTokens  int64  `json:"total_tokens,omitempty"`
+}
+
+type RetrySummary struct {
+	Identifier string `json:"identifier"`
+	Kind       string `json:"kind"`
+	DueAt      string `json:"due_at,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type SummarySource interface {
@@ -41,12 +62,18 @@ type ProjectSummary struct {
 	RunningIssueIDs    []string              `json:"running_issue_ids"`
 	RunningIssues      []RunningIssueSummary `json:"running_issues,omitempty"`
 	RetryCount         int                   `json:"retry_count"`
+	RetryEntries       []RetrySummary        `json:"retry_entries,omitempty"`
 	CrashCount         int                   `json:"crash_count,omitempty"`
 	QuarantinedAt      string                `json:"quarantined_at,omitempty"`
 	TrackerConnected   bool                  `json:"tracker_connected"`
 	LastTrackerSuccess string                `json:"last_tracker_success,omitempty"`
 	LastTrackerError   string                `json:"last_tracker_error,omitempty"`
 	LastError          string                `json:"last_error,omitempty"`
+	InputTokens        int64                 `json:"input_tokens,omitempty"`
+	OutputTokens       int64                 `json:"output_tokens,omitempty"`
+	TotalTokens        int64                 `json:"total_tokens,omitempty"`
+	PausedUntil        string                `json:"paused_until,omitempty"`
+	PauseReason        string                `json:"pause_reason,omitempty"`
 }
 
 func BuildSummary(states map[string]*orchestrator.State) Summary {
@@ -70,6 +97,9 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 			Health:          "healthy",
 			SubprocessCount: len(st.Running),
 			RetryCount:      len(st.RetryQueue),
+			InputTokens:     st.Totals.InputTokens,
+			OutputTokens:    st.Totals.OutputTokens,
+			TotalTokens:     st.Totals.TotalTokens,
 		}
 		for _, attempt := range st.Running {
 			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
@@ -82,12 +112,28 @@ func BuildSummary(states map[string]*orchestrator.State) Summary {
 
 		failureRetryCount := 0
 		for _, entry := range st.RetryQueue {
+			project.RetryEntries = append(project.RetryEntries, RetrySummary{
+				Identifier: entry.Identifier,
+				Kind:       string(entry.Kind),
+				DueAt:      entry.DueAt.UTC().Format(time.RFC3339),
+				Error:      entry.Error,
+			})
 			if entry.Kind == orchestrator.RetryKindFailure {
 				failureRetryCount++
 			}
 		}
+		sort.Slice(project.RetryEntries, func(i, j int) bool {
+			if project.RetryEntries[i].DueAt == project.RetryEntries[j].DueAt {
+				return project.RetryEntries[i].Identifier < project.RetryEntries[j].Identifier
+			}
+			return project.RetryEntries[i].DueAt < project.RetryEntries[j].DueAt
+		})
 
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		if st.PausedUntil != nil {
+			project.PausedUntil = st.PausedUntil.UTC().Format(time.RFC3339)
+			project.PauseReason = st.PauseReason
+		}
 		if project.RetryCount > 0 {
 			for _, retry := range st.RetryQueue {
 				if retry.Error != "" {
@@ -118,7 +164,9 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 
 	issue := RunningIssueSummary{
 		Identifier: attempt.Identifier,
+		IssueState: attempt.IssueState,
 		Status:     string(attempt.GetStatus()),
+		Priority:   attempt.IssuePriority,
 	}
 	if !attempt.StartedAt.IsZero() {
 		issue.StartedAt = attempt.StartedAt.UTC().Format(time.RFC3339)
@@ -126,6 +174,12 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 
 	session := attempt.SessionSnapshot()
 	issue.TurnCount = session.TurnCount
+	issue.LastEvent = strings.TrimSpace(session.LastEvent)
+	issue.SessionID = session.SessionID
+	issue.PID = session.AgentPID
+	issue.InputTokens = session.InputTokens
+	issue.OutputTokens = session.OutputTokens
+	issue.TotalTokens = session.TotalTokens
 	if session.LastEventAt != nil {
 		issue.LastEventAt = session.LastEventAt.UTC().Format(time.RFC3339)
 	}
@@ -159,8 +213,17 @@ func BuildSummaryFromProjects(projects []ProjectSummary) Summary {
 		}
 		summary.SubprocessCount += project.SubprocessCount
 		summary.RetryCount += project.RetryCount
+		summary.InputTokens += project.InputTokens
+		summary.OutputTokens += project.OutputTokens
+		summary.TotalTokens += project.TotalTokens
 		summary.RunningIssueIDs = append(summary.RunningIssueIDs, project.RunningIssueIDs...)
 		summary.Projects = append(summary.Projects, project)
+		if project.PausedUntil != "" {
+			if summary.PausedUntil == "" || project.PausedUntil > summary.PausedUntil {
+				summary.PausedUntil = project.PausedUntil
+				summary.PauseReason = project.PauseReason
+			}
+		}
 
 		if project.Health == "quarantined" || project.Health == "probing" {
 			hasQuarantined = true

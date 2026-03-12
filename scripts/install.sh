@@ -49,14 +49,13 @@ if [[ "${WITH_LAUNCHAGENTS}" == "1" ]]; then
     echo "Warning: LINEAR_API_KEY not set — update ~/.config/symphony/config.yaml to add your key"
   fi
   mkdir -p "${LAUNCH_AGENTS_DIR}" "${LOG_DIR}"
-  for plist in com.symphony.daemon com.symphony.menubar; do
-    curl -fsSL "${RAW_BASE}/scripts/${plist}.plist" \
-      | sed -e "s|__HOME__|${HOME}|g" \
-            -e "s|__LOG_DIR__|${LOG_DIR}|g" \
-            -e "s|__LINEAR_API_KEY__|${LINEAR_API_KEY:-}|g" \
-      > "${LAUNCH_AGENTS_DIR}/${plist}.plist"
-    launchctl unload "${LAUNCH_AGENTS_DIR}/${plist}.plist" 2>/dev/null || true
-    launchctl load "${LAUNCH_AGENTS_DIR}/${plist}.plist" 2>/dev/null || true
-  done
+  plist="com.symphony.daemon"
+  curl -fsSL "${RAW_BASE}/scripts/${plist}.plist" \
+    | sed -e "s|__HOME__|${HOME}|g" \
+          -e "s|__LOG_DIR__|${LOG_DIR}|g" \
+          -e "s|__LINEAR_API_KEY__|${LINEAR_API_KEY:-}|g" \
+    > "${LAUNCH_AGENTS_DIR}/${plist}.plist"
+  launchctl unload "${LAUNCH_AGENTS_DIR}/${plist}.plist" 2>/dev/null || true
+  launchctl load "${LAUNCH_AGENTS_DIR}/${plist}.plist" 2>/dev/null || true
   echo "LaunchAgents installed. Status: launchctl list | grep symphony"
 fi

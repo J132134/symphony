@@ -122,6 +122,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, cfg *config.SymphonyConfig,
 		Continuation:   continuation,
 		StartedAt:      time.Now().UTC(),
 		IssueState:     issue.State,
+		IssuePriority:  issue.Priority,
 		IssueBranch:    issue.BranchName,
 		GlobalSlotHeld: globalSlotHeld,
 		Urgent:         urgent,
@@ -448,6 +449,7 @@ func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Mana
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
 	attempt.UpdateLastEvent(e.Timestamp)
+	attempt.SetLastEventDetail(e.Name, e.Message)
 	attempt.UpdateSessionRuntime(e.SessionID, e.PID)
 	if e.Usage != nil {
 		o.state.mu.Lock()

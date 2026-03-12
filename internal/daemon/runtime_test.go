@@ -28,6 +28,9 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 	configPath := filepath.Join(dir, "config.yaml")
 	writeConfigToken(t, configPath, "alpha")
 
+	ln, port := listenOnRandomPort(t)
+	_ = ln.Close()
+
 	alphaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
@@ -36,7 +39,7 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 	betaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
-		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 7778},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: port},
 		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 	invalidCfg := &config.DaemonConfig{ConfigPath: configPath}

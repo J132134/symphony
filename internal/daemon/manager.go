@@ -616,6 +616,9 @@ func (m *Manager) GetProjects() []status.ProjectSummary {
 		st.Lock()
 		project.SubprocessCount = len(st.Running)
 		project.RetryCount = len(st.RetryQueue)
+		project.InputTokens = st.Totals.InputTokens
+		project.OutputTokens = st.Totals.OutputTokens
+		project.TotalTokens = st.Totals.TotalTokens
 		for _, attempt := range st.Running {
 			project.RunningIssueIDs = append(project.RunningIssueIDs, attempt.Identifier)
 			project.RunningIssues = append(project.RunningIssues, status.SummarizeRunningIssue(attempt))
@@ -626,11 +629,27 @@ func (m *Manager) GetProjects() []status.ProjectSummary {
 		})
 		failureRetryCount := 0
 		for _, entry := range st.RetryQueue {
+			project.RetryEntries = append(project.RetryEntries, status.RetrySummary{
+				Identifier: entry.Identifier,
+				Kind:       string(entry.Kind),
+				DueAt:      entry.DueAt.UTC().Format(time.RFC3339),
+				Error:      entry.Error,
+			})
 			if entry.Kind == orchestrator.RetryKindFailure {
 				failureRetryCount++
 			}
 		}
+		sort.Slice(project.RetryEntries, func(i, j int) bool {
+			if project.RetryEntries[i].DueAt == project.RetryEntries[j].DueAt {
+				return project.RetryEntries[i].Identifier < project.RetryEntries[j].Identifier
+			}
+			return project.RetryEntries[i].DueAt < project.RetryEntries[j].DueAt
+		})
 		project.TrackerConnected, project.LastTrackerSuccess, project.LastTrackerError = st.TrackerStatusLocked()
+		if st.PausedUntil != nil {
+			project.PausedUntil = st.PausedUntil.UTC().Format(time.RFC3339)
+			project.PauseReason = st.PauseReason
+		}
 		if project.RetryCount > 0 && project.LastError == "" {
 			for _, retry := range st.RetryQueue {
 				if retry.Error != "" {

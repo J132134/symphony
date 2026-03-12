@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"symphony/internal/config"
 	"symphony/internal/status"
@@ -31,25 +35,42 @@ func runStatus(stdout io.Writer, args []string) error {
 	opts := parseFlags(args, map[string]string{
 		"--config": "",
 		"--url":    "",
+		"--poll":   "3s",
 	})
 	jsonOutput := hasFlag(args, "--json")
+	once := hasFlag(args, "--once")
 
 	baseURL, err := resolveStatusBaseURL(opts["--url"], opts["--config"])
 	if err != nil {
 		return err
 	}
 
-	summary, err := newSummaryClient(baseURL).Summary()
-	if err != nil {
-		return err
-	}
+	client := newSummaryClient(baseURL)
 
 	if jsonOutput {
+		summary, err := client.Summary()
+		if err != nil {
+			return err
+		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(summary)
 	}
 
+	poll := 3 * time.Second
+	if parsed, err := time.ParseDuration(opts["--poll"]); err == nil && parsed > 0 {
+		poll = parsed
+	}
+	if !once && wantsLiveStatus(stdout) {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return watchStatus(ctx, stdout, client, poll)
+	}
+
+	summary, err := client.Summary()
+	if err != nil {
+		return err
+	}
 	_, err = io.WriteString(stdout, formatStatusSummary(summary))
 	return err
 }
