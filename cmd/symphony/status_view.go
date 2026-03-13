@@ -115,8 +115,8 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 	if len(running) == 0 {
 		fmt.Fprintln(&b, "No running agents")
 	} else {
-		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       SESSION        ACTIVITY")
-		fmt.Fprintln(&b, "----------------------------------------------------------------------------------------------------------")
+		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       CONTEXT              ACTIVITY")
+		fmt.Fprintln(&b, "----------------------------------------------------------------------------------------------------------------")
 		for _, issue := range running {
 			activity := issue.issue.CurrentActivity
 			if activity == "" {
@@ -131,7 +131,7 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 				formatPriority(issue.issue.Priority),
 				formatAgeTurn(issue.issue, now),
 				formatCompactTokens(issue.issue.TotalTokens),
-				truncate(shortSession(issue.issue.SessionID), 14),
+				truncate(formatRunningContext(issue.issue), 20),
 				truncate(activity, 40),
 			)
 		}
@@ -399,4 +399,24 @@ func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) 
 	}
 
 	return b.String()
+}
+
+func formatRunningContext(issue status.RunningIssueSummary) string {
+	parts := make([]string, 0, 3)
+	if issue.Attempt > 0 {
+		parts = append(parts, fmt.Sprintf("a%d", issue.Attempt))
+	}
+	if issue.Urgent {
+		parts = append(parts, "urgent")
+	}
+	if issue.Preempted {
+		parts = append(parts, "preempted")
+	}
+	if len(parts) == 0 {
+		return shortSession(issue.SessionID)
+	}
+	if session := shortSession(issue.SessionID); session != "" {
+		parts = append(parts, session)
+	}
+	return strings.Join(parts, " ")
 }
