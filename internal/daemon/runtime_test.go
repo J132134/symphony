@@ -652,6 +652,33 @@ func TestShouldShareStatusAndWebhookListener(t *testing.T) {
 	}
 }
 
+func TestDaemonHTTPServerPlan(t *testing.T) {
+	t.Parallel()
+
+	shared := daemonHTTPServerPlan(&config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "127.0.0.1"},
+	})
+	if got, want := shared, (daemonServerPlan{shared: true}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("daemonHTTPServerPlan(shared) = %#v, want %#v", got, want)
+	}
+
+	separate := daemonHTTPServerPlan(&config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7778, BindAddress: "127.0.0.1"},
+	})
+	if got, want := separate, (daemonServerPlan{status: true, webhook: true}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("daemonHTTPServerPlan(separate) = %#v, want %#v", got, want)
+	}
+
+	webhookOnly := daemonHTTPServerPlan(&config.DaemonConfig{
+		Webhook: config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "127.0.0.1"},
+	})
+	if got, want := webhookOnly, (daemonServerPlan{webhook: true}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("daemonHTTPServerPlan(webhookOnly) = %#v, want %#v", got, want)
+	}
+}
+
 func writeConfigToken(t *testing.T, path, token string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(token), 0o644); err != nil {

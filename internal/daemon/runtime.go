@@ -252,8 +252,9 @@ func startManagedRuntime(parent context.Context, cfg *config.DaemonConfig) (*man
 
 func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 	var wg sync.WaitGroup
+	serverPlan := daemonHTTPServerPlan(cfg)
 
-	if shouldShareStatusAndWebhookListener(cfg) {
+	if serverPlan.shared {
 		if strings.TrimSpace(cfg.Webhook.SigningSecret) == "" {
 			slog.Warn("webhook_server.signing_secret_missing", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress)
 		}
@@ -269,7 +270,7 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 		}()
 		slog.Info("status_server.started", "port", cfg.StatusServer.Port, "bind", cfg.Webhook.BindAddress, "shared", true)
 		slog.Info("webhook_server.started", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress, "shared", true)
-	} else if cfg.StatusServer.Enabled {
+	} else if serverPlan.status {
 		srv := status.New(mgr, cfg.StatusServer.Port)
 		wg.Add(1)
 		go func() {
@@ -280,7 +281,7 @@ func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 		}()
 	}
 
-	if cfg.Webhook.Enabled {
+	if serverPlan.webhook {
 		if strings.TrimSpace(cfg.Webhook.SigningSecret) == "" {
 			slog.Warn("webhook_server.signing_secret_missing", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress)
 		}
@@ -325,6 +326,25 @@ func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
 		prev.StatusServer == next.StatusServer &&
 		prev.Webhook == next.Webhook &&
 		prev.ProjectHealth == next.ProjectHealth
+}
+
+type daemonServerPlan struct {
+	shared  bool
+	status  bool
+	webhook bool
+}
+
+func daemonHTTPServerPlan(cfg *config.DaemonConfig) daemonServerPlan {
+	if shouldShareStatusAndWebhookListener(cfg) {
+		return daemonServerPlan{shared: true}
+	}
+	if cfg == nil {
+		return daemonServerPlan{}
+	}
+	return daemonServerPlan{
+		status:  cfg.StatusServer.Enabled,
+		webhook: cfg.Webhook.Enabled,
+	}
 }
 
 func shouldShareStatusAndWebhookListener(cfg *config.DaemonConfig) bool {
