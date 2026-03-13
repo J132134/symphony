@@ -412,11 +412,13 @@ func formatRunningContext(issue status.RunningIssueSummary) string {
 	if issue.Preempted {
 		parts = append(parts, "preempted")
 	}
+	if issue.Branch != "" {
+		parts = append(parts, issue.Branch)
+	} else if session := shortSession(issue.SessionID); session != "" {
+		parts = append(parts, session)
+	}
 	if len(parts) == 0 {
 		return shortSession(issue.SessionID)
-	}
-	if session := shortSession(issue.SessionID); session != "" {
-		parts = append(parts, session)
 	}
 	return strings.Join(parts, " ")
 }
