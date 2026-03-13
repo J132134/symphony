@@ -232,7 +232,7 @@ func TestRenderStatusDashboardIncludesRunningAndBackoff(t *testing.T) {
 		"SYM-12",
 		"42.1k",
 		"CONTEXT",
-		"a2 preempted j-76...",
+		"a2 cont preempted...",
 		"Running details",
 		"attempt: 2",
 		"branch: j-76-status-progress-detail",

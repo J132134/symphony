@@ -402,9 +402,15 @@ func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) 
 }
 
 func formatRunningContext(issue status.RunningIssueSummary) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	if issue.Attempt > 0 {
 		parts = append(parts, fmt.Sprintf("a%d", issue.Attempt))
+	}
+	if issue.Continuation {
+		parts = append(parts, "cont")
+	}
+	if issue.NeedsContinuation {
+		parts = append(parts, "cont?")
 	}
 	if issue.Urgent {
 		parts = append(parts, "urgent")
