@@ -372,6 +372,9 @@ func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) 
 	}
 	if issue.CurrentActivity != "" {
 		fmt.Fprintf(&b, "\n  current: %s", issue.CurrentActivity)
+		if issue.CurrentActivityAt != "" {
+			fmt.Fprintf(&b, "\n  current at: %s", issue.CurrentActivityAt)
+		}
 	}
 	if runtime := formatIssueRuntime(issue); runtime != "" {
 		fmt.Fprintf(&b, "\n  runtime: %s", runtime)

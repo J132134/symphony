@@ -201,10 +201,28 @@ func formatIssueRuntime(issue status.RunningIssueSummary) string {
 	if issue.PID != "" {
 		parts = append(parts, "pid "+issue.PID)
 	}
-	if issue.TotalTokens > 0 {
-		parts = append(parts, "tokens "+formatInt64(issue.TotalTokens))
+	if tokens := formatIssueTokenUsage(issue); tokens != "" {
+		parts = append(parts, tokens)
 	}
 	return strings.Join(parts, " | ")
+}
+
+func formatIssueTokenUsage(issue status.RunningIssueSummary) string {
+	if issue.InputTokens <= 0 && issue.OutputTokens <= 0 && issue.TotalTokens <= 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if issue.InputTokens > 0 {
+		parts = append(parts, "in "+formatInt64(issue.InputTokens))
+	}
+	if issue.OutputTokens > 0 {
+		parts = append(parts, "out "+formatInt64(issue.OutputTokens))
+	}
+	if issue.TotalTokens > 0 {
+		parts = append(parts, "total "+formatInt64(issue.TotalTokens))
+	}
+	return "tokens " + strings.Join(parts, " / ")
 }
 
 func formatIssueEvent(event status.RunningEventDetail) string {
