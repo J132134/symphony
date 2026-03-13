@@ -1221,8 +1221,8 @@ func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *
 	if entry.Kind != RetryKindContinuation {
 		t.Fatalf("retry kind = %q, want continuation", entry.Kind)
 	}
-	if entry.Attempt != 1 {
-		t.Fatalf("retry attempt = %d, want 1", entry.Attempt)
+	if entry.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", entry.Attempt)
 	}
 	delay := entry.DueAt.Sub(before)
 	if delay < 800*time.Millisecond || delay > 1200*time.Millisecond {
@@ -1240,6 +1240,136 @@ func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *
 	if got := recorder.lastState(); got != "" {
 		t.Fatalf("unexpected state transition while continuation is pending: %q", got)
 	}
+}
+
+func TestOnWorkerDoneContinuationExhaustedReleasesClaimWithFailureFeedback(t *testing.T) {
+	t.Parallel()
+
+	recorder, server := newLinearRecorderServer(t)
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states":    []any{"In Progress"},
+			"on_failure_state": "Rework",
+			"post_comments":    true,
+		},
+		"agent": map[string]any{
+			"max_attempts": 3,
+		},
+	})
+
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
+	attempt := &RunAttempt{
+		IssueID:    "issue-1",
+		Identifier: "J-99",
+		Attempt:    3, // already at max_attempts
+		StartedAt:  time.Now().Add(-30 * time.Second),
+		IssueState: "In Progress",
+	}
+	attempt.SetNeedsContinuation(true)
+	attempt.SetStatus(StatusSucceeded)
+
+	o.state.mu.Lock()
+	o.state.Running[attempt.IssueID] = attempt
+	o.state.Claimed[attempt.IssueID] = struct{}{}
+	o.state.mu.Unlock()
+
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
+
+	o.state.mu.Lock()
+	defer o.state.mu.Unlock()
+
+	if _, ok := o.state.RetryQueue[attempt.IssueID]; ok {
+		t.Fatal("continuation should not be scheduled when max attempts exhausted")
+	}
+	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
+		t.Fatal("claim should be released when continuation exhausted")
+	}
+	if recorder.lastState() != "Rework" {
+		t.Fatalf("expected state transition to Rework, got %q", recorder.lastState())
+	}
+	if recorder.commentCount() == 0 {
+		t.Fatal("expected failure comment to be posted when continuation exhausted")
+	}
+}
+
+func TestHasWorkspaceProgress(t *testing.T) {
+	t.Parallel()
+
+	setup := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, args := range [][]string{
+			{"init"},
+			{"config", "user.email", "test@test.com"},
+			{"config", "user.name", "test"},
+			{"commit", "--allow-empty", "-m", "initial"},
+		} {
+			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		return dir
+	}
+
+	t.Run("no_changes", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		got, err := hasWorkspaceProgress(dir, strings.TrimSpace(string(head)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got {
+			t.Fatal("expected no progress when nothing changed")
+		}
+	})
+
+	t.Run("new_commit", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		initialHead := strings.TrimSpace(string(head))
+
+		cmd := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "work")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git commit: %v\n%s", err, out)
+		}
+
+		got, err := hasWorkspaceProgress(dir, initialHead)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got {
+			t.Fatal("expected progress when new commit exists")
+		}
+	})
+
+	t.Run("uncommitted_changes", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("wip"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := hasWorkspaceProgress(dir, strings.TrimSpace(string(head)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got {
+			t.Fatal("expected progress when uncommitted changes exist")
+		}
+	})
 }
 
 func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {

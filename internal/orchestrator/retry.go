@@ -17,8 +17,8 @@ func (o *Orchestrator) scheduleCapacityRetry(ctx context.Context, cfg *config.Sy
 	o.scheduleRetry(ctx, cfg, RetryKindCapacity, issueID, identifier, attemptNum, failureCount, deferCount, errMsg)
 }
 
-func (o *Orchestrator) scheduleContinuationRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string) {
-	o.scheduleRetry(ctx, cfg, RetryKindContinuation, issueID, identifier, 1, 0, 0, "")
+func (o *Orchestrator) scheduleContinuationRetry(ctx context.Context, cfg *config.SymphonyConfig, issueID, identifier string, attemptNum int) {
+	o.scheduleRetry(ctx, cfg, RetryKindContinuation, issueID, identifier, attemptNum, 0, 0, "")
 }
 
 func (o *Orchestrator) rescheduleRetry(ctx context.Context, cfg *config.SymphonyConfig, entry *RetryEntry, errMsg string) {
