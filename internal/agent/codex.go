@@ -22,16 +22,6 @@ import (
 	"symphony/internal/types"
 )
 
-// DynamicToolSpec describes a dynamic tool exposed to the agent.
-type DynamicToolSpec struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-}
-
-// DynamicToolHandler handles dynamic tool invocations from the agent.
-type DynamicToolHandler func(ctx context.Context, toolName string, input map[string]any) (map[string]any, error)
-
 // Config is passed to the runner per session.
 type Config struct {
 	Command                string
@@ -44,7 +34,6 @@ type Config struct {
 	TurnSandboxPolicy      string
 	ThreadSandbox          string
 	AdditionalWritableDirs []string
-	DynamicTools           []DynamicToolSpec
 }
 
 // TokenUsage is an alias for types.TokenUsage.
@@ -90,10 +79,9 @@ type Runner struct {
 	threadID  string
 	pid       string
 
-	mu          sync.Mutex
-	pending     map[int]chan rpcResult
-	reqID       atomic.Int32
-	toolHandler DynamicToolHandler
+	mu      sync.Mutex
+	pending map[int]chan rpcResult
+	reqID   atomic.Int32
 
 	notifCh         chan *Incoming
 	priorityNotifCh chan *Incoming
@@ -102,13 +90,6 @@ type Runner struct {
 	lastInput  int64
 	lastOutput int64
 	lastTotal  int64
-}
-
-// SetToolHandler registers a handler for dynamic tool invocations.
-func (r *Runner) SetToolHandler(h DynamicToolHandler) {
-	r.mu.Lock()
-	r.toolHandler = h
-	r.mu.Unlock()
 }
 
 func NewRunner() *Runner {
@@ -167,14 +148,10 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	readTimeout := time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
 
 	// initialize
-	capabilities := map[string]any{}
-	if len(cfg.DynamicTools) > 0 {
-		capabilities["experimentalApi"] = true
-	}
 	initRes, err := r.sendRequest(ctx, readTimeout, methodInitialize, map[string]any{
 		"protocolVersion": "2025-01-01",
-		"capabilities":    capabilities,
-		"clientInfo":      map[string]any{"name": "symphony", "version": "0.2.0"},
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "symphony", "version": "0.5.0"},
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialize: %w", err)
@@ -193,9 +170,6 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	}
 	if sb := resolveThreadSandbox(cfg); sb != "" {
 		threadParams["sandbox"] = sb
-	}
-	if len(cfg.DynamicTools) > 0 {
-		threadParams["dynamicTools"] = cfg.DynamicTools
 	}
 
 	threadStartTimeout := time.Duration(cfg.ThreadStartTimeoutMs) * time.Millisecond
@@ -360,15 +334,7 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
 			SessionID: r.sessionID, Message: req.Method})
 	case methodToolCall:
-		r.mu.Lock()
-		handler := r.toolHandler
-		r.mu.Unlock()
-		toolName, input := extractDynamicToolRequest(req.Params)
-		if handler != nil && toolName != "" {
-			go r.handleDynamicTool(req.ID, toolName, input)
-			return
-		}
-		slog.Warn("agent.tool_call_unsupported", "tool", toolName, "params", summarizeParams(req.Params))
+		slog.Warn("agent.tool_call_unsupported", "params", summarizeParams(req.Params))
 		data, _ := FormatErrorResponse(req.ID, -32601, "Tool call not supported")
 		_ = r.stdin.Write(data)
 	case methodUserInput:
@@ -380,14 +346,6 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 				SessionID: r.sessionID, Message: req.Method})
 			return
 		}
-		r.mu.Lock()
-		handler := r.toolHandler
-		r.mu.Unlock()
-		toolName, input := extractDynamicToolRequest(req.Params)
-		if handler != nil && toolName != "" {
-			go r.handleDynamicTool(req.ID, toolName, input)
-			return
-		}
 		slog.Warn("agent.user_input_unsupported", "params", summarizeParams(req.Params))
 		data, _ := FormatErrorResponse(req.ID, -32601, "User input not supported")
 		_ = r.stdin.Write(data)
@@ -396,72 +354,6 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		data, _ := FormatErrorResponse(req.ID, -32601, "Unsupported: "+req.Method)
 		_ = r.stdin.Write(data)
 	}
-}
-
-func (r *Runner) handleDynamicTool(reqID any, toolName string, input map[string]any) {
-	r.mu.Lock()
-	handler := r.toolHandler
-	r.mu.Unlock()
-	if handler == nil {
-		data, _ := FormatErrorResponse(reqID, -32601, "No tool handler registered")
-		_ = r.stdin.Write(data)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	result, err := handler(ctx, toolName, input)
-	if err != nil {
-		slog.Warn("agent.dynamic_tool_error", "tool", toolName, "error", err)
-		data, _ := FormatErrorResponse(reqID, -32603, err.Error())
-		_ = r.stdin.Write(data)
-		return
-	}
-
-	var text string
-	if result != nil {
-		b, _ := json.Marshal(result)
-		text = string(b)
-	}
-	data, _ := FormatResponse(reqID, map[string]any{
-		"contentItems": []any{
-			map[string]any{"type": "text", "text": text},
-		},
-	})
-	_ = r.stdin.Write(data)
-	slog.Debug("agent.dynamic_tool_done", "tool", toolName)
-}
-
-func extractDynamicToolRequest(params map[string]any) (string, map[string]any) {
-	if len(params) == 0 {
-		return "", nil
-	}
-
-	candidates := []map[string]any{params}
-	for _, key := range []string{"toolCall", "tool", "item", "call", "payload"} {
-		if nested, ok := params[key].(map[string]any); ok {
-			candidates = append(candidates, nested)
-		}
-	}
-
-	for idx, candidate := range candidates {
-		toolName := firstNonEmptyString(candidate["name"], candidate["toolName"], candidate["tool"])
-		if toolName == "" {
-			continue
-		}
-		if input := extractDynamicToolInput(candidate); input != nil {
-			return toolName, input
-		}
-		if idx > 0 {
-			if input := extractDynamicToolInput(params); input != nil {
-				return toolName, input
-			}
-		}
-		return toolName, map[string]any{}
-	}
-
-	return "", nil
 }
 
 func buildAutoUserInputResponse(params map[string]any) (map[string]any, bool) {
@@ -547,35 +439,6 @@ func looksLikeApprovalQuestion(question map[string]any, options []any) bool {
 		}
 	}
 	return false
-}
-
-func extractDynamicToolInput(params map[string]any) map[string]any {
-	if len(params) == 0 {
-		return nil
-	}
-	for _, key := range []string{"input", "arguments"} {
-		if input := coerceToolInput(params[key]); input != nil {
-			return input
-		}
-	}
-	return nil
-}
-
-func coerceToolInput(v any) map[string]any {
-	switch t := v.(type) {
-	case map[string]any:
-		return t
-	case string:
-		trimmed := strings.TrimSpace(t)
-		if trimmed == "" {
-			return nil
-		}
-		var out map[string]any
-		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
-			return out
-		}
-	}
-	return nil
 }
 
 func firstNonEmptyString(values ...any) string {

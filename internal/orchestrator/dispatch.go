@@ -474,7 +474,6 @@ func buildAgentConfig(cfg *config.SymphonyConfig, workspacePath string) (*agent.
 		TurnSandboxPolicy:      cfg.TurnSandboxPolicy(),
 		ThreadSandbox:          cfg.ThreadSandbox(),
 		AdditionalWritableDirs: writableDirs,
-		DynamicTools:           nil,
 	}, nil
 }
 
