@@ -372,6 +372,14 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		data, _ := FormatErrorResponse(req.ID, -32601, "Tool call not supported")
 		_ = r.stdin.Write(data)
 	case methodUserInput:
+		if response, ok := buildAutoUserInputResponse(req.Params); ok {
+			slog.Info("agent.auto_approve_user_input", "params", summarizeParams(req.Params))
+			data, _ := FormatResponse(req.ID, response)
+			_ = r.stdin.Write(data)
+			emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID, Message: req.Method})
+			return
+		}
 		r.mu.Lock()
 		handler := r.toolHandler
 		r.mu.Unlock()
@@ -454,6 +462,91 @@ func extractDynamicToolRequest(params map[string]any) (string, map[string]any) {
 	}
 
 	return "", nil
+}
+
+func buildAutoUserInputResponse(params map[string]any) (map[string]any, bool) {
+	rawQuestions, ok := params["questions"].([]any)
+	if !ok || len(rawQuestions) == 0 {
+		return nil, false
+	}
+
+	answers := make(map[string]any, len(rawQuestions))
+	for _, raw := range rawQuestions {
+		question, ok := raw.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		questionID := firstNonEmptyString(question["id"])
+		answer, ok := selectAutoUserInputAnswer(question)
+		if questionID == "" || !ok {
+			return nil, false
+		}
+		answers[questionID] = answer
+	}
+	if len(answers) == 0 {
+		return nil, false
+	}
+	return map[string]any{"answers": answers}, true
+}
+
+func selectAutoUserInputAnswer(question map[string]any) (string, bool) {
+	options, ok := question["options"].([]any)
+	if !ok || len(options) == 0 {
+		return "", false
+	}
+	if !looksLikeApprovalQuestion(question, options) {
+		return "", false
+	}
+
+	labels := make([]string, 0, len(options))
+	for _, raw := range options {
+		option, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := firstNonEmptyString(option["label"])
+		if label == "" {
+			continue
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return "", false
+	}
+
+	for _, preferred := range []string{"Approve Once", "Approve this session"} {
+		for _, label := range labels {
+			if strings.EqualFold(label, preferred) {
+				return label, true
+			}
+		}
+	}
+	for _, label := range labels {
+		lower := strings.ToLower(label)
+		if strings.Contains(lower, "cancel") || strings.Contains(lower, "deny") || strings.Contains(lower, "reject") {
+			continue
+		}
+		return label, true
+	}
+	return "", false
+}
+
+func looksLikeApprovalQuestion(question map[string]any, options []any) bool {
+	text := strings.ToLower(firstNonEmptyString(question["header"], question["question"]))
+	if strings.Contains(text, "approve") {
+		return true
+	}
+	for _, raw := range options {
+		option, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := strings.ToLower(firstNonEmptyString(option["label"], option["description"]))
+		if strings.Contains(label, "approve") || strings.Contains(label, "run the tool") {
+			return true
+		}
+	}
+	return false
 }
 
 func extractDynamicToolInput(params map[string]any) map[string]any {

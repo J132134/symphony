@@ -346,6 +346,53 @@ func TestExtractDynamicToolRequestReadsNestedItemWithTopLevelInput(t *testing.T)
 	}
 }
 
+func TestBuildAutoUserInputResponseApprovesAppToolPrompt(t *testing.T) {
+	t.Parallel()
+
+	response, ok := buildAutoUserInputResponse(map[string]any{
+		"questions": []any{
+			map[string]any{
+				"id":     "mcp_tool_call_approval_call_123",
+				"header": "Approve app tool call?",
+				"options": []any{
+					map[string]any{"label": "Approve Once"},
+					map[string]any{"label": "Approve this session"},
+					map[string]any{"label": "Cancel"},
+				},
+			},
+		},
+	})
+
+	if !ok {
+		t.Fatal("buildAutoUserInputResponse() = false, want true")
+	}
+	answers, _ := response["answers"].(map[string]any)
+	if got, _ := answers["mcp_tool_call_approval_call_123"].(string); got != "Approve Once" {
+		t.Fatalf("answers[id] = %q, want Approve Once", got)
+	}
+}
+
+func TestBuildAutoUserInputResponseSkipsNonApprovalPrompt(t *testing.T) {
+	t.Parallel()
+
+	_, ok := buildAutoUserInputResponse(map[string]any{
+		"questions": []any{
+			map[string]any{
+				"id":     "plain_question",
+				"header": "Need more details",
+				"options": []any{
+					map[string]any{"label": "Foo"},
+					map[string]any{"label": "Bar"},
+				},
+			},
+		},
+	})
+
+	if ok {
+		t.Fatal("buildAutoUserInputResponse() = true, want false")
+	}
+}
+
 func fillNotifQueue(r *Runner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}
