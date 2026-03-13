@@ -346,8 +346,6 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	}
 	attempt.SetSessionIdentity(threadID, runner.SessionID(), runner.PID())
 
-	initialHead, _ := workspace.GitOutput(ws.Path, "rev-parse", "HEAD")
-
 	needsContinuation := false
 	for turnNum := 1; turnNum <= cfg.MaxTurns(); turnNum++ {
 		attempt.SetStatus(StatusStreamingTurn)
@@ -413,15 +411,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 			active = true
 		}
 		if active {
-			if madeProgress, _ := hasWorkspaceProgress(ws.Path, initialHead); madeProgress {
-				needsContinuation = true
-			} else {
-				slog.Info("orchestrator.no_progress_detected", "issue", issue.Identifier, "initial_head", initialHead)
-				attempt.SetNeedsContinuation(false)
-				attempt.SetStatus(StatusFailed)
-				attempt.Error = "no workspace progress"
-				return fmt.Errorf("no workspace progress after %d turns", cfg.MaxTurns())
-			}
+			needsContinuation = true
 		}
 	}
 
@@ -492,23 +482,6 @@ func buildAgentConfig(cfg *config.SymphonyConfig, workspacePath string) (*agent.
 	}, nil
 }
 
-
-// hasWorkspaceProgress reports whether the workspace advanced since initialHead.
-// Progress means either new commits or uncommitted changes exist.
-func hasWorkspaceProgress(wsPath, initialHead string) (bool, error) {
-	currentHead, err := workspace.GitOutput(wsPath, "rev-parse", "HEAD")
-	if err != nil {
-		return false, err
-	}
-	if currentHead != initialHead {
-		return true, nil
-	}
-	status, err := workspace.GitOutput(wsPath, "status", "--porcelain")
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(status) != "", nil
-}
 
 func isUrgentIssue(issue *types.Issue) bool {
 	return issue != nil && issue.Priority != nil && *issue.Priority == urgentPriority

@@ -1300,76 +1300,37 @@ func TestOnWorkerDoneContinuationExhaustedReleasesClaimWithFailureFeedback(t *te
 	}
 }
 
-func TestHasWorkspaceProgress(t *testing.T) {
+func TestIsStillActiveReturnsFalseForPauseState(t *testing.T) {
 	t.Parallel()
 
-	setup := func(t *testing.T) string {
-		t.Helper()
-		dir := t.TempDir()
-		for _, args := range [][]string{
-			{"init"},
-			{"config", "user.email", "test@test.com"},
-			{"config", "user.name", "test"},
-			{"commit", "--allow-empty", "-m", "initial"},
-		} {
-			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v\n%s", args, err, out)
-			}
-		}
-		return dir
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"nodes":[{"id":"issue-1","state":{"name":"Plan Review"}}]}}`))
+	}))
+	defer server.Close()
+
+	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
 	}
 
-	t.Run("no_changes", func(t *testing.T) {
-		t.Parallel()
-		dir := setup(t)
-		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
-		got, err := hasWorkspaceProgress(dir, strings.TrimSpace(string(head)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got {
-			t.Fatal("expected no progress when nothing changed")
-		}
+	cfg := config.New(map[string]any{
+		"tracker": map[string]any{
+			"active_states": []any{"Todo", "Plan Review", "In Progress"},
+			"pause_states":  []any{"Plan Review"},
+		},
 	})
 
-	t.Run("new_commit", func(t *testing.T) {
-		t.Parallel()
-		dir := setup(t)
-		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
-		initialHead := strings.TrimSpace(string(head))
+	o := New("", 0, "alpha", nil)
+	o.tracker = client
 
-		cmd := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "work")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git commit: %v\n%s", err, out)
-		}
-
-		got, err := hasWorkspaceProgress(dir, initialHead)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !got {
-			t.Fatal("expected progress when new commit exists")
-		}
-	})
-
-	t.Run("uncommitted_changes", func(t *testing.T) {
-		t.Parallel()
-		dir := setup(t)
-		head, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
-
-		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("wip"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		got, err := hasWorkspaceProgress(dir, strings.TrimSpace(string(head)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !got {
-			t.Fatal("expected progress when uncommitted changes exist")
-		}
-	})
+	active, err := o.isStillActive(context.Background(), cfg, "issue-1")
+	if err != nil {
+		t.Fatalf("isStillActive: %v", err)
+	}
+	if active {
+		t.Fatal("expected isStillActive to return false for pause state Plan Review")
+	}
 }
 
 func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {

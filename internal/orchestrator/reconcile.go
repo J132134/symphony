@@ -134,5 +134,6 @@ func (o *Orchestrator) isStillActive(ctx context.Context, cfg *config.SymphonyCo
 	if len(issues) == 0 {
 		return false, nil
 	}
-	return cfg.ActiveNorm()[config.NormalizeState(issues[0].State)], nil
+	norm := config.NormalizeState(issues[0].State)
+	return cfg.ActiveNorm()[norm] && !cfg.PauseNorm()[norm], nil
 }

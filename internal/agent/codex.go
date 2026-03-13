@@ -767,7 +767,7 @@ func buildTurnSandboxPolicy(cfg *Config) map[string]any {
 	case "read-only":
 		return map[string]any{"type": "readOnly"}
 	case "workspace-write":
-		policy := map[string]any{"type": "workspaceWrite"}
+		policy := map[string]any{"type": "workspaceWrite", "networkAccess": true}
 		if roots := sanitizeWritableRoots(cfg.AdditionalWritableDirs); len(roots) > 0 {
 			policy["writableRoots"] = roots
 		}
