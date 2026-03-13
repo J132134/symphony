@@ -156,6 +156,24 @@ func formatStatusSummary(summary status.Summary) string {
 				fmt.Fprintf(&b, " | last event %s", issue.LastEventAt)
 			}
 			b.WriteByte('\n')
+			if issue.IssueState != "" {
+				fmt.Fprintf(&b, "      tracker state: %s\n", issue.IssueState)
+			}
+			if issue.CurrentActivity != "" {
+				fmt.Fprintf(&b, "      current: %s\n", issue.CurrentActivity)
+			}
+			if runtime := formatIssueRuntime(issue); runtime != "" {
+				fmt.Fprintf(&b, "      runtime: %s\n", runtime)
+			}
+			if issue.LastEvent != "" && issue.LastEvent != issue.CurrentActivity {
+				fmt.Fprintf(&b, "      last event: %s\n", issue.LastEvent)
+			}
+			if len(issue.RecentEvents) > 0 {
+				b.WriteString("      recent events:\n")
+				for _, event := range issue.RecentEvents {
+					fmt.Fprintf(&b, "        * %s\n", formatIssueEvent(event))
+				}
+			}
 		}
 	}
 
@@ -173,4 +191,36 @@ func trackerLabel(project status.ProjectSummary) string {
 		return "disconnected (" + project.LastTrackerError + ")"
 	}
 	return "disconnected"
+}
+
+func formatIssueRuntime(issue status.RunningIssueSummary) string {
+	var parts []string
+	if issue.SessionID != "" {
+		parts = append(parts, "session "+issue.SessionID)
+	}
+	if issue.PID != "" {
+		parts = append(parts, "pid "+issue.PID)
+	}
+	if issue.TotalTokens > 0 {
+		parts = append(parts, "tokens "+formatInt64(issue.TotalTokens))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatIssueEvent(event status.RunningEventDetail) string {
+	var parts []string
+	if event.OccurredAt != "" {
+		parts = append(parts, event.OccurredAt)
+	}
+	detail := strings.TrimSpace(event.Detail)
+	if detail == "" {
+		detail = strings.TrimSpace(event.Message)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(event.Name)
+	}
+	if detail != "" {
+		parts = append(parts, detail)
+	}
+	return strings.Join(parts, " | ")
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"strings"
 	"testing"
@@ -390,6 +391,59 @@ func TestBuildAutoUserInputResponseSkipsNonApprovalPrompt(t *testing.T) {
 
 	if ok {
 		t.Fatal("buildAutoUserInputResponse() = true, want false")
+	}
+}
+
+func TestSummarizeToolCallPrefersInterestingPayloadFields(t *testing.T) {
+	t.Parallel()
+
+	got := summarizeToolCall("apply_patch", map[string]any{
+		"path": "cmd/symphony/status.go",
+		"extra": map[string]any{
+			"status": "patched",
+		},
+		"note": "should be dropped",
+	})
+
+	if !strings.Contains(got, "apply_patch") {
+		t.Fatalf("summary = %q, want tool name", got)
+	}
+	if !strings.Contains(got, "cmd/symphony/status.go") {
+		t.Fatalf("summary = %q, want path detail", got)
+	}
+	if strings.Contains(got, "should be dropped") {
+		t.Fatalf("summary = %q, want payload to omit uninteresting keys", got)
+	}
+}
+
+func TestReadStderrEmitsCurrentTurnEvent(t *testing.T) {
+	t.Parallel()
+
+	r := NewRunner()
+	r.sessionID = "session-1"
+	r.pid = "4321"
+
+	var events []Event
+	r.setCurrentTurnCallback("thread-1", "turn-1", func(event Event) {
+		events = append(events, event)
+	})
+
+	r.readStderr(bufio.NewReader(strings.NewReader("first line\n\nsecond line\n")))
+
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(events))
+	}
+	if events[0].Name != "agent_stderr" {
+		t.Fatalf("events[0].Name = %q, want agent_stderr", events[0].Name)
+	}
+	if events[0].ThreadID != "thread-1" || events[0].TurnID != "turn-1" {
+		t.Fatalf("events[0] turn = %q/%q, want thread-1/turn-1", events[0].ThreadID, events[0].TurnID)
+	}
+	if events[0].Message != "first line" {
+		t.Fatalf("events[0].Message = %q, want first line", events[0].Message)
+	}
+	if events[1].Message != "second line" {
+		t.Fatalf("events[1].Message = %q, want second line", events[1].Message)
 	}
 }
 

@@ -2,7 +2,6 @@ package status
 
 import (
 	"sort"
-	"strings"
 	"time"
 
 	"symphony/internal/orchestrator"
@@ -28,19 +27,29 @@ type Summary struct {
 }
 
 type RunningIssueSummary struct {
-	Identifier   string `json:"identifier"`
-	IssueState   string `json:"issue_state,omitempty"`
-	Status       string `json:"status"`
-	Priority     *int   `json:"priority,omitempty"`
-	TurnCount    int    `json:"turn_count,omitempty"`
-	LastEventAt  string `json:"last_event_at,omitempty"`
-	LastEvent    string `json:"last_event,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
-	SessionID    string `json:"session_id,omitempty"`
-	PID          string `json:"pid,omitempty"`
-	InputTokens  int64  `json:"input_tokens,omitempty"`
-	OutputTokens int64  `json:"output_tokens,omitempty"`
-	TotalTokens  int64  `json:"total_tokens,omitempty"`
+	Identifier        string               `json:"identifier"`
+	IssueState        string               `json:"issue_state,omitempty"`
+	Status            string               `json:"status"`
+	Priority          *int                 `json:"priority,omitempty"`
+	TurnCount         int                  `json:"turn_count,omitempty"`
+	LastEventAt       string               `json:"last_event_at,omitempty"`
+	LastEvent         string               `json:"last_event,omitempty"`
+	CurrentActivityAt string               `json:"current_activity_at,omitempty"`
+	CurrentActivity   string               `json:"current_activity,omitempty"`
+	RecentEvents      []RunningEventDetail `json:"recent_events,omitempty"`
+	StartedAt         string               `json:"started_at,omitempty"`
+	SessionID         string               `json:"session_id,omitempty"`
+	PID               string               `json:"pid,omitempty"`
+	InputTokens       int64                `json:"input_tokens,omitempty"`
+	OutputTokens      int64                `json:"output_tokens,omitempty"`
+	TotalTokens       int64                `json:"total_tokens,omitempty"`
+}
+
+type RunningEventDetail struct {
+	Name       string `json:"name,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	OccurredAt string `json:"occurred_at,omitempty"`
 }
 
 type RetrySummary struct {
@@ -174,7 +183,8 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 
 	session := attempt.SessionSnapshot()
 	issue.TurnCount = session.TurnCount
-	issue.LastEvent = strings.TrimSpace(session.LastEvent)
+	issue.LastEvent = session.LastEvent
+	issue.CurrentActivity = session.CurrentActivity
 	issue.SessionID = session.SessionID
 	issue.PID = session.AgentPID
 	issue.InputTokens = session.InputTokens
@@ -182,6 +192,23 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 	issue.TotalTokens = session.TotalTokens
 	if session.LastEventAt != nil {
 		issue.LastEventAt = session.LastEventAt.UTC().Format(time.RFC3339)
+	}
+	if session.CurrentActivityAt != nil {
+		issue.CurrentActivityAt = session.CurrentActivityAt.UTC().Format(time.RFC3339)
+	}
+	if len(session.RecentEvents) > 0 {
+		issue.RecentEvents = make([]RunningEventDetail, 0, len(session.RecentEvents))
+		for _, event := range session.RecentEvents {
+			detail := RunningEventDetail{
+				Name:    event.Name,
+				Message: event.Message,
+				Detail:  event.Detail,
+			}
+			if !event.Timestamp.IsZero() {
+				detail.OccurredAt = event.Timestamp.UTC().Format(time.RFC3339)
+			}
+			issue.RecentEvents = append(issue.RecentEvents, detail)
+		}
 	}
 
 	return issue

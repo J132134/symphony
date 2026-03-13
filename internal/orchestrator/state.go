@@ -40,17 +40,29 @@ const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
 type TokenUsage = types.TokenUsage
 
 type LiveSession struct {
-	SessionID    string
-	ThreadID     string
-	TurnID       string
-	AgentPID     string
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-	TurnCount    int
-	LastEventAt  *time.Time
-	LastEvent    string
+	SessionID         string
+	ThreadID          string
+	TurnID            string
+	AgentPID          string
+	InputTokens       int64
+	OutputTokens      int64
+	TotalTokens       int64
+	TurnCount         int
+	LastEventAt       *time.Time
+	LastEvent         string
+	CurrentActivity   string
+	CurrentActivityAt *time.Time
+	RecentEvents      []LiveEvent
 }
+
+type LiveEvent struct {
+	Name      string
+	Message   string
+	Detail    string
+	Timestamp time.Time
+}
+
+const maxLiveSessionEvents = 6
 
 type WorkerCancelReason string
 
@@ -113,16 +125,7 @@ func (a *RunAttempt) UpdateLastEvent(t time.Time) {
 func (a *RunAttempt) SetLastEventDetail(name, message string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	name = strings.TrimSpace(name)
-	message = strings.TrimSpace(message)
-	switch {
-	case name != "" && message != "":
-		a.Session.LastEvent = name + ": " + message
-	case name != "":
-		a.Session.LastEvent = name
-	default:
-		a.Session.LastEvent = message
-	}
+	a.Session.LastEvent = formatSessionEventDetail(name, message)
 }
 
 func (a *RunAttempt) GetLastEventAt() *time.Time {
@@ -164,10 +167,44 @@ func (a *RunAttempt) SetTurnCount(turnCount int) {
 	a.Session.TurnCount = turnCount
 }
 
+func (a *RunAttempt) RecordEvent(ts time.Time, name, message string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	detail := formatSessionEventDetail(name, message)
+	if detail == "" {
+		return
+	}
+	if shouldTrackLiveEvent(name) {
+		a.Session.LastEventAt = &ts
+		a.Session.LastEvent = detail
+		a.Session.RecentEvents = append(a.Session.RecentEvents, LiveEvent{
+			Name:      strings.TrimSpace(name),
+			Message:   strings.TrimSpace(message),
+			Detail:    detail,
+			Timestamp: ts,
+		})
+		if len(a.Session.RecentEvents) > maxLiveSessionEvents {
+			a.Session.RecentEvents = append([]LiveEvent(nil), a.Session.RecentEvents[len(a.Session.RecentEvents)-maxLiveSessionEvents:]...)
+		}
+	}
+	if shouldUpdateCurrentActivity(name) {
+		a.Session.CurrentActivity = detail
+		a.Session.CurrentActivityAt = &ts
+	}
+}
+
 func (a *RunAttempt) SessionSnapshot() LiveSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.Session
+	session := a.Session
+	if len(session.RecentEvents) > 0 {
+		session.RecentEvents = append([]LiveEvent(nil), session.RecentEvents...)
+	}
+	return session
 }
 
 func (a *RunAttempt) SetNeedsContinuation(needs bool) {
@@ -290,6 +327,49 @@ type AbandonedEntry struct {
 
 func isRetryAbandonComment(body string) bool {
 	return strings.Contains(body, retryAbandonCommentMarker)
+}
+
+func shouldTrackLiveEvent(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "", "token_usage":
+		return false
+	default:
+		return true
+	}
+}
+
+func shouldUpdateCurrentActivity(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "turn_started", "approval_request", "tool_call", "user_input_request", "server_request", "agent_stderr":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatSessionEventDetail(name, message string) string {
+	name = humanizeSessionEventName(name)
+	message = strings.TrimSpace(message)
+	switch {
+	case name != "" && message != "":
+		return name + ": " + message
+	case name != "":
+		return name
+	default:
+		return message
+	}
+}
+
+func humanizeSessionEventName(name string) string {
+	name = strings.TrimSpace(strings.ReplaceAll(name, "_", " "))
+	if name == "" {
+		return ""
+	}
+	parts := strings.Fields(name)
+	for i, part := range parts {
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 func (e *AbandonedEntry) ResumeAfter(issue *types.Issue) time.Time {

@@ -448,8 +448,7 @@ func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Mana
 }
 
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
-	attempt.UpdateLastEvent(e.Timestamp)
-	attempt.SetLastEventDetail(e.Name, e.Message)
+	attempt.RecordEvent(e.Timestamp, e.Name, e.Message)
 	attempt.UpdateSessionRuntime(e.SessionID, e.PID)
 	if e.Usage != nil {
 		o.state.mu.Lock()

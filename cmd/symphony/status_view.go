@@ -115,9 +115,13 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 	if len(running) == 0 {
 		fmt.Fprintln(&b, "No running agents")
 	} else {
-		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       SESSION        EVENT")
-		fmt.Fprintln(&b, "------------------------------------------------------------------------------------------------------")
+		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       SESSION        ACTIVITY")
+		fmt.Fprintln(&b, "----------------------------------------------------------------------------------------------------------")
 		for _, issue := range running {
+			activity := issue.issue.CurrentActivity
+			if activity == "" {
+				activity = issue.issue.LastEvent
+			}
 			fmt.Fprintf(
 				&b,
 				"%-16s %-10s %-19s %-3s %-15s %-12s %-14s %s\n",
@@ -128,8 +132,13 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 				formatAgeTurn(issue.issue, now),
 				formatCompactTokens(issue.issue.TotalTokens),
 				truncate(shortSession(issue.issue.SessionID), 14),
-				truncate(issue.issue.LastEvent, 32),
+				truncate(activity, 40),
 			)
+		}
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "Running details")
+		for _, issue := range running {
+			fmt.Fprintln(&b, renderRunningIssueDetail(issue.issue, issue.project))
 		}
 	}
 
@@ -351,4 +360,31 @@ func buildVersionLabel(summary status.Summary) string {
 		}
 	}
 	return label
+}
+
+func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "[%s] %s\n", project, issue.Identifier)
+	fmt.Fprintf(&b, "  stage: %s", humanizeStatus(issue.Status))
+	if issue.IssueState != "" {
+		fmt.Fprintf(&b, " | tracker: %s", issue.IssueState)
+	}
+	if issue.CurrentActivity != "" {
+		fmt.Fprintf(&b, "\n  current: %s", issue.CurrentActivity)
+	}
+	if runtime := formatIssueRuntime(issue); runtime != "" {
+		fmt.Fprintf(&b, "\n  runtime: %s", runtime)
+	}
+	if issue.LastEvent != "" && issue.LastEvent != issue.CurrentActivity {
+		fmt.Fprintf(&b, "\n  last event: %s", issue.LastEvent)
+	}
+	if len(issue.RecentEvents) > 0 {
+		b.WriteString("\n  recent:")
+		for _, event := range issue.RecentEvents {
+			fmt.Fprintf(&b, "\n    - %s", formatIssueEvent(event))
+		}
+	}
+
+	return b.String()
 }

@@ -94,6 +94,11 @@ type Runner struct {
 	pending     map[int]chan rpcResult
 	reqID       atomic.Int32
 	toolHandler DynamicToolHandler
+	currentTurn struct {
+		callback EventCallback
+		threadID string
+		turnID   string
+	}
 
 	notifCh         chan *Incoming
 	priorityNotifCh chan *Incoming
@@ -253,6 +258,8 @@ func (r *Runner) RunTurn(
 	turnTimeout := time.Duration(cfg.TurnTimeoutMs) * time.Millisecond
 	tctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	r.setCurrentTurnCallback(threadID, turnID, cb)
+	defer r.clearCurrentTurnCallback(turnID)
 
 	return r.consumeUntilDone(tctx, threadID, turnID, cb)
 }
@@ -285,7 +292,7 @@ func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, 
 		}
 
 		if msg.ServerReq != nil {
-			r.handleServerRequest(msg.ServerReq, cb)
+			r.handleServerRequest(threadID, turnID, msg.ServerReq, cb)
 			continue
 		}
 		if msg.Notif == nil {
@@ -327,7 +334,15 @@ func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, 
 				SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, RateLimit: rateLimit})
 
 		default:
-			slog.Debug("agent.unhandled_notification", "method", method)
+			emit(cb, Event{
+				Name:      "server_notification",
+				Timestamp: time.Now().UTC(),
+				SessionID: r.sessionID,
+				ThreadID:  threadID,
+				TurnID:    turnID,
+				PID:       r.pid,
+				Message:   summarizeServerMessage(method, params),
+			})
 		}
 	}
 }
@@ -351,19 +366,37 @@ func (r *Runner) handleTokenUsage(threadID, turnID string, params map[string]any
 	})
 }
 
-func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
+func (r *Runner) handleServerRequest(threadID, turnID string, req *Request, cb EventCallback) {
 	switch req.Method {
 	case methodCmdApproval, methodFileApproval:
+		emit(cb, Event{
+			Name:      "approval_request",
+			Timestamp: time.Now().UTC(),
+			SessionID: r.sessionID,
+			ThreadID:  threadID,
+			TurnID:    turnID,
+			PID:       r.pid,
+			Message:   summarizeServerRequest(req.Method, req.Params),
+		})
 		slog.Debug("agent.auto_approve", "method", req.Method)
 		data, _ := FormatResponse(req.ID, map[string]any{"approved": true})
 		_ = r.stdin.Write(data)
 		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
-			SessionID: r.sessionID, Message: req.Method})
+			SessionID: r.sessionID, ThreadID: threadID, TurnID: turnID, PID: r.pid, Message: summarizeServerRequest(req.Method, req.Params)})
 	case methodToolCall:
 		r.mu.Lock()
 		handler := r.toolHandler
 		r.mu.Unlock()
 		toolName, input := extractDynamicToolRequest(req.Params)
+		emit(cb, Event{
+			Name:      "tool_call",
+			Timestamp: time.Now().UTC(),
+			SessionID: r.sessionID,
+			ThreadID:  threadID,
+			TurnID:    turnID,
+			PID:       r.pid,
+			Message:   summarizeToolCall(toolName, input),
+		})
 		if handler != nil && toolName != "" {
 			go r.handleDynamicTool(req.ID, toolName, input)
 			return
@@ -384,6 +417,15 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		handler := r.toolHandler
 		r.mu.Unlock()
 		toolName, input := extractDynamicToolRequest(req.Params)
+		emit(cb, Event{
+			Name:      "user_input_request",
+			Timestamp: time.Now().UTC(),
+			SessionID: r.sessionID,
+			ThreadID:  threadID,
+			TurnID:    turnID,
+			PID:       r.pid,
+			Message:   summarizeToolCall(toolName, input),
+		})
 		if handler != nil && toolName != "" {
 			go r.handleDynamicTool(req.ID, toolName, input)
 			return
@@ -392,6 +434,15 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		data, _ := FormatErrorResponse(req.ID, -32601, "User input not supported")
 		_ = r.stdin.Write(data)
 	default:
+		emit(cb, Event{
+			Name:      "server_request",
+			Timestamp: time.Now().UTC(),
+			SessionID: r.sessionID,
+			ThreadID:  threadID,
+			TurnID:    turnID,
+			PID:       r.pid,
+			Message:   summarizeServerRequest(req.Method, req.Params),
+		})
 		slog.Warn("agent.unknown_server_request", "method", req.Method)
 		data, _ := FormatErrorResponse(req.ID, -32601, "Unsupported: "+req.Method)
 		_ = r.stdin.Write(data)
@@ -587,6 +638,47 @@ func firstNonEmptyString(values ...any) string {
 	return ""
 }
 
+func (r *Runner) setCurrentTurnCallback(threadID, turnID string, cb EventCallback) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.currentTurn.callback = cb
+	r.currentTurn.threadID = threadID
+	r.currentTurn.turnID = turnID
+}
+
+func (r *Runner) clearCurrentTurnCallback(turnID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentTurn.turnID != turnID {
+		return
+	}
+	r.currentTurn = struct {
+		callback EventCallback
+		threadID string
+		turnID   string
+	}{}
+}
+
+func (r *Runner) emitCurrentTurnEvent(name, message string) {
+	r.mu.Lock()
+	cb := r.currentTurn.callback
+	threadID := r.currentTurn.threadID
+	turnID := r.currentTurn.turnID
+	r.mu.Unlock()
+	if cb == nil {
+		return
+	}
+	emit(cb, Event{
+		Name:      name,
+		Timestamp: time.Now().UTC(),
+		SessionID: r.sessionID,
+		ThreadID:  threadID,
+		TurnID:    turnID,
+		PID:       r.pid,
+		Message:   message,
+	})
+}
+
 func summarizeParams(params map[string]any) string {
 	if len(params) == 0 {
 		return ""
@@ -600,6 +692,135 @@ func summarizeParams(params map[string]any) string {
 		return string(raw)
 	}
 	return string(raw[:limit]) + "...(truncated)"
+}
+
+func summarizeToolCall(toolName string, input map[string]any) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		toolName = "unknown tool"
+	}
+	if detail := summarizeStatusPayload(input); detail != "" {
+		return limitStatusText(toolName+" "+detail, 200)
+	}
+	return toolName
+}
+
+func summarizeServerRequest(method string, params map[string]any) string {
+	label := humanizeRPCMethod(method)
+	if detail := summarizeStatusPayload(params); detail != "" {
+		return limitStatusText(label+": "+detail, 200)
+	}
+	return label
+}
+
+func summarizeServerMessage(method string, params map[string]any) string {
+	label := humanizeRPCMethod(method)
+	if detail := summarizeStatusPayload(params); detail != "" {
+		return limitStatusText(label+": "+detail, 200)
+	}
+	return label
+}
+
+func summarizeStatusPayload(params map[string]any) string {
+	if len(params) == 0 {
+		return ""
+	}
+	filtered := filterStatusPayload(params, 0)
+	raw, err := json.Marshal(filtered)
+	if err != nil {
+		return summarizeParams(params)
+	}
+	text := strings.TrimSpace(string(raw))
+	text = strings.ReplaceAll(text, "\\n", " ")
+	return limitStatusText(text, 160)
+}
+
+func filterStatusPayload(v any, depth int) any {
+	if depth >= 2 {
+		switch value := v.(type) {
+		case string:
+			return limitStatusText(strings.Join(strings.Fields(value), " "), 80)
+		default:
+			return "..."
+		}
+	}
+
+	switch value := v.(type) {
+	case map[string]any:
+		keys := sortedKeys(value)
+		out := make(map[string]any)
+		for _, key := range keys {
+			if !isInterestingStatusKey(key) {
+				continue
+			}
+			out[key] = filterStatusPayload(value[key], depth+1)
+			if len(out) >= 4 {
+				return out
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+		for _, key := range keys {
+			if _, ok := out[key]; ok {
+				continue
+			}
+			out[key] = filterStatusPayload(value[key], depth+1)
+			if len(out) >= 4 {
+				break
+			}
+		}
+		return out
+	case []any:
+		limit := min(len(value), 2)
+		out := make([]any, 0, limit+1)
+		for i := 0; i < limit; i++ {
+			out = append(out, filterStatusPayload(value[i], depth+1))
+		}
+		if len(value) > limit {
+			out = append(out, fmt.Sprintf("...+%d more", len(value)-limit))
+		}
+		return out
+	case string:
+		return limitStatusText(strings.Join(strings.Fields(value), " "), 80)
+	default:
+		return value
+	}
+}
+
+func isInterestingStatusKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "name", "toolname", "input", "arguments", "path", "command", "cmd", "query", "identifier", "title", "text", "reason", "status":
+		return true
+	default:
+		return false
+	}
+}
+
+func humanizeRPCMethod(method string) string {
+	method = strings.Trim(strings.TrimSpace(method), "/")
+	if method == "" {
+		return "server message"
+	}
+	method = strings.ReplaceAll(method, "/", " ")
+	method = strings.ReplaceAll(method, "_", " ")
+	method = strings.ReplaceAll(method, ".", " ")
+	parts := strings.Fields(method)
+	for i, part := range parts {
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
+}
+
+func limitStatusText(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	if max <= 3 {
+		return text[:max]
+	}
+	return text[:max-3] + "..."
 }
 
 func sortedKeys(params map[string]any) []string {
@@ -671,7 +892,11 @@ func (r *Runner) readStderr(reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			slog.Debug("agent.stderr", "line", strings.TrimRight(string(line), "\r\n"))
+			text := strings.TrimSpace(strings.TrimRight(string(line), "\r\n"))
+			if text != "" {
+				slog.Debug("agent.stderr", "line", text)
+				r.emitCurrentTurnEvent("agent_stderr", limitStatusText(text, 200))
+			}
 		}
 		if err != nil {
 			return

@@ -24,6 +24,9 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	attempt.SetSessionIdentity("thread-1", "session-1234567890", "4321")
 	attempt.AddTokens(100, 20, 120)
 	attempt.SetLastEventDetail("item.completed", "done")
+	attempt.RecordEvent(lastEvent.Add(-time.Minute), "tool_call", "linear_graphql {\"query\":\"issue(id:J-17)\"}")
+	attempt.RecordEvent(lastEvent, "approval_request", "Item CommandExecution RequestApproval: {\"command\":\"git status\"}")
+	attempt.RecordEvent(lastEvent.Add(time.Second), "token_usage", "")
 	running.Running["1"] = attempt
 	running.Totals.InputTokens = 100
 	running.Totals.OutputTokens = 20
@@ -61,8 +64,20 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
 			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
 		}
-		if got[0].LastEvent != "item.completed: done" {
-			t.Fatalf("last_event = %q, want item.completed: done", got[0].LastEvent)
+		if got[0].LastEvent != "Approval Request: Item CommandExecution RequestApproval: {\"command\":\"git status\"}" {
+			t.Fatalf("last_event = %q, want approval request detail", got[0].LastEvent)
+		}
+		if got[0].CurrentActivity != "Approval Request: Item CommandExecution RequestApproval: {\"command\":\"git status\"}" {
+			t.Fatalf("current_activity = %q, want approval request detail", got[0].CurrentActivity)
+		}
+		if len(got[0].RecentEvents) != 2 {
+			t.Fatalf("recent_events len = %d, want 2", len(got[0].RecentEvents))
+		}
+		if got[0].RecentEvents[0].Detail != "Tool Call: linear_graphql {\"query\":\"issue(id:J-17)\"}" {
+			t.Fatalf("recent_events[0].detail = %q, want tool call detail", got[0].RecentEvents[0].Detail)
+		}
+		if got[0].RecentEvents[1].Detail != "Approval Request: Item CommandExecution RequestApproval: {\"command\":\"git status\"}" {
+			t.Fatalf("recent_events[1].detail = %q, want approval request detail", got[0].RecentEvents[1].Detail)
 		}
 		if got[0].SessionID != "session-1234567890" {
 			t.Fatalf("session_id = %q, want session-1234567890", got[0].SessionID)
@@ -90,6 +105,31 @@ func TestBuildSummaryMarksRetryAsError(t *testing.T) {
 	}
 	if summary.RetryCount != 1 {
 		t.Fatalf("retry_count = %d, want 1", summary.RetryCount)
+	}
+}
+
+func TestSummarizeRunningIssueKeepsCurrentActivityOnBookkeepingEvents(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
+	attempt := &orchestrator.RunAttempt{
+		Identifier: "J-19",
+		StartedAt:  now,
+	}
+	attempt.SetStatus(orchestrator.StatusStreamingTurn)
+	attempt.RecordEvent(now.Add(time.Minute), "tool_call", "apply_patch {\"path\":\"cmd/symphony/status.go\"}")
+	attempt.RecordEvent(now.Add(2*time.Minute), "approval_granted", "Command Execution")
+	attempt.RecordEvent(now.Add(3*time.Minute), "server_notification", "Item Completed")
+
+	summary := SummarizeRunningIssue(attempt)
+	if summary.CurrentActivity != "Tool Call: apply_patch {\"path\":\"cmd/symphony/status.go\"}" {
+		t.Fatalf("current_activity = %q, want tool call detail", summary.CurrentActivity)
+	}
+	if summary.LastEvent != "Server Notification: Item Completed" {
+		t.Fatalf("last_event = %q, want server notification detail", summary.LastEvent)
+	}
+	if len(summary.RecentEvents) != 3 {
+		t.Fatalf("recent_events len = %d, want 3", len(summary.RecentEvents))
 	}
 }
 

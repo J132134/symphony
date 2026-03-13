@@ -71,10 +71,21 @@ func TestFormatStatusSummaryIncludesRunningIssueDetails(t *testing.T) {
 			Health:           "healthy",
 			TrackerConnected: true,
 			RunningIssues: []status.RunningIssueSummary{{
-				Identifier:  "J-54",
-				Status:      "streaming_turn",
-				TurnCount:   3,
-				LastEventAt: "2026-03-09T01:00:00Z",
+				Identifier:      "J-54",
+				Status:          "streaming_turn",
+				IssueState:      "In Progress",
+				TurnCount:       3,
+				LastEventAt:     "2026-03-09T01:00:00Z",
+				CurrentActivity: "Tool Call: linear_graphql {\"query\":\"issue(id:J-54)\"}",
+				SessionID:       "session-1234567890",
+				PID:             "4321",
+				TotalTokens:     42100,
+				RecentEvents: []status.RunningEventDetail{
+					{
+						OccurredAt: "2026-03-09T00:59:00Z",
+						Detail:     "Tool Call: linear_graphql {\"query\":\"issue(id:J-54)\"}",
+					},
+				},
 			}},
 		}},
 	})
@@ -83,6 +94,10 @@ func TestFormatStatusSummaryIncludesRunningIssueDetails(t *testing.T) {
 		"Status: running",
 		"[alpha] running (healthy)",
 		"J-54 | streaming_turn | turn 3 | last event 2026-03-09T01:00:00Z",
+		"tracker state: In Progress",
+		"current: Tool Call: linear_graphql",
+		"runtime: session session-1234567890 | pid 4321 | tokens 42,100",
+		"recent events:",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -155,14 +170,27 @@ func TestRenderStatusDashboardIncludesRunningAndBackoff(t *testing.T) {
 			SubprocessCount: 1,
 			RetryCount:      1,
 			RunningIssues: []status.RunningIssueSummary{{
-				Identifier:  "SYM-12",
-				Status:      "streaming_turn",
-				Priority:    &priority,
-				TurnCount:   2,
-				StartedAt:   now.Add(-2 * time.Minute).Format(time.RFC3339),
-				LastEvent:   "item.completed: patch applied",
-				SessionID:   "019ce23639d97ea097f22d7883fe9820",
-				TotalTokens: 42100,
+				Identifier:      "SYM-12",
+				Status:          "streaming_turn",
+				IssueState:      "In Progress",
+				Priority:        &priority,
+				TurnCount:       2,
+				StartedAt:       now.Add(-2 * time.Minute).Format(time.RFC3339),
+				LastEvent:       "Server Notification: Item Completed: {\"status\":\"patched\"}",
+				CurrentActivity: "Tool Call: apply_patch {\"path\":\"cmd/symphony/status.go\"}",
+				SessionID:       "019ce23639d97ea097f22d7883fe9820",
+				PID:             "4321",
+				TotalTokens:     42100,
+				RecentEvents: []status.RunningEventDetail{
+					{
+						OccurredAt: now.Add(-30 * time.Second).Format(time.RFC3339),
+						Detail:     "Tool Call: apply_patch {\"path\":\"cmd/symphony/status.go\"}",
+					},
+					{
+						OccurredAt: now.Add(-15 * time.Second).Format(time.RFC3339),
+						Detail:     "Server Notification: Item Completed: {\"status\":\"patched\"}",
+					},
+				},
 			}},
 			RetryEntries: []status.RetrySummary{{
 				Identifier: "SYM-99",
@@ -180,6 +208,10 @@ func TestRenderStatusDashboardIncludesRunningAndBackoff(t *testing.T) {
 		"Running",
 		"SYM-12",
 		"42.1k",
+		"ACTIVITY",
+		"Running details",
+		"current: Tool Call: apply_patch",
+		"runtime: session 019ce23639d97ea097f22d7883fe9820 | pid 4321 | tokens 42,100",
 		"Backoff queue",
 		"SYM-99",
 		"agent crashed",
