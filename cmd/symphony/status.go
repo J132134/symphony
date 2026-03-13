@@ -161,6 +161,9 @@ func formatStatusSummary(summary status.Summary) string {
 			}
 			if issue.CurrentActivity != "" {
 				fmt.Fprintf(&b, "      current: %s\n", issue.CurrentActivity)
+				if issue.CurrentActivityAt != "" {
+					fmt.Fprintf(&b, "      current at: %s\n", issue.CurrentActivityAt)
+				}
 			}
 			if runtime := formatIssueRuntime(issue); runtime != "" {
 				fmt.Fprintf(&b, "      runtime: %s\n", runtime)

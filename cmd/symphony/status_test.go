@@ -99,6 +99,7 @@ func TestFormatStatusSummaryIncludesRunningIssueDetails(t *testing.T) {
 		"J-54 | streaming_turn | turn 3 | last event 2026-03-09T01:00:00Z",
 		"tracker state: In Progress",
 		"current: Tool Call: linear_graphql",
+		"current at: 2026-03-09T00:59:30Z",
 		"runtime: session session-1234567890 | pid 4321 | tokens in 4,200 / out 380 / total 42,100",
 		"recent events:",
 	} {
