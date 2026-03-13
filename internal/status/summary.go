@@ -39,6 +39,8 @@ type RunningIssueSummary struct {
 	RecentEvents      []RunningEventDetail `json:"recent_events,omitempty"`
 	StartedAt         string               `json:"started_at,omitempty"`
 	SessionID         string               `json:"session_id,omitempty"`
+	ThreadID          string               `json:"thread_id,omitempty"`
+	TurnID            string               `json:"turn_id,omitempty"`
 	PID               string               `json:"pid,omitempty"`
 	InputTokens       int64                `json:"input_tokens,omitempty"`
 	OutputTokens      int64                `json:"output_tokens,omitempty"`
@@ -186,6 +188,8 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 	issue.LastEvent = session.LastEvent
 	issue.CurrentActivity = session.CurrentActivity
 	issue.SessionID = session.SessionID
+	issue.ThreadID = session.ThreadID
+	issue.TurnID = session.TurnID
 	issue.PID = session.AgentPID
 	issue.InputTokens = session.InputTokens
 	issue.OutputTokens = session.OutputTokens

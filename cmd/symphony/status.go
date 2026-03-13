@@ -201,6 +201,12 @@ func formatIssueRuntime(issue status.RunningIssueSummary) string {
 	if issue.SessionID != "" {
 		parts = append(parts, "session "+issue.SessionID)
 	}
+	if issue.ThreadID != "" {
+		parts = append(parts, "thread "+issue.ThreadID)
+	}
+	if issue.TurnID != "" {
+		parts = append(parts, "turn "+issue.TurnID)
+	}
 	if issue.PID != "" {
 		parts = append(parts, "pid "+issue.PID)
 	}

@@ -219,9 +219,9 @@ symphony status --json
 
 `--url`을 주지 않으면 daemon 설정 파일에서 `status_server.port`를 읽고, 설정 파일이 없으면 기본값 `http://127.0.0.1:7777`로 조회한다. 기본 text 출력은 터미널에서 live dashboard를 그리고 3초마다 새 summary를 가져와 갱신한다. `--once`를 주면 기존처럼 1회 출력만 하고 종료하며, `--json`은 항상 단발 JSON 출력이다.
 
-live dashboard와 `--once` 출력은 실행 중인 이슈마다 현재 stage뿐 아니라 tracker state, 현재 activity, current activity 시각, session/pid runtime, input/output/total token usage, 최근 이벤트 목록까지 함께 보여준다. 따라서 어떤 에이전트가 지금 어떤 tool call을 실행 중인지, Codex app-server가 어떤 서버 요청/알림/stderr를 내보냈는지 터미널에서 바로 확인할 수 있다.
+live dashboard와 `--once` 출력은 실행 중인 이슈마다 현재 stage뿐 아니라 tracker state, 현재 activity, current activity 시각, session/thread/turn/pid runtime, input/output/total token usage, 최근 이벤트 목록까지 함께 보여준다. 따라서 어떤 에이전트가 지금 어떤 tool call을 실행 중인지, Codex app-server가 어떤 서버 요청/알림/stderr를 내보냈는지 터미널에서 바로 확인할 수 있다.
 
-`--json` 출력의 `projects[].running_issues[]`에는 `current_activity_at`, `current_activity`, `recent_events[]`, `session_id`, `pid`, `input_tokens`, `output_tokens`, `total_tokens`가 포함된다. 다른 대시보드나 자동화 스크립트가 상세 진행 상황을 재가공할 때 이 필드를 그대로 사용할 수 있다.
+`--json` 출력의 `projects[].running_issues[]`에는 `current_activity_at`, `current_activity`, `recent_events[]`, `session_id`, `thread_id`, `turn_id`, `pid`, `input_tokens`, `output_tokens`, `total_tokens`가 포함된다. 다른 대시보드나 자동화 스크립트가 상세 진행 상황을 재가공할 때 이 필드를 그대로 사용할 수 있다.
 
 원격 웹 대시보드는 이번 범위에 포함하지 않는다. 필요하면 동일한 status API를 SSH 포트 포워딩, Tailscale, reverse proxy 같은 운영 경로로 노출해 후속으로 붙일 수 있다.
 

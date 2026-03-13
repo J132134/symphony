@@ -82,6 +82,12 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		if got[0].SessionID != "session-1234567890" {
 			t.Fatalf("session_id = %q, want session-1234567890", got[0].SessionID)
 		}
+		if got[0].ThreadID != "thread-1" {
+			t.Fatalf("thread_id = %q, want thread-1", got[0].ThreadID)
+		}
+		if got[0].TurnID != "" {
+			t.Fatalf("turn_id = %q, want empty turn id", got[0].TurnID)
+		}
 		if got[0].TotalTokens != 120 {
 			t.Fatalf("total_tokens = %d, want 120", got[0].TotalTokens)
 		}
