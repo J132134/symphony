@@ -120,3 +120,111 @@ func TestRenderOmitsTurnContextBlockWhenEmpty(t *testing.T) {
 		t.Fatalf("Render output = %q, want empty", out)
 	}
 }
+
+func TestLoadMergedCombinesConfigAndInjectsOverlayBody(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.md")
+	overlayPath := filepath.Join(dir, "overlay.md")
+
+	base := `---
+tracker:
+  api_key: token
+  active_states:
+    - Todo
+agent:
+  max_turns: 20
+  continuation_prompt: "base"
+---
+공통 시작
+
+{{ workflow_overlay_body }}
+
+공통 종료`
+	overlay := `---
+tracker:
+  project_slug: abc123
+agent:
+  max_concurrent_agents: 3
+---
+프로젝트 지침`
+
+	if err := os.WriteFile(basePath, []byte(base), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+
+	def, err := LoadMerged(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadMerged: %v", err)
+	}
+
+	tracker, _ := def.Config["tracker"].(map[string]any)
+	if got, _ := tracker["api_key"].(string); got != "token" {
+		t.Fatalf("tracker.api_key = %q, want token", got)
+	}
+	if got, _ := tracker["project_slug"].(string); got != "abc123" {
+		t.Fatalf("tracker.project_slug = %q, want abc123", got)
+	}
+
+	agent, _ := def.Config["agent"].(map[string]any)
+	if got, _ := agent["max_turns"].(int); got != 20 {
+		t.Fatalf("agent.max_turns = %v, want 20", agent["max_turns"])
+	}
+	if got, _ := agent["max_concurrent_agents"].(int); got != 3 {
+		t.Fatalf("agent.max_concurrent_agents = %v, want 3", agent["max_concurrent_agents"])
+	}
+
+	for _, want := range []string{"공통 시작", "프로젝트 지침", "공통 종료"} {
+		if !strings.Contains(def.RawBody, want) {
+			t.Fatalf("merged body missing %q:\n%s", want, def.RawBody)
+		}
+	}
+}
+
+func TestLoadUsesWorkflowBaseReferenceFromOverlay(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.md")
+	overlayPath := filepath.Join(dir, "WORKFLOW.md")
+
+	base := `---
+tracker:
+  kind: linear
+project:
+  name: shared
+---
+{{ workflow.project.name }}`
+	overlay := `---
+workflow_base: base.md
+tracker:
+  project_slug: xyz
+project:
+  name: overlay
+---
+`
+
+	if err := os.WriteFile(basePath, []byte(base), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+
+	def, err := Load(overlayPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	out, err := Render(def, IssueContext{}, 1)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.TrimSpace(out) != "overlay" {
+		t.Fatalf("Render output = %q, want overlay", out)
+	}
+}

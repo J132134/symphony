@@ -4,6 +4,7 @@ package workflow
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -19,8 +20,68 @@ type Definition struct {
 	FilePath string
 }
 
+const overlayBodyMarker = "{{ workflow_overlay_body }}"
+
 // Load parses a WORKFLOW.md file.
 func Load(path string) (*Definition, error) {
+	overlay, err := parseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	basePath := resolveReferencedBasePath(filepath.Dir(path), overlay.cfg)
+	return loadMergedDefinition(basePath, path, overlay)
+}
+
+// LoadMerged parses an optional base workflow plus a project overlay workflow.
+func LoadMerged(basePath, overlayPath string) (*Definition, error) {
+	overlay, err := parseFile(overlayPath)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(basePath) == "" {
+		basePath = resolveReferencedBasePath(filepath.Dir(overlayPath), overlay.cfg)
+	}
+	return loadMergedDefinition(basePath, overlayPath, overlay)
+}
+
+func loadMergedDefinition(basePath, overlayPath string, overlay *parsedFile) (*Definition, error) {
+	base, err := parseFile(basePath)
+	if err != nil {
+		return nil, err
+	}
+	cfg := mergeMaps(base.cfg, overlay.cfg)
+	body := mergeBodies(base.body, overlay.body)
+
+	// pongo2 uses Django-style filter syntax (|filter:"arg").
+	// Convert Jinja2-style (|filter(arg)) to pongo2-compatible.
+	tmpl, err := pongo2.FromString(convertFilterSyntax(body))
+	if err != nil {
+		return nil, fmt.Errorf("template parse: %w", err)
+	}
+
+	filePath := overlayPath
+	if strings.TrimSpace(filePath) == "" {
+		filePath = basePath
+	}
+
+	return &Definition{
+		Config:   cfg,
+		Template: tmpl,
+		RawBody:  body,
+		FilePath: filePath,
+	}, nil
+}
+
+type parsedFile struct {
+	cfg  map[string]any
+	body string
+}
+
+func parseFile(path string) (*parsedFile, error) {
+	if strings.TrimSpace(path) == "" {
+		return &parsedFile{cfg: map[string]any{}}, nil
+	}
+
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -59,21 +120,105 @@ func Load(path string) (*Definition, error) {
 		cfg = map[string]any{}
 	}
 
-	// pongo2 uses Django-style filter syntax (|filter:"arg").
-	// Convert Jinja2-style (|filter(arg)) to pongo2-compatible.
-	body := convertFilterSyntax(rawBody)
+	return &parsedFile{cfg: cfg, body: rawBody}, nil
+}
 
-	tmpl, err := pongo2.FromString(body)
-	if err != nil {
-		return nil, fmt.Errorf("template parse: %w", err)
+func resolveReferencedBasePath(dir string, cfg map[string]any) string {
+	if len(cfg) == 0 {
+		return ""
+	}
+	raw, _ := cfg["workflow_base"].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, strings.TrimPrefix(raw, "~/"))
+		}
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw)
+	}
+	if strings.TrimSpace(dir) == "" {
+		return filepath.Clean(raw)
+	}
+	return filepath.Clean(filepath.Join(dir, raw))
+}
+
+func mergeBodies(baseBody, overlayBody string) string {
+	baseBody = strings.TrimSpace(baseBody)
+	overlayBody = strings.TrimSpace(overlayBody)
+
+	switch {
+	case baseBody == "":
+		return overlayBody
+	case overlayBody == "":
+		return baseBody
+	case strings.Contains(baseBody, overlayBodyMarker):
+		return strings.ReplaceAll(baseBody, overlayBodyMarker, overlayBody)
+	default:
+		return baseBody + "\n\n" + overlayBody
+	}
+}
+
+func mergeMaps(base, overlay map[string]any) map[string]any {
+	switch {
+	case len(base) == 0 && len(overlay) == 0:
+		return map[string]any{}
+	case len(base) == 0:
+		return cloneMap(overlay)
+	case len(overlay) == 0:
+		return cloneMap(base)
 	}
 
-	return &Definition{
-		Config:   cfg,
-		Template: tmpl,
-		RawBody:  rawBody,
-		FilePath: path,
-	}, nil
+	merged := cloneMap(base)
+	for key, value := range overlay {
+		baseValue, ok := merged[key]
+		if !ok {
+			merged[key] = cloneValue(value)
+			continue
+		}
+		baseMap, baseOK := asStringAnyMap(baseValue)
+		overlayMap, overlayOK := asStringAnyMap(value)
+		if baseOK && overlayOK {
+			merged[key] = mergeMaps(baseMap, overlayMap)
+			continue
+		}
+		merged[key] = cloneValue(value)
+	}
+	return merged
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = cloneValue(value)
+	}
+	return dst
+}
+
+func cloneValue(value any) any {
+	if m, ok := asStringAnyMap(value); ok {
+		return cloneMap(m)
+	}
+	if list, ok := value.([]any); ok {
+		out := make([]any, len(list))
+		for i, item := range list {
+			out[i] = cloneValue(item)
+		}
+		return out
+	}
+	return value
+}
+
+func asStringAnyMap(value any) (map[string]any, bool) {
+	m, ok := value.(map[string]any)
+	return m, ok
 }
 
 // IssueContext is the template context for an issue.
@@ -93,6 +238,10 @@ type IssueContext struct {
 
 // Render renders the prompt template for the given issue and attempt number.
 func Render(def *Definition, issue IssueContext, attempt int) (string, error) {
+	var workflowConfig map[string]any
+	if def != nil {
+		workflowConfig = def.Config
+	}
 	return render(def.Template, pongo2.Context{
 		"issue": map[string]any{
 			"id":          issue.ID,
@@ -105,6 +254,7 @@ func Render(def *Definition, issue IssueContext, attempt int) (string, error) {
 			"url":         nonEmpty(issue.URL),
 			"branch_name": nonEmpty(issue.BranchName),
 		},
+		"workflow":     workflowConfig,
 		"attempt":      attempt,
 		"continuation": issue.Continuation,
 		"turn_context": nonEmpty(issue.TurnContext),
@@ -123,6 +273,10 @@ func RenderContinuation(def *Definition, issue IssueContext, turnNum, maxTurns i
 	if err != nil {
 		return "", fmt.Errorf("continuation_prompt template parse: %w", err)
 	}
+	var workflowConfig map[string]any
+	if def != nil {
+		workflowConfig = def.Config
+	}
 	ctx := pongo2.Context{
 		"issue": map[string]any{
 			"id":          issue.ID,
@@ -133,6 +287,7 @@ func RenderContinuation(def *Definition, issue IssueContext, turnNum, maxTurns i
 			"labels":      issue.Labels,
 			"url":         nonEmpty(issue.URL),
 		},
+		"workflow":     workflowConfig,
 		"turn_num":     turnNum,
 		"max_turns":    maxTurns,
 		"turn_context": nonEmpty(issue.TurnContext),

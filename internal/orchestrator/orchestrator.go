@@ -29,9 +29,10 @@ const (
 
 // Orchestrator drives one project: polls Linear, dispatches agents, reconciles.
 type Orchestrator struct {
-	workflowPath  string
-	name          string
-	globalLimiter *SessionLimiter
+	workflowBasePath string
+	workflowPath     string
+	name             string
+	globalLimiter    *SessionLimiter
 
 	mu      sync.Mutex
 	cfg     *config.SymphonyConfig
@@ -69,7 +70,13 @@ type workerHandle struct {
 
 // New creates an Orchestrator. Call Run to start it.
 func New(workflowPath string, port int, name string, globalLimiter *SessionLimiter) *Orchestrator {
+	return NewWithBase("", workflowPath, port, name, globalLimiter)
+}
+
+// NewWithBase creates an Orchestrator with an optional shared workflow base.
+func NewWithBase(workflowBasePath, workflowPath string, port int, name string, globalLimiter *SessionLimiter) *Orchestrator {
 	return &Orchestrator{
+		workflowBasePath:      workflowBasePath,
 		workflowPath:          workflowPath,
 		name:                  name,
 		globalLimiter:         globalLimiter,
@@ -461,24 +468,34 @@ func (o *Orchestrator) startupCleanup(ctx context.Context) {
 }
 
 func (o *Orchestrator) watchWorkflow(ctx context.Context) {
-	if err := filewatch.Run(ctx, o.stopCh, o.workflowPath, o.workflowWatchDebounce, filewatch.Callbacks{
+	paths := []string{o.workflowPath}
+	if strings.TrimSpace(o.workflowBasePath) != "" && o.workflowBasePath != o.workflowPath {
+		paths = append(paths, o.workflowBasePath)
+	}
+	for _, path := range paths {
+		go o.watchWorkflowPath(ctx, path)
+	}
+}
+
+func (o *Orchestrator) watchWorkflowPath(ctx context.Context, path string) {
+	if err := filewatch.Run(ctx, o.stopCh, path, o.workflowWatchDebounce, filewatch.Callbacks{
 		Reload: o.reloadWorkflow,
 		OnReloaded: func() {
-			slog.Info("orchestrator.workflow_reloaded", "project", o.name, "path", o.workflowPath)
+			slog.Info("orchestrator.workflow_reloaded", "project", o.name, "path", path)
 		},
 		OnReloadError: func(err error) {
-			slog.Error("orchestrator.workflow_reload_failed", "project", o.name, "path", o.workflowPath, "error", err)
+			slog.Error("orchestrator.workflow_reload_failed", "project", o.name, "path", path, "error", err)
 		},
 		OnWatchError: func(err error) {
-			slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
+			slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", path, "error", err)
 		},
 	}); err != nil && ctx.Err() == nil && !o.isStopping() {
-		slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", o.workflowPath, "error", err)
+		slog.Error("orchestrator.workflow_watch_failed", "project", o.name, "path", path, "error", err)
 	}
 }
 
 func (o *Orchestrator) reloadWorkflow() error {
-	wf, err := workflow.Load(o.workflowPath)
+	wf, err := workflow.LoadMerged(o.workflowBasePath, o.workflowPath)
 	if err != nil {
 		return err
 	}

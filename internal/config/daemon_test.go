@@ -275,9 +275,19 @@ func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) 
 	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
 		t.Fatalf("write workflow: %v", err)
 	}
+	basePath := filepath.Join(configDir, "base.md")
+	if err := os.WriteFile(basePath, []byte("# base\n"), 0o644); err != nil {
+		t.Fatalf("write workflow base: %v", err)
+	}
 
 	configPath := filepath.Join(configDir, "config.yaml")
-	configYAML := "projects:\n  - name: alpha\n    workflow: workflows/WORKFLOW.md\nstatus_server:\n  enabled: false\n"
+	configYAML := "" +
+		"projects:\n" +
+		"  - name: alpha\n" +
+		"    workflow_base: base.md\n" +
+		"    workflow: workflows/WORKFLOW.md\n" +
+		"status_server:\n" +
+		"  enabled: false\n"
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -301,6 +311,9 @@ func TestLoadDaemonConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) 
 
 	if got, want := cfg.Projects[0].Workflow, workflowPath; got != want {
 		t.Fatalf("Workflow = %q, want %q", got, want)
+	}
+	if got, want := cfg.Projects[0].WorkflowBase, basePath; got != want {
+		t.Fatalf("WorkflowBase = %q, want %q", got, want)
 	}
 }
 
@@ -372,4 +385,44 @@ func TestDaemonConfigValidateRejectsUnreadableWorkflowAndPortRange(t *testing.T)
 	requireErrorContaining(t, errs, "workflow")
 	requireErrorContaining(t, errs, "not readable")
 	requireErrorContaining(t, errs, "status_server.port must be between 1 and 65535")
+}
+
+func TestDaemonConfigValidateRejectsUnreadableWorkflowBase(t *testing.T) {
+	t.Parallel()
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{
+			Name:         "alpha",
+			WorkflowBase: "/tmp/missing-base.md",
+			Workflow:     "/tmp/workflow.md",
+		}},
+	}
+
+	errs := cfg.Validate()
+	requireErrorContaining(t, errs, "workflow_base")
+}
+
+func TestDaemonConfigProjectByWorkflowPath(t *testing.T) {
+	t.Parallel()
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{
+			{Name: "alpha", WorkflowBase: "/tmp/base.md", Workflow: "/tmp/a/WORKFLOW.md"},
+			{Name: "beta", Workflow: "/tmp/b/WORKFLOW.md"},
+		},
+	}
+
+	project, ok := cfg.ProjectByWorkflowPath("/tmp/a/WORKFLOW.md")
+	if !ok {
+		t.Fatal("ProjectByWorkflowPath() = false, want true")
+	}
+	if project.Name != "alpha" {
+		t.Fatalf("project.Name = %q, want alpha", project.Name)
+	}
+	if project.WorkflowBase != "/tmp/base.md" {
+		t.Fatalf("project.WorkflowBase = %q, want /tmp/base.md", project.WorkflowBase)
+	}
+	if _, ok := cfg.ProjectByWorkflowPath("/tmp/missing/WORKFLOW.md"); ok {
+		t.Fatal("ProjectByWorkflowPath() = true for missing workflow, want false")
+	}
 }

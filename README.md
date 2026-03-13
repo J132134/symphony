@@ -128,6 +128,8 @@ symphony run --workflow WORKFLOW.md
 symphony run --workflow WORKFLOW.md --port 8080
 ```
 
+`symphony validate`는 기본적으로 `~/.config/symphony/config.yaml`을 함께 읽어, 해당 workflow가 등록된 프로젝트라면 `projects[].workflow_base`까지 포함한 최종 merged workflow를 검증한다. 다른 config 파일을 쓰는 경우 `--config /path/to/config.yaml`을 추가한다.
+
 ## 멀티 프로젝트 데몬
 
 여러 프로젝트를 단일 프로세스로 실행하려면 `~/.config/symphony/config.yaml`을 작성한다.

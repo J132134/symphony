@@ -363,11 +363,11 @@ func (pr *projectRunner) healthStringLocked() string {
 }
 
 func newManagedOrchestrator(proj config.ProjectConfig, limiter *orchestrator.SessionLimiter) managedOrchestrator {
-	return orchestrator.New(proj.Workflow, 0, proj.Name, limiter)
+	return orchestrator.NewWithBase(proj.WorkflowBase, proj.Workflow, 0, proj.Name, limiter)
 }
 
 func probeProjectHealth(ctx context.Context, proj config.ProjectConfig) error {
-	wf, err := workflow.Load(proj.Workflow)
+	wf, err := workflow.LoadMerged(proj.WorkflowBase, proj.Workflow)
 	if err != nil {
 		return fmt.Errorf("load workflow: %w", err)
 	}
@@ -718,5 +718,5 @@ func (m *Manager) runnersSnapshot() []*projectRunner {
 }
 
 func projectConfigEqual(a, b config.ProjectConfig) bool {
-	return a.Name == b.Name && a.Workflow == b.Workflow
+	return a.Name == b.Name && a.WorkflowBase == b.WorkflowBase && a.Workflow == b.Workflow
 }

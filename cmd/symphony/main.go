@@ -99,6 +99,7 @@ func cmdRun(args []string) {
 func cmdValidate(args []string) {
 	opts := parseFlags(args, map[string]string{
 		"--workflow": "WORKFLOW.md",
+		"--config":   "",
 	})
 
 	workflowPath, err := filepath.Abs(opts["--workflow"])
@@ -106,7 +107,7 @@ func cmdValidate(args []string) {
 		fatalf("resolve workflow path: %v", err)
 	}
 
-	wf, err := workflow.Load(workflowPath)
+	wf, err := loadWorkflowForValidate(workflowPath, opts["--config"])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -128,6 +129,17 @@ func cmdValidate(args []string) {
 	fmt.Printf("  Terminal states: %v\n", cfg.TerminalStates())
 	fmt.Printf("  Max concurrent: %d\n", cfg.MaxConcurrentAgents())
 	fmt.Printf("  Agent command: %s\n", cfg.CodexCommand())
+}
+
+func loadWorkflowForValidate(workflowPath, configPath string) (*workflow.Definition, error) {
+	if cfg, err := config.LoadDaemonConfig(configPath); err == nil {
+		if project, ok := cfg.ProjectByWorkflowPath(workflowPath); ok {
+			return workflow.LoadMerged(project.WorkflowBase, project.Workflow)
+		}
+	} else if strings.TrimSpace(configPath) != "" {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return workflow.Load(workflowPath)
 }
 
 // -- daemon --

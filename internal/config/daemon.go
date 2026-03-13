@@ -11,8 +11,9 @@ import (
 )
 
 type ProjectConfig struct {
-	Name     string
-	Workflow string // resolved absolute path
+	Name         string
+	WorkflowBase string // resolved absolute path
+	Workflow     string // resolved absolute path
 }
 
 type AutoUpdateConfig struct {
@@ -88,9 +89,15 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 				continue
 			}
 			name, _ := pm["name"].(string)
+			wfBase, _ := pm["workflow_base"].(string)
 			wf, _ := pm["workflow"].(string)
+			wfBase = resolvePath(configDir, wfBase)
 			wf = resolvePath(configDir, wf)
-			cfg.Projects = append(cfg.Projects, ProjectConfig{Name: name, Workflow: wf})
+			cfg.Projects = append(cfg.Projects, ProjectConfig{
+				Name:         name,
+				WorkflowBase: wfBase,
+				Workflow:     wf,
+			})
 		}
 	}
 
@@ -183,6 +190,9 @@ func (c *DaemonConfig) Validate() []string {
 		} else {
 			errs = append(errs, validateReadableFile(p.Workflow, fmt.Sprintf("project '%s': workflow", p.Name))...)
 		}
+		if strings.TrimSpace(p.WorkflowBase) != "" {
+			errs = append(errs, validateReadableFile(p.WorkflowBase, fmt.Sprintf("project '%s': workflow_base", p.Name))...)
+		}
 	}
 	for name, count := range names {
 		if count > 1 {
@@ -221,6 +231,19 @@ func (c *DaemonConfig) MaxTotalConcurrentSessions() int {
 		return DefaultMaxTotalConcurrentSessions()
 	}
 	return c.Agent.MaxTotalConcurrentSessions
+}
+
+func (c *DaemonConfig) ProjectByWorkflowPath(path string) (ProjectConfig, bool) {
+	if c == nil || strings.TrimSpace(path) == "" {
+		return ProjectConfig{}, false
+	}
+	target := filepath.Clean(path)
+	for _, project := range c.Projects {
+		if filepath.Clean(project.Workflow) == target {
+			return project, true
+		}
+	}
+	return ProjectConfig{}, false
 }
 
 func DefaultMaxTotalConcurrentSessions() int {
