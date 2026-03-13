@@ -5,9 +5,9 @@
 
 projects:
   - name: my-project
-    workflow: ~/projects/my-project/WORKFLOW.md
+    workflow: ~/.config/symphony/workflows/my-project.md
   # - name: another-project
-  #   workflow: ~/projects/another-project/WORKFLOW.md
+  #   workflow: ~/.config/symphony/workflows/another-project.md
 
 status_server:
   enabled: true

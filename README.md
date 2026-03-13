@@ -55,55 +55,48 @@ make install-launchagents
 
 ## 빠른 시작
 
-### 1. `WORKFLOW.md` 작성
+### 1. workflow overlay 작성
 
-프로젝트 루트에 `WORKFLOW.md`를 만든다. YAML front matter가 설정이고, `---` 이후가 에이전트에 전달되는 Jinja2 호환 프롬프트 템플릿이다.
+프로젝트별 workflow는 `~/.config/symphony/workflows/` 아래에 두는 구성을 권장한다. YAML front matter가 설정이고, `---` 이후가 에이전트에 전달되는 Jinja2 호환 프롬프트 템플릿이다. 공통 base를 쓸 때는 overlay 파일 상단에 `workflow_base`를 둔다.
 
 ```markdown
 ---
+workflow_base: ~/.config/symphony/workflows/linear-team-base.md
+
 tracker:
-  kind: linear
-  api_key: $LINEAR_API_KEY
   project_slug: my-project
-  active_states: [Todo, Plan Review, In Progress, Human Review]
-  pause_states: [Plan Review, Human Review]
-  terminal_states: [Done, Cancelled, Duplicate]
-  post_comments: true
-  on_success_state: Human Review
-  on_failure_state: ""
 
-polling:
-  interval_ms: 10000
+hooks:
+  after_create: |
+    git clone --depth 1 https://github.com/example/my-project.git .
+    make setup
 
-workspace:
-  root: ~/.symphony/workspaces
-
-agent:
-  max_concurrent_agents: 3
-  max_concurrent_agents_by_state:
-    Merging: 1
-  max_attempts: 3
-  max_turns: 10
-
-codex:
-  command: codex app-server
-  approval_policy: auto-edit
-  turn_timeout_ms: 3600000
-
-daemon:
-  drain_timeout_ms: 360000
+project:
+  name: my-project
+  summary: 내 프로젝트 설명.
+  conventions:
+    - "빌드: make build"
+    - "테스트: make test"
+  validation_commands:
+    - make test
 ---
-You are working on {{ issue.identifier }}: {{ issue.title }}.
+## 프로젝트 추가 지침
 
-{% if issue.description %}
-## Description
-{{ issue.description }}
-{% endif %}
-
-Complete the issue. When done, update the issue state to "In Review".
+- 빌드 전 `make generate`가 필요하면 항상 먼저 실행한다.
 ```
 
-### 2. 환경변수 설정
+### 2. `config.yaml` 작성
+
+`~/.config/symphony/config.yaml`에 공통 base와 프로젝트 overlay를 등록한다.
+
+```yaml
+projects:
+  - name: my-project
+    workflow_base: ~/.config/symphony/workflows/linear-team-base.md
+    workflow: ~/.config/symphony/workflows/my-project.md
+```
+
+### 3. 환경변수 설정
 
 ```bash
 export LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxx
@@ -115,20 +108,20 @@ export LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxx
 LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxx
 ```
 
-### 3. 실행
+### 4. 실행
 
 ```bash
 # 설정 검증
-symphony validate --workflow WORKFLOW.md
+symphony validate --workflow ~/.config/symphony/workflows/my-project.md
 
 # 실행
-symphony run --workflow WORKFLOW.md
+symphony run --workflow ~/.config/symphony/workflows/my-project.md
 
 # 대시보드 포함
-symphony run --workflow WORKFLOW.md --port 8080
+symphony run --workflow ~/.config/symphony/workflows/my-project.md --port 8080
 ```
 
-`symphony validate`는 기본적으로 `~/.config/symphony/config.yaml`을 함께 읽어, 해당 workflow가 등록된 프로젝트라면 `projects[].workflow_base`까지 포함한 최종 merged workflow를 검증한다. 다른 config 파일을 쓰는 경우 `--config /path/to/config.yaml`을 추가한다.
+`symphony validate`는 기본적으로 `~/.config/symphony/config.yaml`을 함께 읽어, 해당 workflow가 등록된 프로젝트라면 그 프로젝트 entry를 기준으로 workflow를 찾고, 공통 base는 overlay 파일 상단의 `workflow_base`에서 읽어 merged workflow를 검증한다. 다른 config 파일을 쓰는 경우 `--config /path/to/config.yaml`을 추가한다. 프로젝트별 workflow overlay를 `~/.config/symphony/workflows/`에 두고 config에서 참조하는 구성을 권장한다.
 
 ## 멀티 프로젝트 데몬
 
@@ -137,9 +130,9 @@ symphony run --workflow WORKFLOW.md --port 8080
 ```yaml
 projects:
   - name: backend
-    workflow: ~/projects/backend/WORKFLOW.md
+    workflow: ~/.config/symphony/workflows/backend.md
   - name: frontend
-    workflow: ~/projects/frontend/WORKFLOW.md
+    workflow: ~/.config/symphony/workflows/frontend.md
 
 agent:
   max_total_concurrent_sessions: 4
@@ -167,7 +160,7 @@ symphony daemon --config /path/to/config.yaml
 
 `symphony daemon`은 실행 중에도 `config.yaml`의 변경을 감지해 설정을 다시 읽는다. 새 설정이 유효하면 프로젝트 목록 diff를 계산해 바뀐 프로젝트만 선택적으로 시작, 교체, 종료하고, 변경 없는 프로젝트는 그대로 유지한다. `status_server`, `webhook`, `auto_update`, `agent.max_total_concurrent_sessions` 같은 daemon 전역 설정이 바뀐 경우에만 상태 서버, webhook 서버, update loop를 포함한 전체 runtime을 다시 띄운다. 유효하지 않은 설정은 적용하지 않고 기존 실행 상태를 유지한 채 오류만 로그에 남긴다.
 
-`config.yaml` 안의 상대 경로(`projects[].workflow`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다.
+`config.yaml` 안의 상대 경로(`projects[].workflow`)는 현재 셸의 작업 디렉터리가 아니라 `config.yaml` 파일이 있는 디렉터리 기준으로 해석된다. launch agent가 특정 레포 디렉터리를 작업 디렉터리로 잡지 않아도 동일하게 동작하도록 하기 위한 동작이다. overlay 파일 안의 `workflow_base`는 해당 overlay 파일 위치 기준으로 해석된다.
 
 `agent.max_total_concurrent_sessions`는 데몬 전체에서 동시에 실행할 수 있는 에이전트 세션 수 상한이다. 값을 생략하면 실행 중인 머신의 CPU 개수를 기준으로 동적으로 계산한다: `NumCPU() <= 2`면 `1`, `<= 4`면 `2`, 그 외에는 `NumCPU()/2`를 사용하되 최대 `8`로 제한한다. 각 프로젝트의 `WORKFLOW.md`에 있는 `agent.max_concurrent_agents`와 `agent.max_concurrent_agents_by_state`는 그대로 유지되며, 실제 dispatch는 `프로젝트별 전체 제한`, `상태별 제한`, `데몬 전체 제한`을 모두 만족해야 한다.
 
