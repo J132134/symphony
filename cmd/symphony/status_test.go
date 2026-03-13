@@ -249,3 +249,17 @@ func TestRenderStatusDashboardIncludesRunningAndBackoff(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatRunningContextIncludesContinuationPendingAndSessionFallback(t *testing.T) {
+	t.Parallel()
+
+	got := formatRunningContext(status.RunningIssueSummary{
+		Attempt:           3,
+		NeedsContinuation: true,
+		SessionID:         "019ce23639d97ea097f22d7883fe9820",
+	})
+
+	if got != "a3 cont? 019ce...fe9820" {
+		t.Fatalf("formatRunningContext() = %q, want %q", got, "a3 cont? 019ce...fe9820")
+	}
+}
