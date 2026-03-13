@@ -359,6 +359,80 @@ func TestNextReusesCurrentListenerPortIncludesCrossServiceSharedPort(t *testing.
 	}
 }
 
+func TestNextReusesCurrentListenerPortRequiresOverlappingBindTarget(t *testing.T) {
+	t.Parallel()
+
+	current := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+	}
+	next := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "10.0.0.5"},
+	}
+
+	if nextStatusServerReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextStatusServerReusesCurrentListenerPort() = true, want false")
+	}
+	if nextWebhookReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextWebhookReusesCurrentListenerPort() = true, want false")
+	}
+	if nextReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextReusesCurrentListenerPort() = true, want false")
+	}
+}
+
+func TestNextReusesCurrentListenerPortTreatsWildcardBindAsOverlap(t *testing.T) {
+	t.Parallel()
+
+	current := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+	}
+	next := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "0.0.0.0"},
+	}
+
+	if !nextStatusServerReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextStatusServerReusesCurrentListenerPort() = false, want true")
+	}
+	if !nextWebhookReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextWebhookReusesCurrentListenerPort() = false, want true")
+	}
+	if !nextReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextReusesCurrentListenerPort() = false, want true")
+	}
+}
+
+func TestValidateReloadConfigKeepsPortValidationWhenSharedBindChanges(t *testing.T) {
+	t.Parallel()
+
+	next := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "10.0.0.5"},
+	}
+	next.SetPortValidatorForTesting(func(_ int, label string) []string {
+		return []string{label + " busy"}
+	})
+
+	runtime := &Runtime{
+		current: &managedRuntime{
+			cfg: &config.DaemonConfig{
+				Projects:     []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+				StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+			},
+		},
+	}
+
+	errs := runtime.validateReloadConfig(next)
+	if !slices.Contains(errs, "status_server.port busy") {
+		t.Fatalf("ValidateReloadConfig() = %v, want status_server.port error", errs)
+	}
+	if !slices.Contains(errs, "webhook.port busy") {
+		t.Fatalf("ValidateReloadConfig() = %v, want webhook.port error", errs)
+	}
+}
+
 func TestRuntimeSwapStartsNewBeforeStoppingOld(t *testing.T) {
 	t.Parallel()
 
@@ -545,6 +619,54 @@ func TestRuntimeSwapStopsOldBeforeStartingNewWhenStatusServerReusesWebhookPort(t
 	mu.Lock()
 	defer mu.Unlock()
 	if got, want := events, []string{"start:alpha", "stop:alpha", "start:beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+func TestRuntimeSwapStartsNewBeforeStoppingOldWhenBindTargetChanges(t *testing.T) {
+	t.Parallel()
+
+	alpha := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+	}
+	beta := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "10.0.0.5"},
+	}
+
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "start:beta", "stop:alpha"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
 	}
 }

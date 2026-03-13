@@ -18,6 +18,7 @@ import (
 )
 
 const defaultConfigWatchDebounce = filewatch.DefaultDebounce
+const statusServerBindAddress = "127.0.0.1"
 
 type runtimeLimiterKey struct{}
 
@@ -141,31 +142,103 @@ func (r *Runtime) validateReloadConfig(cfg *config.DaemonConfig) []string {
 	return cloned.Validate()
 }
 
-func currentListenerUsesPort(current *config.DaemonConfig, port int) bool {
-	if current == nil {
-		return false
-	}
-	return (current.StatusServer.Enabled && current.StatusServer.Port == port) ||
-		(current.Webhook.Enabled && current.Webhook.Port == port)
-}
-
 func nextStatusServerReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
-	if current == nil || next == nil || !next.StatusServer.Enabled {
+	nextListener, ok := statusServerListener(next)
+	if !ok {
 		return false
 	}
-	return currentListenerUsesPort(current, next.StatusServer.Port)
+	return configUsesListenerEndpoint(current, nextListener)
 }
 
 func nextWebhookReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
-	if current == nil || next == nil || !next.Webhook.Enabled {
+	nextListener, ok := webhookListener(next)
+	if !ok {
 		return false
 	}
-	return currentListenerUsesPort(current, next.Webhook.Port)
+	return configUsesListenerEndpoint(current, nextListener)
 }
 
 func nextReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
 	return nextStatusServerReusesCurrentListenerPort(current, next) ||
 		nextWebhookReusesCurrentListenerPort(current, next)
+}
+
+type listenerEndpoint struct {
+	bind string
+	port int
+}
+
+func configUsesListenerEndpoint(cfg *config.DaemonConfig, want listenerEndpoint) bool {
+	if cfg == nil {
+		return false
+	}
+
+	if listener, ok := statusServerListener(cfg); ok && listenerEndpointsOverlap(listener, want) {
+		return true
+	}
+	if listener, ok := webhookListener(cfg); ok && listenerEndpointsOverlap(listener, want) {
+		return true
+	}
+	return false
+}
+
+func statusServerListener(cfg *config.DaemonConfig) (listenerEndpoint, bool) {
+	if cfg == nil || !cfg.StatusServer.Enabled {
+		return listenerEndpoint{}, false
+	}
+
+	bind := statusServerBindAddress
+	if shouldShareStatusAndWebhookListener(cfg) {
+		bind = cfg.Webhook.BindAddress
+	}
+	return listenerEndpoint{bind: bind, port: cfg.StatusServer.Port}, true
+}
+
+func webhookListener(cfg *config.DaemonConfig) (listenerEndpoint, bool) {
+	if cfg == nil || !cfg.Webhook.Enabled {
+		return listenerEndpoint{}, false
+	}
+	return listenerEndpoint{bind: cfg.Webhook.BindAddress, port: cfg.Webhook.Port}, true
+}
+
+func listenerEndpointsOverlap(a, b listenerEndpoint) bool {
+	return a.port == b.port && bindTargetsOverlap(a.bind, b.bind)
+}
+
+func bindTargetsOverlap(a, b string) bool {
+	a = normalizeBindTarget(a)
+	b = normalizeBindTarget(b)
+
+	if a == b {
+		return true
+	}
+	if isWildcardBindTarget(a) || isWildcardBindTarget(b) {
+		return true
+	}
+	if isLoopbackBindTarget(a) && isLoopbackBindTarget(b) {
+		return true
+	}
+
+	aIP := net.ParseIP(a)
+	bIP := net.ParseIP(b)
+	return aIP != nil && bIP != nil && aIP.Equal(bIP)
+}
+
+func normalizeBindTarget(bind string) string {
+	bind = strings.TrimSpace(strings.ToLower(bind))
+	return strings.Trim(bind, "[]")
+}
+
+func isWildcardBindTarget(bind string) bool {
+	return bind == "" || bind == "0.0.0.0" || bind == "::"
+}
+
+func isLoopbackBindTarget(bind string) bool {
+	if bind == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(bind)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
