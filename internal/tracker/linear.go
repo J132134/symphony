@@ -153,20 +153,34 @@ type LinearClient struct {
 }
 
 func NewLinearClient(apiKey, endpoint, projectSlug string, activeStates []string, assignee string) (*LinearClient, error) {
+	return NewLinearClientWithHTTPClient(apiKey, endpoint, projectSlug, activeStates, assignee, nil)
+}
+
+func NewLinearClientWithHTTPClient(apiKey, endpoint, projectSlug string, activeStates []string, assignee string, httpClient *http.Client) (*LinearClient, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("Linear API key is required")
 	}
 	if projectSlug == "" {
 		return nil, fmt.Errorf("Linear project slug is required")
 	}
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	clientCopy := *client
+	clientCopy.Transport = &authTransport{key: apiKey, base: transport}
+	if clientCopy.Timeout == 0 {
+		clientCopy.Timeout = 30 * time.Second
+	}
 	c := &LinearClient{
 		endpoint:     endpoint,
 		projectSlug:  projectSlug,
 		activeStates: activeStates,
-		client: &http.Client{
-			Transport: &authTransport{key: apiKey, base: http.DefaultTransport},
-			Timeout:   30 * time.Second,
-		},
+		client:       &clientCopy,
 	}
 	if assignee == "me" {
 		id, err := c.fetchViewerID(context.Background())

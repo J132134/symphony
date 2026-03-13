@@ -2,15 +2,17 @@ package status
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"symphony/internal/testutil"
 )
 
 func TestClientSummary(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/summary" {
 			t.Fatalf("path = %q, want /api/v1/summary", r.URL.Path)
 		}
@@ -19,9 +21,8 @@ func TestClientSummary(t *testing.T) {
 			SubprocessCount: 2,
 		})
 	}))
-	defer srv.Close()
 
-	summary, err := NewClient(srv.URL).Summary()
+	summary, err := client.Summary()
 	if err != nil {
 		t.Fatalf("Summary() error = %v", err)
 	}
@@ -36,7 +37,8 @@ func TestClientSummary(t *testing.T) {
 func TestClientProjects(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/projects" {
 			t.Fatalf("path = %q, want /api/v1/projects", r.URL.Path)
 		}
@@ -49,9 +51,8 @@ func TestClientProjects(t *testing.T) {
 			}},
 		}})
 	}))
-	defer srv.Close()
 
-	projects, err := NewClient(srv.URL).Projects()
+	projects, err := client.Projects()
 	if err != nil {
 		t.Fatalf("Projects() error = %v", err)
 	}
@@ -66,7 +67,8 @@ func TestClientProjects(t *testing.T) {
 func TestClientRefresh(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
 		}
@@ -75,9 +77,8 @@ func TestClientRefresh(t *testing.T) {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 	}))
-	defer srv.Close()
 
-	if err := NewClient(srv.URL).Refresh(); err != nil {
+	if err := client.Refresh(); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 }
@@ -85,12 +86,12 @@ func TestClientRefresh(t *testing.T) {
 func TestClientSummaryReturnsStatusError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusBadGateway)
 	}))
-	defer srv.Close()
 
-	_, err := NewClient(srv.URL).Summary()
+	_, err := client.Summary()
 	if err == nil {
 		t.Fatal("Summary() error = nil, want status error")
 	}
@@ -102,13 +103,13 @@ func TestClientSummaryReturnsStatusError(t *testing.T) {
 func TestClientProjectsReturnsDecodeError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("{"))
 	}))
-	defer srv.Close()
 
-	_, err := NewClient(srv.URL).Projects()
+	_, err := client.Projects()
 	if err == nil {
 		t.Fatal("Projects() error = nil, want decode error")
 	}
@@ -120,12 +121,12 @@ func TestClientProjectsReturnsDecodeError(t *testing.T) {
 func TestClientRefreshReturnsStatusError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := NewClient("http://status.test")
+	client.http = testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
-	defer srv.Close()
 
-	err := NewClient(srv.URL).Refresh()
+	err := client.Refresh()
 	if err == nil {
 		t.Fatal("Refresh() error = nil, want status error")
 	}

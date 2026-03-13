@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,9 +27,6 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 	configPath := filepath.Join(dir, "config.yaml")
 	writeConfigToken(t, configPath, "alpha")
 
-	ln, port := listenOnRandomPort(t)
-	_ = ln.Close()
-
 	alphaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
@@ -39,9 +35,10 @@ func TestRuntimeReloadsDaemonGlobalChangesAndKeepsCurrentRuntimeOnInvalidConfig(
 	betaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
-		StatusServer:  config.StatusServerConfig{Enabled: true, Port: port},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 43210},
 		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
+	betaCfg.SetPortValidatorForTesting(func(int, string) []string { return nil })
 	invalidCfg := &config.DaemonConfig{ConfigPath: configPath}
 
 	var mu sync.Mutex
@@ -259,21 +256,20 @@ func TestRuntimeReloadAllowsCurrentStatusServerPort(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 	writeConfigToken(t, configPath, "alpha")
 
-	ln, port := listenOnRandomPort(t)
-	defer ln.Close()
-
 	alphaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
-		StatusServer:  config.StatusServerConfig{Enabled: true, Port: port},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 43211},
 		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
 	betaCfg := &config.DaemonConfig{
 		ConfigPath:    configPath,
 		Projects:      []config.ProjectConfig{{Name: "beta", Workflow: workflowPath}},
-		StatusServer:  config.StatusServerConfig{Enabled: true, Port: port},
+		StatusServer:  config.StatusServerConfig{Enabled: true, Port: 43211},
 		ProjectHealth: config.ProjectHealthConfig{RestartBudgetCount: 3, RestartBudgetWindowMinutes: 15, ProbeIntervalSeconds: 60},
 	}
+	alphaCfg.SetPortValidatorForTesting(func(int, string) []string { return nil })
+	betaCfg.SetPortValidatorForTesting(func(int, string) []string { return nil })
 
 	reloader := &recordingConfigApplier{}
 	var mu sync.Mutex
@@ -696,20 +692,6 @@ func waitFor(t *testing.T, check func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
-}
-
-func listenOnRandomPort(t *testing.T) (net.Listener, int) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener addr type %T", ln.Addr())
-	}
-	return ln, addr.Port
 }
 
 type recordingConfigApplier struct {

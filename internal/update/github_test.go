@@ -3,14 +3,15 @@ package update
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
+
+	"symphony/internal/testutil"
 )
 
-func makeReleaseServer(t *testing.T, tagName string, assetName string, downloadURL string) *httptest.Server {
+func makeReleaseClient(t *testing.T, tagName string, assetName string, downloadURL string) *http.Client {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"tag_name": tagName,
 			"assets": []any{
@@ -21,8 +22,6 @@ func makeReleaseServer(t *testing.T, tagName string, assetName string, downloadU
 			},
 		})
 	}))
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 func TestCheckerCheckSkipsDevVersion(t *testing.T) {
@@ -41,8 +40,13 @@ func TestCheckerCheckSkipsDevVersion(t *testing.T) {
 func TestCheckerCheckNoUpdateWhenVersionMatches(t *testing.T) {
 	t.Parallel()
 
-	srv := makeReleaseServer(t, "v1.0.0", "symphony-darwin-arm64", "http://example.com/binary")
-	c := &Checker{Owner: "o", Repo: "r", Asset: "symphony-darwin-arm64", BaseURL: srv.URL}
+	c := &Checker{
+		Owner:   "o",
+		Repo:    "r",
+		Asset:   "symphony-darwin-arm64",
+		BaseURL: "https://github.test",
+		client:  makeReleaseClient(t, "v1.0.0", "symphony-darwin-arm64", "http://example.com/binary"),
+	}
 
 	result, err := c.Check("v1.0.0")
 	if err != nil {
@@ -57,8 +61,13 @@ func TestCheckerCheckUpdateAvailable(t *testing.T) {
 	t.Parallel()
 
 	const wantURL = "http://example.com/binary-v1.1.0"
-	srv := makeReleaseServer(t, "v1.1.0", "symphony-darwin-arm64", wantURL)
-	c := &Checker{Owner: "o", Repo: "r", Asset: "symphony-darwin-arm64", BaseURL: srv.URL}
+	c := &Checker{
+		Owner:   "o",
+		Repo:    "r",
+		Asset:   "symphony-darwin-arm64",
+		BaseURL: "https://github.test",
+		client:  makeReleaseClient(t, "v1.1.0", "symphony-darwin-arm64", wantURL),
+	}
 
 	result, err := c.Check("v1.0.0")
 	if err != nil {
@@ -78,8 +87,13 @@ func TestCheckerCheckUpdateAvailable(t *testing.T) {
 func TestCheckerCheckAssetMissingNoUpdate(t *testing.T) {
 	t.Parallel()
 
-	srv := makeReleaseServer(t, "v1.1.0", "symphony-linux-amd64", "http://example.com/binary")
-	c := &Checker{Owner: "o", Repo: "r", Asset: "symphony-darwin-arm64", BaseURL: srv.URL}
+	c := &Checker{
+		Owner:   "o",
+		Repo:    "r",
+		Asset:   "symphony-darwin-arm64",
+		BaseURL: "https://github.test",
+		client:  makeReleaseClient(t, "v1.1.0", "symphony-linux-amd64", "http://example.com/binary"),
+	}
 
 	result, err := c.Check("v1.0.0")
 	if err != nil {
@@ -94,13 +108,12 @@ func TestCheckerDownload(t *testing.T) {
 	t.Parallel()
 
 	content := []byte("fake binary content")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
-	}))
-	t.Cleanup(srv.Close)
-
-	c := &Checker{}
-	path, err := c.Download(srv.URL)
+	c := &Checker{
+		client: testutil.NewHandlerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(content)
+		})),
+	}
+	path, err := c.Download("https://downloads.test/symphony")
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}

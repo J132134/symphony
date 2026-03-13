@@ -23,6 +23,7 @@ type Checker struct {
 	Repo    string
 	Asset   string
 	BaseURL string // override for tests; defaults to "https://api.github.com"
+	client  *http.Client
 }
 
 func (c *Checker) apiBase() string {
@@ -34,6 +35,13 @@ func (c *Checker) apiBase() string {
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
+func (c *Checker) httpClient() *http.Client {
+	if c != nil && c.client != nil {
+		return c.client
+	}
+	return httpClient
+}
+
 // Check fetches the latest release and reports whether an update is available.
 // Returns immediately without checking if currentVersion == "dev".
 func (c *Checker) Check(currentVersion string) (*CheckResult, error) {
@@ -42,7 +50,7 @@ func (c *Checker) Check(currentVersion string) (*CheckResult, error) {
 	}
 
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", c.apiBase(), c.Owner, c.Repo)
-	resp, err := httpClient.Get(url)
+	resp, err := c.httpClient().Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
@@ -83,7 +91,7 @@ func (c *Checker) Check(currentVersion string) (*CheckResult, error) {
 // Download fetches the asset at url into a temp file and returns its path.
 // The caller is responsible for removing the file.
 func (c *Checker) Download(url string) (string, error) {
-	resp, err := httpClient.Get(url)
+	resp, err := c.httpClient().Get(url)
 	if err != nil {
 		return "", fmt.Errorf("download asset: %w", err)
 	}

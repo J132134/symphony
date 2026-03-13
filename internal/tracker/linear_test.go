@@ -4,10 +4,28 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"symphony/internal/testutil"
 )
+
+func newLinearTestClient(t *testing.T, handler http.Handler) *LinearClient {
+	t.Helper()
+
+	client, err := NewLinearClientWithHTTPClient(
+		"token",
+		"https://linear.test",
+		"proj",
+		[]string{"Todo"},
+		"",
+		testutil.NewHandlerClient(handler),
+	)
+	if err != nil {
+		t.Fatalf("NewLinearClient() error = %v", err)
+	}
+	return client
+}
 
 func TestNormalizeIssueCapturesLatestComment(t *testing.T) {
 	t.Parallel()
@@ -100,7 +118,7 @@ func TestAddComment(t *testing.T) {
 	var authHeader string
 	var capturedBody string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -110,12 +128,6 @@ func TestAddComment(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
 	}))
-	defer srv.Close()
-
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
 
 	if err := client.AddComment(context.Background(), "issue-1", "hello"); err != nil {
 		t.Fatalf("AddComment() error = %v", err)
@@ -171,18 +183,12 @@ func TestAddCommentRejectsEmptyIssueID(t *testing.T) {
 func TestAddCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":false}}}`))
 	}))
-	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	err = client.AddComment(context.Background(), "issue-1", "hello")
+	err := client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
 		t.Fatal("AddComment() returned nil error for unsuccessful mutation")
 	}
@@ -194,18 +200,12 @@ func TestAddCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 func TestAddCommentReturnsGraphQLError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"errors":[{"message":"permission denied"}]}`))
 	}))
-	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	err = client.AddComment(context.Background(), "issue-1", "hello")
+	err := client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
 		t.Fatal("AddComment() returned nil error for GraphQL error response")
 	}
@@ -217,17 +217,11 @@ func TestAddCommentReturnsGraphQLError(t *testing.T) {
 func TestAddCommentReturnsHTTPStatusError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"errors":[{"message":"forbidden"}]}`, http.StatusForbidden)
 	}))
-	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	err = client.AddComment(context.Background(), "issue-1", "hello")
+	err := client.AddComment(context.Background(), "issue-1", "hello")
 	if err == nil {
 		t.Fatal("AddComment() returned nil error for HTTP error response")
 	}
@@ -242,7 +236,7 @@ func TestUpdateComment(t *testing.T) {
 	var authHeader string
 	var capturedBody string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -252,12 +246,6 @@ func TestUpdateComment(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":true}}}`))
 	}))
-	defer srv.Close()
-
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
 
 	if err := client.UpdateComment(context.Background(), "comment-1", "updated"); err != nil {
 		t.Fatalf("UpdateComment() error = %v", err)
@@ -296,18 +284,12 @@ func TestUpdateCommentRejectsEmptyCommentID(t *testing.T) {
 func TestUpdateCommentReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":false}}}`))
 	}))
-	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	err = client.UpdateComment(context.Background(), "comment-1", "updated")
+	err := client.UpdateComment(context.Background(), "comment-1", "updated")
 	if err == nil {
 		t.Fatal("UpdateComment() returned nil error for unsuccessful mutation")
 	}
@@ -322,7 +304,7 @@ func TestAddLink(t *testing.T) {
 	var authHeader string
 	var capturedBody string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -332,12 +314,6 @@ func TestAddLink(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
 	}))
-	defer srv.Close()
-
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
 
 	if err := client.AddLink(context.Background(), "issue-1", "PR", "https://github.com/acme/repo/pull/new/test"); err != nil {
 		t.Fatalf("AddLink() error = %v", err)
@@ -395,18 +371,12 @@ func TestAddLinkRejectsMissingFields(t *testing.T) {
 func TestAddLinkReturnsErrorOnUnsuccessfulMutation(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":false}}}`))
 	}))
-	defer srv.Close()
 
-	client, err := NewLinearClient("token", srv.URL, "proj", []string{"Todo"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient() error = %v", err)
-	}
-
-	err = client.AddLink(context.Background(), "issue-1", "PR", "https://example.com")
+	err := client.AddLink(context.Background(), "issue-1", "PR", "https://example.com")
 	if err == nil {
 		t.Fatal("AddLink() returned nil error for unsuccessful mutation")
 	}

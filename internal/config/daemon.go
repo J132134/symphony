@@ -53,6 +53,7 @@ type DaemonConfig struct {
 	ConfigPath    string
 
 	maxTotalConcurrentSessionsConfigured bool
+	validatePort                         func(int, string) []string
 }
 
 func LoadDaemonConfig(path string) (*DaemonConfig, error) {
@@ -176,6 +177,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 
 func (c *DaemonConfig) Validate() []string {
 	var errs []string
+	portValidator := c.portValidator()
 	if len(c.Projects) == 0 {
 		return []string{"no projects configured"}
 	}
@@ -200,13 +202,13 @@ func (c *DaemonConfig) Validate() []string {
 		}
 	}
 	if c.StatusServer.Enabled {
-		errs = append(errs, validateTCPPortAvailable(c.StatusServer.Port, "status_server.port")...)
+		errs = append(errs, portValidator(c.StatusServer.Port, "status_server.port")...)
 	}
 	if c.Webhook.Enabled {
 		if c.Webhook.Port == 0 {
 			errs = append(errs, "webhook.port is required when webhook.enabled is true")
 		}
-		errs = append(errs, validateTCPPortAvailable(c.Webhook.Port, "webhook.port")...)
+		errs = append(errs, portValidator(c.Webhook.Port, "webhook.port")...)
 	}
 	if c.maxTotalConcurrentSessionsConfigured && c.Agent.MaxTotalConcurrentSessions <= 0 {
 		errs = append(errs, "agent.max_total_concurrent_sessions must be greater than 0")
@@ -221,6 +223,17 @@ func (c *DaemonConfig) Validate() []string {
 		errs = append(errs, "project_health.probe_interval_seconds must be greater than 0")
 	}
 	return errs
+}
+
+func (c *DaemonConfig) SetPortValidatorForTesting(fn func(int, string) []string) {
+	c.validatePort = fn
+}
+
+func (c *DaemonConfig) portValidator() func(int, string) []string {
+	if c != nil && c.validatePort != nil {
+		return c.validatePort
+	}
+	return validateTCPPortAvailable
 }
 
 func (c *DaemonConfig) MaxTotalConcurrentSessions() int {

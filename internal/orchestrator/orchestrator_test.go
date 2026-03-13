@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +15,7 @@ import (
 
 	"symphony/internal/agent"
 	"symphony/internal/config"
+	"symphony/internal/testutil"
 	"symphony/internal/tracker"
 	"symphony/internal/types"
 )
@@ -244,8 +243,7 @@ func TestOnRetryTimerWithoutTrackerReleasesClaim(t *testing.T) {
 func TestOnRetryTimerPollFailurePreservesRetrySemantics(t *testing.T) {
 	t.Parallel()
 
-	client, server := newLinearFailingClient(t, http.StatusInternalServerError, "boom")
-	defer server.Close()
+	client := newLinearFailingClient(t, http.StatusInternalServerError, "boom")
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -691,15 +689,9 @@ func TestPreemptForUrgentPreemptsAcrossGlobalLimiter(t *testing.T) {
 func TestReconcileCancelsManualHumanReviewIssue(t *testing.T) {
 	t.Parallel()
 
-	server := newLinearIssueStateServer(t, []*types.Issue{
+	client := newLinearIssueStateClient(t, []*types.Issue{
 		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
-	})
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	}, []string{"Todo", "In Progress", "Human Review"})
 
 	o := New("", 0, "alpha", nil)
 	o.cfg = config.New(map[string]any{
@@ -742,15 +734,9 @@ func TestReconcileCancelsManualHumanReviewIssue(t *testing.T) {
 func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
 	t.Parallel()
 
-	server := newLinearIssueStateServer(t, []*types.Issue{
+	client := newLinearIssueStateClient(t, []*types.Issue{
 		{ID: "issue-1", Identifier: "J-40", State: "Human Review"},
-	})
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Todo", "In Progress", "Human Review"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	}, []string{"Todo", "In Progress", "Human Review"})
 
 	o := New("", 0, "alpha", nil)
 	o.tracker = client
@@ -1048,13 +1034,7 @@ func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
 func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	recorder, client := newLinearRecorderClient(t)
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1177,13 +1157,7 @@ func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
 func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	recorder, client := newLinearRecorderClient(t)
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1245,17 +1219,11 @@ func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *
 func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, []string{"In Progress"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return issue in "Human Review" state — not an active state
 		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-54","title":"done","description":"","priority":0,"state":{"name":"Human Review"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
 	}))
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1296,13 +1264,7 @@ func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {
 func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	recorder, client := newLinearRecorderClient(t)
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1450,13 +1412,7 @@ func TestChangedFilesDoesNotFallbackToHeadWhenWorktreeIsClean(t *testing.T) {
 func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	recorder, client := newLinearRecorderClient(t)
 
 	cfg := config.New(map[string]any{
 		"agent": map[string]any{
@@ -1512,13 +1468,7 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	recorder, client := newLinearRecorderClient(t)
 
 	cfg := config.New(map[string]any{
 		"agent": map[string]any{
@@ -1609,16 +1559,10 @@ func TestOnWorkerDoneCancelledByStallSchedulesRetry(t *testing.T) {
 func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, []string{"In Progress"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
 	}))
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1671,16 +1615,10 @@ func TestOnRetryTimerDefersNonUrgentUntilUrgentFinishes(t *testing.T) {
 func TestOnRetryTimerDefersNonUrgentWhileGlobalUrgentRuns(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, []string{"In Progress"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"issue":{"id":"issue-1","identifier":"J-12","title":"normal","description":"","priority":0,"state":{"name":"In Progress"},"branchName":"","url":"","comments":{"nodes":[]},"labels":{"nodes":[]},"relations":{"nodes":[]},"createdAt":"2026-03-07T00:00:00Z","updatedAt":"2026-03-07T00:00:00Z"}}}`))
 	}))
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1764,15 +1702,9 @@ func TestScheduleFailureRetryUsesFailureCountForBackoff(t *testing.T) {
 func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 	t.Parallel()
 
-	server := newLinearIssueStateServer(t, []*types.Issue{
+	client := newLinearIssueStateClient(t, []*types.Issue{
 		{ID: "issue-1", Identifier: "J-21", State: "In Progress"},
-	})
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	}, []string{"In Progress"})
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -1832,15 +1764,9 @@ func TestOnRetryTimerCapacityWaitKeepsFailureAttempt(t *testing.T) {
 func TestOnRetryTimerDefersWhenStateQuotaReached(t *testing.T) {
 	t.Parallel()
 
-	server := newLinearIssueStateServer(t, []*types.Issue{
+	client := newLinearIssueStateClient(t, []*types.Issue{
 		{ID: "issue-1", Identifier: "J-62", State: "Merging"},
-	})
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"Merging"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
+	}, []string{"Merging"})
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -2069,11 +1995,28 @@ func (r *linearRecorder) issueCommentBody(commentID string) string {
 	return ""
 }
 
-func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
+func newLinearTestClient(t *testing.T, activeStates []string, handler http.Handler) *tracker.LinearClient {
+	t.Helper()
+
+	client, err := tracker.NewLinearClientWithHTTPClient(
+		"test-key",
+		"https://linear.test",
+		"proj",
+		activeStates,
+		"",
+		testutil.NewHandlerClient(handler),
+	)
+	if err != nil {
+		t.Fatalf("NewLinearClient: %v", err)
+	}
+	return client
+}
+
+func newLinearRecorderClient(t *testing.T) (*linearRecorder, *tracker.LinearClient) {
 	t.Helper()
 
 	recorder := &linearRecorder{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := newLinearTestClient(t, []string{"In Progress"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
 		var req struct {
@@ -2149,14 +2092,13 @@ func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
 		}
 	}))
 
-	return recorder, server
+	return recorder, client
 }
 
 func TestMaybePostSuccessFeedbackUpdatesExistingCommentWithoutCreatingDuplicate(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
+	recorder, client := newLinearRecorderClient(t)
 
 	existingAt := time.Now().Add(-2 * time.Minute).UTC()
 	recorder.seedIssueComments(&types.Comment{
@@ -2165,11 +2107,6 @@ func TestMaybePostSuccessFeedbackUpdatesExistingCommentWithoutCreatingDuplicate(
 		CreatedAt: &existingAt,
 		UpdatedAt: &existingAt,
 	})
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"agent": map[string]any{
@@ -2215,8 +2152,7 @@ func TestOnWorkerDoneSuccessUpdatesLegacyFeedbackCommentEvenWhenHumanCommentIsLa
 	t.Parallel()
 
 	wsPath := initGitWorkspace(t)
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
+	recorder, client := newLinearRecorderClient(t)
 
 	feedbackAt := time.Now().Add(-4 * time.Minute).UTC()
 	humanAt := time.Now().Add(-1 * time.Minute).UTC()
@@ -2234,11 +2170,6 @@ func TestOnWorkerDoneSuccessUpdatesLegacyFeedbackCommentEvenWhenHumanCommentIsLa
 			UpdatedAt: &humanAt,
 		},
 	)
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
@@ -2295,7 +2226,7 @@ func TestOnWorkerDoneSuccessUpdatesLegacyFeedbackCommentEvenWhenHumanCommentIsLa
 	}
 }
 
-func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
+func newLinearIssueStateClient(t *testing.T, issues []*types.Issue, activeStates []string) *tracker.LinearClient {
 	t.Helper()
 
 	byID := make(map[string]*types.Issue, len(issues))
@@ -2303,7 +2234,7 @@ func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Se
 		byID[iss.ID] = iss
 	}
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newLinearTestClient(t, activeStates, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
 		var req struct {
@@ -2339,19 +2270,12 @@ func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Se
 	}))
 }
 
-func newLinearFailingClient(t *testing.T, status int, body string) (*tracker.LinearClient, *httptest.Server) {
+func newLinearFailingClient(t *testing.T, status int, body string) *tracker.LinearClient {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newLinearTestClient(t, []string{"In Progress"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, body, status)
 	}))
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		server.Close()
-		t.Fatalf("NewLinearClient: %v", err)
-	}
-	return client, server
 }
 
 func encodeIssueStateNodes(t *testing.T, issues []*types.Issue) string {
@@ -2461,14 +2385,13 @@ func asString(v any) string {
 
 func writeWorkflowFile(t *testing.T, path string, intervalMs, idleIntervalMs int) {
 	t.Helper()
-	port := randomFreePort(t)
 	content := []byte(
 		"---\n" +
 			"tracker:\n" +
 			"  api_key: test-key\n" +
 			"  project_slug: test-project\n" +
 			"server:\n" +
-			"  port: " + itoa(port) + "\n" +
+			"  port: 7777\n" +
 			"polling:\n" +
 			"  interval_ms: " + itoa(intervalMs) + "\n" +
 			"  idle_interval_ms: " + itoa(idleIntervalMs) + "\n" +
@@ -2498,14 +2421,12 @@ func waitForOrchestrator(t *testing.T, check func() bool) {
 
 func writeInvalidWorkflowFile(t *testing.T, path string) {
 	t.Helper()
-	port := randomFreePort(t)
-
 	content := `---
 tracker:
   api_key: test-key
   project_slug: test-project
 server:
-  port: ` + itoa(port) + `
+  port: 7777
 polling:
   interval_ms: 1000
   idle_interval_ms: 2000
@@ -2520,22 +2441,6 @@ agent:
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write invalid workflow: %v", err)
 	}
-}
-
-func randomFreePort(t *testing.T) int {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener addr type %T", ln.Addr())
-	}
-	return addr.Port
 }
 
 func itoa(v int) string {

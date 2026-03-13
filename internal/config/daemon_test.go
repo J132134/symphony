@@ -1,26 +1,11 @@
 package config
 
 import (
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func listenOnRandomPort(t *testing.T) (net.Listener, int) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener addr type %T", ln.Addr())
-	}
-	return ln, addr.Port
-}
 
 func TestLoadDaemonConfigUsesDynamicSessionDefault(t *testing.T) {
 	t.Parallel()
@@ -353,9 +338,6 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 		t.Fatalf("mkdir workflow dir: %v", err)
 	}
 
-	ln, port := listenOnRandomPort(t)
-	defer ln.Close()
-
 	cfg := &DaemonConfig{
 		Projects: []ProjectConfig{{
 			Name:     "alpha",
@@ -366,9 +348,15 @@ func TestDaemonConfigValidateRejectsInvalidPathsAndPort(t *testing.T) {
 		},
 		StatusServer: StatusServerConfig{
 			Enabled: true,
-			Port:    port,
+			Port:    43210,
 		},
 	}
+	cfg.SetPortValidatorForTesting(func(port int, label string) []string {
+		if label == "status_server.port" && port == 43210 {
+			return []string{"status_server.port is already in use: 43210"}
+		}
+		return validateTCPPortAvailable(port, label)
+	})
 
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "workflow")
