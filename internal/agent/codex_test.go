@@ -286,6 +286,24 @@ func TestExtractDynamicToolRequestReadsTopLevelToolCall(t *testing.T) {
 	}
 }
 
+func TestExtractDynamicToolRequestReadsTopLevelToolField(t *testing.T) {
+	t.Parallel()
+
+	toolName, input := extractDynamicToolRequest(map[string]any{
+		"tool": "linear_graphql",
+		"arguments": map[string]any{
+			"query": "query { issue(id: \"J-75\") { id } }",
+		},
+	})
+
+	if toolName != "linear_graphql" {
+		t.Fatalf("toolName = %q, want linear_graphql", toolName)
+	}
+	if got, _ := input["query"].(string); got != "query { issue(id: \"J-75\") { id } }" {
+		t.Fatalf("input.query = %q, want query", got)
+	}
+}
+
 func TestExtractDynamicToolRequestReadsNestedToolCallArgumentsString(t *testing.T) {
 	t.Parallel()
 

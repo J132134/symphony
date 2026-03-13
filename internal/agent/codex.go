@@ -438,7 +438,7 @@ func extractDynamicToolRequest(params map[string]any) (string, map[string]any) {
 	}
 
 	for idx, candidate := range candidates {
-		toolName := firstNonEmptyString(candidate["name"], candidate["toolName"])
+		toolName := firstNonEmptyString(candidate["name"], candidate["toolName"], candidate["tool"])
 		if toolName == "" {
 			continue
 		}
