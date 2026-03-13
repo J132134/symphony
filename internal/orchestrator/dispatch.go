@@ -417,6 +417,10 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 				needsContinuation = true
 			} else {
 				slog.Info("orchestrator.no_progress_detected", "issue", issue.Identifier, "initial_head", initialHead)
+				attempt.SetNeedsContinuation(false)
+				attempt.SetStatus(StatusFailed)
+				attempt.Error = "no workspace progress"
+				return fmt.Errorf("no workspace progress after %d turns", cfg.MaxTurns())
 			}
 		}
 	}
