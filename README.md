@@ -143,7 +143,7 @@ status_server:
 
 webhook:
   enabled: false
-  port: 7778
+  port: 7777
   bind_address: 127.0.0.1
   signing_secret: $LINEAR_WEBHOOK_SECRET
 
@@ -173,14 +173,16 @@ Linear webhook은 데몬 모드에서만 사용된다. webhook이 켜지면 각 
 ```yaml
 webhook:
   enabled: true
-  port: 7778
+  port: 7777
   bind_address: 127.0.0.1
   signing_secret: $LINEAR_WEBHOOK_SECRET
 ```
 
+`status_server.enabled: true`와 `webhook.enabled: true`가 모두 켜져 있고 `status_server.port == webhook.port`이면 Symphony는 `webhook.bind_address:<port>` 단일 listener에서 `/api/v1/*`와 `/webhook/*`를 함께 서빙한다. 포트를 다르게 두면 기존처럼 status server와 webhook server를 분리 기동한다.
+
 Linear에서 `Settings -> API -> Webhooks`로 들어가 URL을 `https://<public-host>/symphony/webhook/linear` 형태로 등록하면 된다. Symphony는 `/webhook/linear`를 직접 수신하고, reverse proxy가 `/symphony` 접두사를 제거하는 구조를 가정한다.
 
-외부 공개 HTTPS 엔드포인트와 reverse proxy(Caddy, Tailscale Funnel 등)는 Symphony 저장소 범위 밖에서 관리한다. 일반적인 구성은 `handle_path /symphony/*`를 `127.0.0.1:7778`로 프록시하고, Caddy 헬스체크는 `GET /symphony/webhook/health`에 연결하는 방식이다.
+외부 공개 HTTPS 엔드포인트와 reverse proxy(Caddy, Tailscale Funnel 등)는 Symphony 저장소 범위 밖에서 관리한다. 일반적인 구성은 `handle_path /symphony/*`를 `127.0.0.1:7777`로 프록시하고, Caddy 헬스체크는 `GET /symphony/webhook/health`에 연결하는 방식이다. 이때 webhook listener를 외부 인터페이스에 bind하면 status API도 같은 listener에 노출되므로 `webhook.bind_address`를 의도적으로 설정해야 한다.
 
 `webhook.signing_secret`를 비워두면 개발 모드로 동작하며, 서명 검증 없이 200을 반환하고 refresh를 수행한다. 값이 있으면 `Linear-Signature` HMAC-SHA256 검증에 성공한 Issue 이벤트만 refresh를 트리거한다. 검증 실패나 잘못된 payload는 재시도를 피하기 위해 항상 200으로 응답하고 로그만 남긴다.
 
@@ -316,7 +318,7 @@ agent:
 |---|---|
 | `agent.max_total_concurrent_sessions` | `동적` (`NumCPU() <= 2` → `1`, `<= 4` → `2`, 그 외 `NumCPU()/2`, 최대 `8`) |
 | `webhook.enabled` | `false` |
-| `webhook.port` | `7778` |
+| `webhook.port` | `7777` |
 | `webhook.bind_address` | `127.0.0.1` |
 | `webhook.signing_secret` | `없음` |
 

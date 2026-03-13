@@ -341,6 +341,28 @@ func TestRuntimeReloadAllowsCurrentStatusServerPort(t *testing.T) {
 	}
 }
 
+func TestNextReusesCurrentListenerPortIncludesCrossServiceSharedPort(t *testing.T) {
+	t.Parallel()
+
+	current := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+	}
+	next := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "127.0.0.1"},
+	}
+
+	if !nextStatusServerReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextStatusServerReusesCurrentListenerPort() = false, want true")
+	}
+	if !nextWebhookReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextWebhookReusesCurrentListenerPort() = false, want true")
+	}
+	if !nextReusesCurrentListenerPort(current, next) {
+		t.Fatal("nextReusesCurrentListenerPort() = false, want true")
+	}
+}
+
 func TestRuntimeSwapStartsNewBeforeStoppingOld(t *testing.T) {
 	t.Parallel()
 
@@ -483,6 +505,54 @@ func TestRuntimeSwapStopsOldBeforeStartingNewWhenWebhookPortIsReused(t *testing.
 	}
 }
 
+func TestRuntimeSwapStopsOldBeforeStartingNewWhenStatusServerReusesWebhookPort(t *testing.T) {
+	t.Parallel()
+
+	port := 7777
+	alpha := &config.DaemonConfig{
+		Projects: []config.ProjectConfig{{Name: "alpha", Workflow: "/tmp/a"}},
+		Webhook:  config.WebhookConfig{Enabled: true, Port: port, BindAddress: "127.0.0.1"},
+	}
+	beta := &config.DaemonConfig{
+		Projects:     []config.ProjectConfig{{Name: "beta", Workflow: "/tmp/b"}},
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: port},
+	}
+
+	runtime := &Runtime{}
+	var mu sync.Mutex
+	var events []string
+
+	runtime.startRuntime = func(parent context.Context, cfg *config.DaemonConfig) (*managedRuntime, error) {
+		mu.Lock()
+		events = append(events, "start:"+cfg.Projects[0].Name)
+		mu.Unlock()
+		done := make(chan struct{})
+		return &managedRuntime{
+			cfg: cfg,
+			cancel: func() {
+				mu.Lock()
+				events = append(events, "stop:"+cfg.Projects[0].Name)
+				mu.Unlock()
+				close(done)
+			},
+			done: done,
+		}, nil
+	}
+
+	if err := runtime.swap(context.Background(), alpha); err != nil {
+		t.Fatalf("swap(alpha): %v", err)
+	}
+	if err := runtime.swap(context.Background(), beta); err != nil {
+		t.Fatalf("swap(beta): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := events, []string{"start:alpha", "stop:alpha", "start:beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
 func TestRuntimeSwapSharesLimiterAndUpdatesLimit(t *testing.T) {
 	t.Parallel()
 
@@ -554,6 +624,31 @@ func TestCanReloadProjectsIncrementallyRejectsWebhookChanges(t *testing.T) {
 
 	if canReloadProjectsIncrementally(prev, next) {
 		t.Fatal("webhook config changes should require full runtime reload")
+	}
+}
+
+func TestShouldShareStatusAndWebhookListener(t *testing.T) {
+	t.Parallel()
+
+	shared := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7777, BindAddress: "127.0.0.1"},
+	}
+	separate := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+		Webhook:      config.WebhookConfig{Enabled: true, Port: 7778, BindAddress: "127.0.0.1"},
+	}
+	statusOnly := &config.DaemonConfig{
+		StatusServer: config.StatusServerConfig{Enabled: true, Port: 7777},
+	}
+	if !shouldShareStatusAndWebhookListener(shared) {
+		t.Fatal("shouldShareStatusAndWebhookListener(shared) = false, want true")
+	}
+	if shouldShareStatusAndWebhookListener(separate) {
+		t.Fatal("shouldShareStatusAndWebhookListener(separate) = true, want false")
+	}
+	if shouldShareStatusAndWebhookListener(statusOnly) {
+		t.Fatal("shouldShareStatusAndWebhookListener(statusOnly) = true, want false")
 	}
 }
 

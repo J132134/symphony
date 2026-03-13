@@ -29,27 +29,40 @@ type ProjectSource interface {
 // Server is a lightweight HTTP status server.
 type Server struct {
 	source Source
+	bind   string
 	port   int
 	srv    *http.Server
 }
 
 func New(source Source, port int) *Server {
-	s := &Server{source: source, port: port}
+	return NewWithBind(source, "127.0.0.1", port)
+}
+
+func NewWithBind(source Source, bind string, port int) *Server {
+	s := &Server{source: source, bind: bind, port: port}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/summary", s.handleSummary)
-	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
-	mux.HandleFunc("POST /api/v1/refresh", s.handleRefresh)
+	s.RegisterRoutes(mux)
 	s.srv = &http.Server{Handler: mux}
 	return s
 }
 
+func RegisterRoutes(mux *http.ServeMux, source Source) {
+	(&Server{source: source}).RegisterRoutes(mux)
+}
+
+func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/summary", s.handleSummary)
+	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
+	mux.HandleFunc("POST /api/v1/refresh", s.handleRefresh)
+}
+
 // Run starts the HTTP server and blocks until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", s.bind, s.port))
 	if err != nil {
-		return fmt.Errorf("listen :%d: %w", s.port, err)
+		return fmt.Errorf("listen %s:%d: %w", s.bind, s.port, err)
 	}
-	slog.Info("status_server.started", "port", s.port)
+	slog.Info("status_server.started", "port", s.port, "bind", s.bind)
 
 	go func() {
 		<-ctx.Done()

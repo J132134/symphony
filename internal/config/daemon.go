@@ -135,7 +135,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	// webhook
 	cfg.Webhook = WebhookConfig{
 		Enabled:       false,
-		Port:          7778,
+		Port:          7777,
 		BindAddress:   "127.0.0.1",
 		SigningSecret: "",
 	}
@@ -205,9 +205,6 @@ func (c *DaemonConfig) Validate() []string {
 	if c.Webhook.Enabled {
 		if c.Webhook.Port == 0 {
 			errs = append(errs, "webhook.port is required when webhook.enabled is true")
-		}
-		if c.StatusServer.Enabled && c.Webhook.Port == c.StatusServer.Port {
-			errs = append(errs, "webhook.port must not match status_server.port when both servers are enabled")
 		}
 		errs = append(errs, validateTCPPortAvailable(c.Webhook.Port, "webhook.port")...)
 	}

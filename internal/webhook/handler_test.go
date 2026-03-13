@@ -127,6 +127,33 @@ func TestVerifySignature(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutesAddsWebhookAndHealthEndpoints(t *testing.T) {
+	t.Parallel()
+
+	refresher := &recordingRefresher{}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, NewHandler("", refresher))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/linear", strings.NewReader(`{"action":"update","type":"Issue","data":{"id":"issue-1"}}`))
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("webhook status = %d, want 200", res.Code)
+	}
+	if refresher.Count() != 1 {
+		t.Fatalf("refresh count = %d, want 1", refresher.Count())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/webhook/health", nil)
+	res = httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", res.Code)
+	}
+}
+
 func signPayload(body, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(body))

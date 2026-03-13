@@ -162,3 +162,31 @@ func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
 		t.Fatalf("running_issues = %#v, want J-54 detail", payload[0].RunningIssues)
 	}
 }
+
+func TestRegisterRoutesSupportsSharedMux(t *testing.T) {
+	t.Parallel()
+
+	source := &fakeSummarySource{
+		summary: Summary{Status: "ok"},
+	}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, source)
+	mux.HandleFunc("GET /webhook/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/webhook/health", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, want 204", rec.Code)
+	}
+}

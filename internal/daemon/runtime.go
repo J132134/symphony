@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -125,36 +127,45 @@ func (r *Runtime) validateReloadConfig(cfg *config.DaemonConfig) []string {
 	if current == nil || current.cfg == nil {
 		return cfg.Validate()
 	}
-	if !reuseCurrentStatusServerPort(current.cfg, cfg) && !reuseCurrentWebhookPort(current.cfg, cfg) {
+	if !nextReusesCurrentListenerPort(current.cfg, cfg) {
 		return cfg.Validate()
 	}
 
 	cloned := *cfg
-	if reuseCurrentStatusServerPort(current.cfg, cfg) {
+	if nextStatusServerReusesCurrentListenerPort(current.cfg, cfg) {
 		cloned.StatusServer.Enabled = false
 	}
-	if reuseCurrentWebhookPort(current.cfg, cfg) {
+	if nextWebhookReusesCurrentListenerPort(current.cfg, cfg) {
 		cloned.Webhook.Enabled = false
 	}
 	return cloned.Validate()
 }
 
-func reuseCurrentStatusServerPort(current, next *config.DaemonConfig) bool {
-	if current == nil || next == nil {
+func currentListenerUsesPort(current *config.DaemonConfig, port int) bool {
+	if current == nil {
 		return false
 	}
-	return current.StatusServer.Enabled &&
-		next.StatusServer.Enabled &&
-		current.StatusServer.Port == next.StatusServer.Port
+	return (current.StatusServer.Enabled && current.StatusServer.Port == port) ||
+		(current.Webhook.Enabled && current.Webhook.Port == port)
 }
 
-func reuseCurrentWebhookPort(current, next *config.DaemonConfig) bool {
-	if current == nil || next == nil {
+func nextStatusServerReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
+	if current == nil || next == nil || !next.StatusServer.Enabled {
 		return false
 	}
-	return current.Webhook.Enabled &&
-		next.Webhook.Enabled &&
-		current.Webhook.Port == next.Webhook.Port
+	return currentListenerUsesPort(current, next.StatusServer.Port)
+}
+
+func nextWebhookReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
+	if current == nil || next == nil || !next.Webhook.Enabled {
+		return false
+	}
+	return currentListenerUsesPort(current, next.Webhook.Port)
+}
+
+func nextReusesCurrentListenerPort(current, next *config.DaemonConfig) bool {
+	return nextStatusServerReusesCurrentListenerPort(current, next) ||
+		nextWebhookReusesCurrentListenerPort(current, next)
 }
 
 func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
@@ -165,7 +176,7 @@ func (r *Runtime) swap(parent context.Context, cfg *config.DaemonConfig) error {
 
 	r.mu.Lock()
 	prev := r.current
-	sameBoundPort := prev != nil && (reuseCurrentStatusServerPort(prev.cfg, cfg) || reuseCurrentWebhookPort(prev.cfg, cfg))
+	sameBoundPort := prev != nil && nextReusesCurrentListenerPort(prev.cfg, cfg)
 	if sameBoundPort {
 		r.current = nil
 	}
@@ -242,7 +253,23 @@ func startManagedRuntime(parent context.Context, cfg *config.DaemonConfig) (*man
 func runDaemonApp(ctx context.Context, cfg *config.DaemonConfig, mgr *Manager) {
 	var wg sync.WaitGroup
 
-	if cfg.StatusServer.Enabled {
+	if shouldShareStatusAndWebhookListener(cfg) {
+		if strings.TrimSpace(cfg.Webhook.SigningSecret) == "" {
+			slog.Warn("webhook_server.signing_secret_missing", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress)
+		}
+		mux := http.NewServeMux()
+		status.RegisterRoutes(mux, mgr)
+		webhook.RegisterRoutes(mux, webhook.NewHandler(cfg.Webhook.SigningSecret, mgr))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runHTTPServer(ctx, cfg.Webhook.BindAddress, cfg.StatusServer.Port, mux); err != nil && ctx.Err() == nil {
+				slog.Error("shared_http_server.error", "error", err)
+			}
+		}()
+		slog.Info("status_server.started", "port", cfg.StatusServer.Port, "bind", cfg.Webhook.BindAddress, "shared", true)
+		slog.Info("webhook_server.started", "port", cfg.Webhook.Port, "bind", cfg.Webhook.BindAddress, "shared", true)
+	} else if cfg.StatusServer.Enabled {
 		srv := status.New(mgr, cfg.StatusServer.Port)
 		wg.Add(1)
 		go func() {
@@ -298,6 +325,33 @@ func canReloadProjectsIncrementally(prev, next *config.DaemonConfig) bool {
 		prev.StatusServer == next.StatusServer &&
 		prev.Webhook == next.Webhook &&
 		prev.ProjectHealth == next.ProjectHealth
+}
+
+func shouldShareStatusAndWebhookListener(cfg *config.DaemonConfig) bool {
+	return cfg != nil &&
+		cfg.StatusServer.Enabled &&
+		cfg.Webhook.Enabled &&
+		cfg.StatusServer.Port == cfg.Webhook.Port
+}
+
+func runHTTPServer(ctx context.Context, bind string, port int, handler http.Handler) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bind, port))
+	if err != nil {
+		return fmt.Errorf("listen %s:%d: %w", bind, port, err)
+	}
+
+	srv := &http.Server{Handler: handler}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 func projectNames(cfg *config.DaemonConfig) []string {

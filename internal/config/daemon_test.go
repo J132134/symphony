@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -132,8 +133,8 @@ func TestLoadDaemonConfigUsesWebhookDefaults(t *testing.T) {
 	if cfg.Webhook.Enabled {
 		t.Fatal("Webhook.Enabled should default to false")
 	}
-	if got := cfg.Webhook.Port; got != 7778 {
-		t.Fatalf("Webhook.Port = %d, want 7778", got)
+	if got := cfg.Webhook.Port; got != 7777 {
+		t.Fatalf("Webhook.Port = %d, want 7777", got)
 	}
 	if got := cfg.Webhook.BindAddress; got != "127.0.0.1" {
 		t.Fatalf("Webhook.BindAddress = %q, want 127.0.0.1", got)
@@ -218,15 +219,45 @@ func TestDaemonConfigValidateRejectsInvalidProjectHealth(t *testing.T) {
 	}
 }
 
-func TestDaemonConfigValidateRejectsInvalidWebhookConfiguration(t *testing.T) {
+func TestDaemonConfigValidateAllowsSharedWebhookAndStatusPort(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("# workflow\n"), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	cfg := &DaemonConfig{
+		Projects: []ProjectConfig{{Name: "alpha", Workflow: workflowPath}},
+		StatusServer: StatusServerConfig{
+			Enabled: true,
+			Port:    65530,
+		},
+		Webhook: WebhookConfig{
+			Enabled: true,
+			Port:    65530,
+		},
+		ProjectHealth: ProjectHealthConfig{
+			RestartBudgetCount:         3,
+			RestartBudgetWindowMinutes: 15,
+			ProbeIntervalSeconds:       60,
+		},
+	}
+
+	errs := cfg.Validate()
+	for _, err := range errs {
+		if strings.Contains(err, "must not match status_server.port") {
+			t.Fatalf("Validate() = %v, shared-port error should be removed", errs)
+		}
+	}
+}
+
+func TestDaemonConfigValidateRejectsMissingWebhookPort(t *testing.T) {
 	t.Parallel()
 
 	cfg := &DaemonConfig{
 		Projects: []ProjectConfig{{Name: "alpha", Workflow: "/tmp/workflow.md"}},
-		StatusServer: StatusServerConfig{
-			Enabled: true,
-			Port:    7778,
-		},
 		Webhook: WebhookConfig{
 			Enabled: true,
 			Port:    0,
@@ -235,10 +266,6 @@ func TestDaemonConfigValidateRejectsInvalidWebhookConfiguration(t *testing.T) {
 
 	errs := cfg.Validate()
 	requireErrorContaining(t, errs, "webhook.port is required")
-
-	cfg.Webhook.Port = 7778
-	errs = cfg.Validate()
-	requireErrorContaining(t, errs, "webhook.port must not match status_server.port")
 }
 
 func TestLoadDaemonConfigPreservesEmptyWorkflowForValidation(t *testing.T) {

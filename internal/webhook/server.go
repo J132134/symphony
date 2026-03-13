@@ -10,23 +10,25 @@ import (
 )
 
 type Server struct {
-	handler *Handler
-	port    int
-	bind    string
-	srv     *http.Server
+	port int
+	bind string
+	srv  *http.Server
 }
 
 func NewServer(handler *Handler, port int, bind string) *Server {
 	s := &Server{
-		handler: handler,
-		port:    port,
-		bind:    bind,
+		port: port,
+		bind: bind,
 	}
 	mux := http.NewServeMux()
-	mux.Handle("POST /webhook/linear", handler)
-	mux.HandleFunc("GET /webhook/health", s.handleHealth)
+	RegisterRoutes(mux, handler)
 	s.srv = &http.Server{Handler: mux}
 	return s
+}
+
+func RegisterRoutes(mux *http.ServeMux, handler *Handler) {
+	mux.Handle("POST /webhook/linear", handler)
+	mux.HandleFunc("GET /webhook/health", handleHealth)
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -48,7 +50,7 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
