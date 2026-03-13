@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -362,27 +363,24 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		r.mu.Lock()
 		handler := r.toolHandler
 		r.mu.Unlock()
-		toolName, _ := req.Params["name"].(string)
-		if toolName == "" {
-			toolName, _ = req.Params["toolName"].(string)
-		}
+		toolName, input := extractDynamicToolRequest(req.Params)
 		if handler != nil && toolName != "" {
-			go r.handleDynamicTool(req.ID, toolName, req.Params)
+			go r.handleDynamicTool(req.ID, toolName, input)
 			return
 		}
-		slog.Warn("agent.tool_call_unsupported", "tool", toolName)
+		slog.Warn("agent.tool_call_unsupported", "tool", toolName, "params", summarizeParams(req.Params))
 		data, _ := FormatErrorResponse(req.ID, -32601, "Tool call not supported")
 		_ = r.stdin.Write(data)
 	case methodUserInput:
 		r.mu.Lock()
 		handler := r.toolHandler
 		r.mu.Unlock()
-		toolName, _ := req.Params["toolName"].(string)
+		toolName, input := extractDynamicToolRequest(req.Params)
 		if handler != nil && toolName != "" {
-			go r.handleDynamicTool(req.ID, toolName, req.Params)
+			go r.handleDynamicTool(req.ID, toolName, input)
 			return
 		}
-		slog.Warn("agent.user_input_unsupported")
+		slog.Warn("agent.user_input_unsupported", "params", summarizeParams(req.Params))
 		data, _ := FormatErrorResponse(req.ID, -32601, "User input not supported")
 		_ = r.stdin.Write(data)
 	default:
@@ -392,7 +390,7 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 	}
 }
 
-func (r *Runner) handleDynamicTool(reqID any, toolName string, params map[string]any) {
+func (r *Runner) handleDynamicTool(reqID any, toolName string, input map[string]any) {
 	r.mu.Lock()
 	handler := r.toolHandler
 	r.mu.Unlock()
@@ -400,11 +398,6 @@ func (r *Runner) handleDynamicTool(reqID any, toolName string, params map[string
 		data, _ := FormatErrorResponse(reqID, -32601, "No tool handler registered")
 		_ = r.stdin.Write(data)
 		return
-	}
-
-	input, _ := params["input"].(map[string]any)
-	if input == nil {
-		input, _ = params["arguments"].(map[string]any)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -430,6 +423,99 @@ func (r *Runner) handleDynamicTool(reqID any, toolName string, params map[string
 	})
 	_ = r.stdin.Write(data)
 	slog.Debug("agent.dynamic_tool_done", "tool", toolName)
+}
+
+func extractDynamicToolRequest(params map[string]any) (string, map[string]any) {
+	if len(params) == 0 {
+		return "", nil
+	}
+
+	candidates := []map[string]any{params}
+	for _, key := range []string{"toolCall", "tool", "item", "call", "payload"} {
+		if nested, ok := params[key].(map[string]any); ok {
+			candidates = append(candidates, nested)
+		}
+	}
+
+	for idx, candidate := range candidates {
+		toolName := firstNonEmptyString(candidate["name"], candidate["toolName"])
+		if toolName == "" {
+			continue
+		}
+		if input := extractDynamicToolInput(candidate); input != nil {
+			return toolName, input
+		}
+		if idx > 0 {
+			if input := extractDynamicToolInput(params); input != nil {
+				return toolName, input
+			}
+		}
+		return toolName, map[string]any{}
+	}
+
+	return "", nil
+}
+
+func extractDynamicToolInput(params map[string]any) map[string]any {
+	if len(params) == 0 {
+		return nil
+	}
+	for _, key := range []string{"input", "arguments"} {
+		if input := coerceToolInput(params[key]); input != nil {
+			return input
+		}
+	}
+	return nil
+}
+
+func coerceToolInput(v any) map[string]any {
+	switch t := v.(type) {
+	case map[string]any:
+		return t
+	case string:
+		trimmed := strings.TrimSpace(t)
+		if trimmed == "" {
+			return nil
+		}
+		var out map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+			return out
+		}
+	}
+	return nil
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func summarizeParams(params map[string]any) string {
+	if len(params) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Sprintf("keys=%v", sortedKeys(params))
+	}
+	const limit = 500
+	if len(raw) <= limit {
+		return string(raw)
+	}
+	return string(raw[:limit]) + "...(truncated)"
+}
+
+func sortedKeys(params map[string]any) []string {
+	keys := make([]string, 0, len(params))
+	for key := range params {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // StopSession gracefully terminates: SIGTERM → 10s → SIGKILL.

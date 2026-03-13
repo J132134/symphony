@@ -268,6 +268,66 @@ func TestBuildTurnSandboxPolicyMapsSandboxTypesToProtocolValues(t *testing.T) {
 	}
 }
 
+func TestExtractDynamicToolRequestReadsTopLevelToolCall(t *testing.T) {
+	t.Parallel()
+
+	toolName, input := extractDynamicToolRequest(map[string]any{
+		"name": "linear_graphql",
+		"input": map[string]any{
+			"query": "query { viewer { id } }",
+		},
+	})
+
+	if toolName != "linear_graphql" {
+		t.Fatalf("toolName = %q, want linear_graphql", toolName)
+	}
+	if got, _ := input["query"].(string); got != "query { viewer { id } }" {
+		t.Fatalf("input.query = %q, want GraphQL query", got)
+	}
+}
+
+func TestExtractDynamicToolRequestReadsNestedToolCallArgumentsString(t *testing.T) {
+	t.Parallel()
+
+	toolName, input := extractDynamicToolRequest(map[string]any{
+		"toolCall": map[string]any{
+			"toolName":  "linear_graphql",
+			"arguments": "{\"query\":\"mutation { issueUpdate { success } }\",\"variables\":{\"id\":\"issue-1\"}}",
+		},
+	})
+
+	if toolName != "linear_graphql" {
+		t.Fatalf("toolName = %q, want linear_graphql", toolName)
+	}
+	if got, _ := input["query"].(string); got != "mutation { issueUpdate { success } }" {
+		t.Fatalf("input.query = %q, want mutation", got)
+	}
+	vars, _ := input["variables"].(map[string]any)
+	if got, _ := vars["id"].(string); got != "issue-1" {
+		t.Fatalf("input.variables.id = %q, want issue-1", got)
+	}
+}
+
+func TestExtractDynamicToolRequestReadsNestedItemWithTopLevelInput(t *testing.T) {
+	t.Parallel()
+
+	toolName, input := extractDynamicToolRequest(map[string]any{
+		"item": map[string]any{
+			"name": "linear_graphql",
+		},
+		"input": map[string]any{
+			"query": "query { issue(id: \"1\") { id } }",
+		},
+	})
+
+	if toolName != "linear_graphql" {
+		t.Fatalf("toolName = %q, want linear_graphql", toolName)
+	}
+	if got, _ := input["query"].(string); got != "query { issue(id: \"1\") { id } }" {
+		t.Fatalf("input.query = %q, want query", got)
+	}
+}
+
 func fillNotifQueue(r *Runner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}
