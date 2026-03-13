@@ -149,6 +149,9 @@ func formatStatusSummary(summary status.Summary) string {
 		b.WriteString("  running issues:\n")
 		for _, issue := range project.RunningIssues {
 			fmt.Fprintf(&b, "    - %s | %s", issue.Identifier, issue.Status)
+			if issue.Attempt > 0 {
+				fmt.Fprintf(&b, " | attempt %d", issue.Attempt)
+			}
 			if issue.TurnCount > 0 {
 				fmt.Fprintf(&b, " | turn %d", issue.TurnCount)
 			}
@@ -158,6 +161,9 @@ func formatStatusSummary(summary status.Summary) string {
 			b.WriteByte('\n')
 			if issue.IssueState != "" {
 				fmt.Fprintf(&b, "      tracker state: %s\n", issue.IssueState)
+			}
+			if flags := formatIssueExecutionFlags(issue); flags != "" {
+				fmt.Fprintf(&b, "      execution: %s\n", flags)
 			}
 			if issue.CurrentActivity != "" {
 				fmt.Fprintf(&b, "      current: %s\n", issue.CurrentActivity)
@@ -232,6 +238,20 @@ func formatIssueTokenUsage(issue status.RunningIssueSummary) string {
 		parts = append(parts, "total "+formatInt64(issue.TotalTokens))
 	}
 	return "tokens " + strings.Join(parts, " / ")
+}
+
+func formatIssueExecutionFlags(issue status.RunningIssueSummary) string {
+	var parts []string
+	if issue.FailureCount > 0 {
+		parts = append(parts, fmt.Sprintf("failures %d", issue.FailureCount))
+	}
+	if issue.Continuation {
+		parts = append(parts, "continuation run")
+	}
+	if issue.NeedsContinuation {
+		parts = append(parts, "continuation pending")
+	}
+	return strings.Join(parts, " | ")
 }
 
 func formatIssueEvent(event status.RunningEventDetail) string {

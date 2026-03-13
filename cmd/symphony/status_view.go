@@ -370,6 +370,12 @@ func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) 
 	if issue.IssueState != "" {
 		fmt.Fprintf(&b, " | tracker: %s", issue.IssueState)
 	}
+	if issue.Attempt > 0 {
+		fmt.Fprintf(&b, " | attempt: %d", issue.Attempt)
+	}
+	if flags := formatIssueExecutionFlags(issue); flags != "" {
+		fmt.Fprintf(&b, "\n  execution: %s", flags)
+	}
 	if issue.CurrentActivity != "" {
 		fmt.Fprintf(&b, "\n  current: %s", issue.CurrentActivity)
 		if issue.CurrentActivityAt != "" {

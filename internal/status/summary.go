@@ -31,6 +31,10 @@ type RunningIssueSummary struct {
 	IssueState        string               `json:"issue_state,omitempty"`
 	Status            string               `json:"status"`
 	Priority          *int                 `json:"priority,omitempty"`
+	Attempt           int                  `json:"attempt,omitempty"`
+	FailureCount      int                  `json:"failure_count,omitempty"`
+	Continuation      bool                 `json:"continuation,omitempty"`
+	NeedsContinuation bool                 `json:"needs_continuation,omitempty"`
 	TurnCount         int                  `json:"turn_count,omitempty"`
 	LastEventAt       string               `json:"last_event_at,omitempty"`
 	LastEvent         string               `json:"last_event,omitempty"`
@@ -174,10 +178,14 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 	}
 
 	issue := RunningIssueSummary{
-		Identifier: attempt.Identifier,
-		IssueState: attempt.IssueState,
-		Status:     string(attempt.GetStatus()),
-		Priority:   attempt.IssuePriority,
+		Identifier:        attempt.Identifier,
+		IssueState:        attempt.IssueState,
+		Status:            string(attempt.GetStatus()),
+		Priority:          attempt.IssuePriority,
+		Attempt:           attempt.Attempt,
+		FailureCount:      attempt.FailureCount,
+		Continuation:      attempt.Continuation,
+		NeedsContinuation: attempt.ShouldContinue(),
 	}
 	if !attempt.StartedAt.IsZero() {
 		issue.StartedAt = attempt.StartedAt.UTC().Format(time.RFC3339)

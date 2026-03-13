@@ -15,8 +15,10 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	running.RecordTrackerSuccess(now)
 	lastEvent := now.Add(2 * time.Minute)
 	attempt := &orchestrator.RunAttempt{
-		Identifier: "J-17",
-		StartedAt:  now,
+		Identifier:   "J-17",
+		StartedAt:    now,
+		Attempt:      2,
+		FailureCount: 1,
 	}
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.SetTurnCount(3)
@@ -60,6 +62,12 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		}
 		if got[0].TurnCount != 3 {
 			t.Fatalf("turn_count = %d, want 3", got[0].TurnCount)
+		}
+		if got[0].Attempt != 2 {
+			t.Fatalf("attempt = %d, want 2", got[0].Attempt)
+		}
+		if got[0].FailureCount != 1 {
+			t.Fatalf("failure_count = %d, want 1", got[0].FailureCount)
 		}
 		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
 			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
@@ -119,8 +127,10 @@ func TestSummarizeRunningIssueKeepsCurrentActivityOnBookkeepingEvents(t *testing
 
 	now := time.Date(2026, 3, 6, 14, 0, 0, 0, time.UTC)
 	attempt := &orchestrator.RunAttempt{
-		Identifier: "J-19",
-		StartedAt:  now,
+		Identifier:   "J-19",
+		StartedAt:    now,
+		Attempt:      3,
+		Continuation: true,
 	}
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.RecordEvent(now.Add(time.Minute), "tool_call", "apply_patch {\"path\":\"cmd/symphony/status.go\"}")
@@ -133,6 +143,9 @@ func TestSummarizeRunningIssueKeepsCurrentActivityOnBookkeepingEvents(t *testing
 	}
 	if summary.LastEvent != "Server Notification: Item Completed" {
 		t.Fatalf("last_event = %q, want server notification detail", summary.LastEvent)
+	}
+	if !summary.Continuation {
+		t.Fatal("continuation = false, want true")
 	}
 	if len(summary.RecentEvents) != 3 {
 		t.Fatalf("recent_events len = %d, want 3", len(summary.RecentEvents))
