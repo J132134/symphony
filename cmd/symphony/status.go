@@ -162,6 +162,9 @@ func formatStatusSummary(summary status.Summary) string {
 			if issue.IssueState != "" {
 				fmt.Fprintf(&b, "      tracker state: %s\n", issue.IssueState)
 			}
+			if issue.Branch != "" {
+				fmt.Fprintf(&b, "      branch: %s\n", issue.Branch)
+			}
 			if flags := formatIssueExecutionFlags(issue); flags != "" {
 				fmt.Fprintf(&b, "      execution: %s\n", flags)
 			}
@@ -250,6 +253,12 @@ func formatIssueExecutionFlags(issue status.RunningIssueSummary) string {
 	}
 	if issue.NeedsContinuation {
 		parts = append(parts, "continuation pending")
+	}
+	if issue.Urgent {
+		parts = append(parts, "urgent")
+	}
+	if issue.Preempted {
+		parts = append(parts, "preempted")
 	}
 	return strings.Join(parts, " | ")
 }

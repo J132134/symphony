@@ -19,6 +19,8 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		StartedAt:    now,
 		Attempt:      2,
 		FailureCount: 1,
+		IssueBranch:  "j-17-status",
+		Urgent:       true,
 	}
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.SetTurnCount(3)
@@ -68,6 +70,12 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		}
 		if got[0].FailureCount != 1 {
 			t.Fatalf("failure_count = %d, want 1", got[0].FailureCount)
+		}
+		if got[0].Branch != "j-17-status" {
+			t.Fatalf("branch = %q, want j-17-status", got[0].Branch)
+		}
+		if !got[0].Urgent {
+			t.Fatal("urgent = false, want true")
 		}
 		if got[0].LastEventAt != lastEvent.Format(time.RFC3339) {
 			t.Fatalf("last_event_at = %q, want %q", got[0].LastEventAt, lastEvent.Format(time.RFC3339))
@@ -131,6 +139,7 @@ func TestSummarizeRunningIssueKeepsCurrentActivityOnBookkeepingEvents(t *testing
 		StartedAt:    now,
 		Attempt:      3,
 		Continuation: true,
+		Preempted:    true,
 	}
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.RecordEvent(now.Add(time.Minute), "tool_call", "apply_patch {\"path\":\"cmd/symphony/status.go\"}")
@@ -146,6 +155,9 @@ func TestSummarizeRunningIssueKeepsCurrentActivityOnBookkeepingEvents(t *testing
 	}
 	if !summary.Continuation {
 		t.Fatal("continuation = false, want true")
+	}
+	if !summary.Preempted {
+		t.Fatal("preempted = false, want true")
 	}
 	if len(summary.RecentEvents) != 3 {
 		t.Fatalf("recent_events len = %d, want 3", len(summary.RecentEvents))

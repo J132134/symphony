@@ -373,6 +373,9 @@ func renderRunningIssueDetail(issue status.RunningIssueSummary, project string) 
 	if issue.Attempt > 0 {
 		fmt.Fprintf(&b, " | attempt: %d", issue.Attempt)
 	}
+	if issue.Branch != "" {
+		fmt.Fprintf(&b, "\n  branch: %s", issue.Branch)
+	}
 	if flags := formatIssueExecutionFlags(issue); flags != "" {
 		fmt.Fprintf(&b, "\n  execution: %s", flags)
 	}
