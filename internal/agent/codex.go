@@ -92,11 +92,13 @@ type Runner struct {
 	pending map[int]chan rpcResult
 	reqID   atomic.Int32
 
-	eventMu         sync.RWMutex
-	activeCallback  EventCallback
-	activeThreadID  string
-	activeTurnID    string
-	notifCh         chan *Incoming
+	eventMu              sync.RWMutex
+	activeCallback       EventCallback
+	activeThreadID       string
+	activeTurnID         string
+	lastStderrEmittedAt  time.Time
+	stderrDebounceWindow time.Duration
+	notifCh              chan *Incoming
 	priorityNotifCh chan *Incoming
 
 	// cumulative token counts for delta computation
@@ -105,10 +107,13 @@ type Runner struct {
 	lastTotal  int64
 }
 
+const defaultStderrDebounce = 500 * time.Millisecond
+
 func NewRunner() *Runner {
 	return &Runner{
-		pending: make(map[int]chan rpcResult),
-		notifCh: make(chan *Incoming, 512),
+		pending:              make(map[int]chan rpcResult),
+		notifCh:              make(chan *Incoming, 512),
+		stderrDebounceWindow: defaultStderrDebounce,
 		// Turn terminal notifications must survive general queue saturation.
 		priorityNotifCh: make(chan *Incoming, 16),
 	}
@@ -691,12 +696,22 @@ func (r *Runner) readStderr(reader *bufio.Reader) {
 			text := compactInline(strings.TrimRight(string(line), "\r\n"), 160)
 			slog.Debug("agent.stderr", "line", text)
 			if text != "" {
-				r.emitActiveEvent(Event{
-					Name:       "app_server_message",
-					Timestamp:  time.Now().UTC(),
-					Message:    text,
-					DetailKind: EventDetailServerMessage,
-				})
+				now := time.Now().UTC()
+				r.eventMu.Lock()
+				elapsed := now.Sub(r.lastStderrEmittedAt)
+				shouldEmit := elapsed >= r.stderrDebounceWindow
+				if shouldEmit {
+					r.lastStderrEmittedAt = now
+				}
+				r.eventMu.Unlock()
+				if shouldEmit {
+					r.emitActiveEvent(Event{
+						Name:       "app_server_message",
+						Timestamp:  now,
+						Message:    text,
+						DetailKind: EventDetailServerMessage,
+					})
+				}
 			}
 		}
 		if err != nil {
