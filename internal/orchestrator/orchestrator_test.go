@@ -787,24 +787,6 @@ func TestOnRetryTimerReleasesClaimForManualHumanReview(t *testing.T) {
 	}
 }
 
-func TestShouldAttachPRLinkForConfiguredPauseState(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"pause_states": []any{"Plan Review"},
-		},
-	})
-
-	summary := workspaceSummary{PRURL: "https://example.com/pr/1"}
-	if !shouldAttachPRLink(cfg, "Plan Review", summary, nil) {
-		t.Fatal("configured pause state should attach PR link")
-	}
-	if shouldAttachPRLink(cfg, "In Progress", summary, nil) {
-		t.Fatal("non-pause state should not attach PR link")
-	}
-}
-
 func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
 	t.Parallel()
 
@@ -1045,50 +1027,21 @@ func TestWatchWorkflowRejectsInvalidReloadAndKeepsPreviousConfig(t *testing.T) {
 	}
 }
 
-func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
+func TestOnWorkerDoneSuccessReleasesClaimAndCountsCompleted(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
-
 	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"on_success_state": "Human Review",
-		},
 		"agent": map[string]any{
 			"max_attempts": 2,
-			"max_turns":    3,
 		},
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-29",
 		Attempt:    1,
-		StartedAt:  time.Now().Add(-(3*time.Minute + 4*time.Second)),
-		FinishedAt: time.Now(),
-		Session: LiveSession{
-			TurnCount:    2,
-			InputTokens:  28000,
-			OutputTokens: 14100,
-			TotalTokens:  42100,
-		},
-		Summary: &workspaceSummary{
-			Branch:            "j-29-test",
-			IssueBranch:       "j-29-test",
-			ModifiedFiles:     []string{"foo.txt"},
-			LastCommitHash:    "1234567890abcdef",
-			LastCommitSubject: "feat: add foo",
-			PRURL:             "https://github.com/example/nonexistent-symphony-test/pull/123",
-			PRBranch:          "j-29-test",
-		},
+		StartedAt:  time.Now().Add(-30 * time.Second),
 	}
 	attempt.SetStatus(StatusSucceeded)
 
@@ -1098,33 +1051,6 @@ func TestOnWorkerDoneSuccessPostsCommentAndTransitionsState(t *testing.T) {
 	o.state.mu.Unlock()
 
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
-
-	if recorder.commentCount() != 1 {
-		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
-	}
-	body := recorder.lastComment()
-	for _, want := range []string{
-		"✅ **Symphony agent completed** (attempt 1, turn 2/3)",
-		"**Tokens:** 42,100 (in: 28,000 / out: 14,100)",
-		"**Last commit:** `feat: add foo (1234567)`",
-		"**PR:** https://github.com/example/nonexistent-symphony-test/pull/123",
-		"**Branch:** `j-29-test`",
-		"**Changes:**",
-		"- Modified: foo.txt",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("comment body missing %q:\n%s", want, body)
-		}
-	}
-	if got := recorder.lastState(); got != "Human Review" {
-		t.Fatalf("state transition = %q, want Human Review", got)
-	}
-	if recorder.linkCount() != 1 {
-		t.Fatalf("link count = %d, want 1", recorder.linkCount())
-	}
-	if got := recorder.lastLink(); got != "https://github.com/example/nonexistent-symphony-test/pull/123" {
-		t.Fatalf("link url = %q, want PR url", got)
-	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -1174,26 +1100,16 @@ func TestOnWorkerDoneSuccessLeavesIssueEligibleForNextPoll(t *testing.T) {
 	}
 }
 
-func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *testing.T) {
+func TestOnWorkerDoneContinuationPendingSchedulesRetry(t *testing.T) {
 	t.Parallel()
-
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
-			"active_states":    []any{"In Progress"},
-			"on_success_state": "Human Review",
+			"active_states": []any{"In Progress"},
 		},
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-54",
@@ -1234,30 +1150,14 @@ func TestOnWorkerDoneContinuationPendingSchedulesRetryWithoutSuccessFeedback(t *
 	if entry.timer != nil {
 		entry.timer.Stop()
 	}
-	if recorder.commentCount() != 0 {
-		t.Fatalf("comment count = %d, want 0 while continuation is pending", recorder.commentCount())
-	}
-	if got := recorder.lastState(); got != "" {
-		t.Fatalf("unexpected state transition while continuation is pending: %q", got)
-	}
 }
 
-func TestOnWorkerDoneContinuationExhaustedReleasesClaimWithFailureFeedback(t *testing.T) {
+func TestOnWorkerDoneContinuationExhaustedReleasesClaim(t *testing.T) {
 	t.Parallel()
-
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"tracker": map[string]any{
-			"active_states":    []any{"In Progress"},
-			"on_failure_state": "Rework",
-			"post_comments":    true,
+			"active_states": []any{"In Progress"},
 		},
 		"agent": map[string]any{
 			"max_attempts": 3,
@@ -1265,7 +1165,6 @@ func TestOnWorkerDoneContinuationExhaustedReleasesClaimWithFailureFeedback(t *te
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-99",
@@ -1291,12 +1190,6 @@ func TestOnWorkerDoneContinuationExhaustedReleasesClaimWithFailureFeedback(t *te
 	}
 	if _, ok := o.state.Claimed[attempt.IssueID]; ok {
 		t.Fatal("claim should be released when continuation exhausted")
-	}
-	if recorder.lastState() != "Rework" {
-		t.Fatalf("expected state transition to Rework, got %q", recorder.lastState())
-	}
-	if recorder.commentCount() == 0 {
-		t.Fatal("expected failure comment to be posted when continuation exhausted")
 	}
 }
 
@@ -1384,36 +1277,21 @@ func TestContinuationRetryReleasesClaimWhenIssueInactive(t *testing.T) {
 	}
 }
 
-func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
+func TestOnWorkerDoneFinalFailureReleasesClaimWithoutRetry(t *testing.T) {
 	t.Parallel()
 
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
-
 	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"on_failure_state": "Rework",
-		},
 		"agent": map[string]any{
 			"max_attempts": 2,
 		},
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-29",
 		Attempt:    2,
 		StartedAt:  time.Now().Add(-5 * time.Minute),
-		Session: LiveSession{
-			TurnCount: 1,
-		},
 	}
 	attempt.SetStatus(StatusStalled)
 
@@ -1422,29 +1300,7 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	o.state.Claimed[attempt.IssueID] = struct{}{}
 	o.state.mu.Unlock()
 
-	runErr := fmt.Errorf("turn failed: stall_timeout")
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, runErr)
-
-	if recorder.commentCount() != 1 {
-		t.Fatalf("comment count = %d, want 1", recorder.commentCount())
-	}
-	body := recorder.lastComment()
-	for _, want := range []string{
-		"❌ **Symphony agent failed** (attempt 2/2)",
-		"**Error:** turn failed: stall_timeout",
-		"**Duration:** 5m 0s (stalled)",
-		"**Last status:** stalled (turn 1)",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("comment body missing %q:\n%s", want, body)
-		}
-	}
-	if got := recorder.lastState(); got != "Rework" {
-		t.Fatalf("state transition = %q, want Rework", got)
-	}
-	if recorder.linkCount() != 0 {
-		t.Fatalf("link count = %d, want 0", recorder.linkCount())
-	}
+	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, fmt.Errorf("stall_timeout"))
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -1456,98 +1312,8 @@ func TestOnWorkerDoneFinalFailurePostsCommentWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestResolveConfirmedPRPrefersIssueBranch(t *testing.T) {
-	t.Parallel()
-
-	summary := workspaceSummary{
-		Branch:      "main",
-		IssueBranch: "j-36-test",
-		RemoteURL:   "https://github.com/example/nonexistent-symphony-test.git",
-	}
-
-	url, branch := resolveConfirmedPR(summary, func(owner, repo, branch string) string {
-		if owner != "example" || repo != "nonexistent-symphony-test" || branch != "j-36-test" {
-			t.Fatalf("unexpected lookup args: %s %s %s", owner, repo, branch)
-		}
-		return "https://github.com/example/nonexistent-symphony-test/pull/123"
-	})
-
-	if url != "https://github.com/example/nonexistent-symphony-test/pull/123" {
-		t.Fatalf("resolveConfirmedPR() url = %q", url)
-	}
-	if branch != "j-36-test" {
-		t.Fatalf("resolveConfirmedPR() branch = %q", branch)
-	}
-}
-
-func TestBuildSuccessCommentOmitsUntrustedFields(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_turns": 20,
-		},
-	})
-	finishedAt := time.Date(2026, 3, 9, 6, 0, 0, 0, time.UTC)
-	attempt := &RunAttempt{
-		Attempt:    1,
-		StartedAt:  finishedAt.Add(-(9*time.Minute + 44*time.Second)),
-		FinishedAt: finishedAt,
-		Session: LiveSession{
-			TurnCount: 20,
-		},
-	}
-
-	body, err := buildSuccessComment(cfg, attempt, workspaceSummary{
-		Branch:            "main",
-		IssueBranch:       "j132134/j-54-status",
-		LastCommitHash:    "147e34f012345678",
-		LastCommitSubject: "fix: skip rate limit pause when no window is throttled",
-	})
-	if err != nil {
-		t.Fatalf("buildSuccessComment() error = %v", err)
-	}
-
-	for _, unwanted := range []string{
-		"**Tokens:**",
-		"**PR:**",
-		"**Branch:**",
-		"**Changes:**",
-		"`main`",
-	} {
-		if strings.Contains(body, unwanted) {
-			t.Fatalf("comment body unexpectedly contained %q:\n%s", unwanted, body)
-		}
-	}
-	if !strings.Contains(body, "**Last commit:** `fix: skip rate limit pause when no window is throttled (147e34f)`") {
-		t.Fatalf("comment body missing last commit:\n%s", body)
-	}
-}
-
-func TestChangedFilesDoesNotFallbackToHeadWhenWorktreeIsClean(t *testing.T) {
-	t.Parallel()
-
-	wsPath := initGitWorkspace(t)
-
-	files, err := changedFiles(wsPath)
-	if err != nil {
-		t.Fatalf("changedFiles() error = %v", err)
-	}
-	if len(files) != 0 {
-		t.Fatalf("changedFiles() = %v, want no files for a clean worktree", files)
-	}
-}
-
 func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	t.Parallel()
-
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"agent": map[string]any{
@@ -1556,7 +1322,6 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-29",
@@ -1572,13 +1337,6 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, fmt.Errorf("boom"))
 	stopRetryTimer(t, o, attempt.IssueID)
-
-	if recorder.commentCount() != 0 {
-		t.Fatalf("comment count = %d, want 0", recorder.commentCount())
-	}
-	if recorder.lastState() != "" {
-		t.Fatalf("unexpected state transition = %q", recorder.lastState())
-	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -1600,16 +1358,8 @@ func TestOnWorkerDoneIntermediateFailureRetriesQuietly(t *testing.T) {
 	}
 }
 
-func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
+func TestOnWorkerDonePreemptedSchedulesRetry(t *testing.T) {
 	t.Parallel()
-
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
 
 	cfg := config.New(map[string]any{
 		"agent": map[string]any{
@@ -1618,7 +1368,6 @@ func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
 	})
 
 	o := New("", 0, "alpha", nil)
-	o.tracker = client
 	attempt := &RunAttempt{
 		IssueID:    "issue-1",
 		Identifier: "J-39",
@@ -1635,16 +1384,6 @@ func TestOnWorkerDonePreemptedSchedulesRetryWithoutFeedback(t *testing.T) {
 
 	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, context.Canceled)
 	stopRetryTimer(t, o, attempt.IssueID)
-
-	if recorder.commentCount() != 0 {
-		t.Fatalf("comment count = %d, want 0", recorder.commentCount())
-	}
-	if recorder.lastState() != "" {
-		t.Fatalf("unexpected state transition = %q", recorder.lastState())
-	}
-	if recorder.linkCount() != 0 {
-		t.Fatalf("link count = %d, want 0", recorder.linkCount())
-	}
 
 	o.state.mu.Lock()
 	defer o.state.mu.Unlock()
@@ -2005,386 +1744,7 @@ func TestIsRetryAbandonComment(t *testing.T) {
 	}
 }
 
-type linearRecorder struct {
-	mu            sync.Mutex
-	commentOps    []string
-	creates       []string
-	updates       []string
-	issueComments []*types.Comment
-	nextCommentID int
-	links         []string
-	stateNames    []string
-}
 
-func (r *linearRecorder) addComment(body string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.commentOps = append(r.commentOps, body)
-	r.creates = append(r.creates, body)
-	r.nextCommentID++
-	now := time.Now().UTC()
-	r.issueComments = append(r.issueComments, &types.Comment{
-		ID:        fmt.Sprintf("comment-%d", r.nextCommentID),
-		Body:      body,
-		CreatedAt: &now,
-		UpdatedAt: &now,
-	})
-}
-
-func (r *linearRecorder) updateComment(commentID, body string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.commentOps = append(r.commentOps, body)
-	r.updates = append(r.updates, body)
-	now := time.Now().UTC()
-	for _, comment := range r.issueComments {
-		if comment != nil && comment.ID == commentID {
-			comment.Body = body
-			comment.UpdatedAt = &now
-			return
-		}
-	}
-	r.issueComments = append(r.issueComments, &types.Comment{
-		ID:        commentID,
-		Body:      body,
-		CreatedAt: &now,
-		UpdatedAt: &now,
-	})
-}
-
-func (r *linearRecorder) seedIssueComments(comments ...*types.Comment) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.issueComments = nil
-	r.nextCommentID = 0
-	for _, comment := range comments {
-		if comment == nil {
-			continue
-		}
-		clone := *comment
-		if clone.ID == "" {
-			r.nextCommentID++
-			clone.ID = fmt.Sprintf("seed-comment-%d", r.nextCommentID)
-		}
-		if clone.CreatedAt == nil {
-			now := time.Now().UTC()
-			clone.CreatedAt = &now
-		}
-		if clone.UpdatedAt == nil {
-			clone.UpdatedAt = clone.CreatedAt
-		}
-		r.issueComments = append(r.issueComments, &clone)
-	}
-	if r.nextCommentID < len(r.issueComments) {
-		r.nextCommentID = len(r.issueComments)
-	}
-}
-
-func (r *linearRecorder) addState(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.stateNames = append(r.stateNames, name)
-}
-
-func (r *linearRecorder) addLink(url string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.links = append(r.links, url)
-}
-
-func (r *linearRecorder) commentCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.commentOps)
-}
-
-func (r *linearRecorder) lastComment() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.commentOps) == 0 {
-		return ""
-	}
-	return r.commentOps[len(r.commentOps)-1]
-}
-
-func (r *linearRecorder) createCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.creates)
-}
-
-func (r *linearRecorder) updateCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.updates)
-}
-
-func (r *linearRecorder) lastState() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.stateNames) == 0 {
-		return ""
-	}
-	return r.stateNames[len(r.stateNames)-1]
-}
-
-func (r *linearRecorder) linkCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.links)
-}
-
-func (r *linearRecorder) lastLink() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.links) == 0 {
-		return ""
-	}
-	return r.links[len(r.links)-1]
-}
-
-func (r *linearRecorder) issueCommentCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.issueComments)
-}
-
-func (r *linearRecorder) issueCommentBody(commentID string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, comment := range r.issueComments {
-		if comment != nil && comment.ID == commentID {
-			return comment.Body
-		}
-	}
-	return ""
-}
-
-func newLinearRecorderServer(t *testing.T) (*linearRecorder, *httptest.Server) {
-	t.Helper()
-
-	recorder := &linearRecorder{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-
-		var req struct {
-			Query     string         `json:"query"`
-			Variables map[string]any `json:"variables"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(req.Query, "commentCreate"):
-			input, _ := req.Variables["input"].(map[string]any)
-			recorder.addComment(asString(input["body"]))
-			_, _ = w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
-		case strings.Contains(req.Query, "commentUpdate"):
-			input, _ := req.Variables["input"].(map[string]any)
-			recorder.updateComment(asString(req.Variables["id"]), asString(input["body"]))
-			_, _ = w.Write([]byte(`{"data":{"commentUpdate":{"success":true}}}`))
-		case strings.Contains(req.Query, "attachmentCreate"):
-			input, _ := req.Variables["input"].(map[string]any)
-			recorder.addLink(asString(input["url"]))
-			_, _ = w.Write([]byte(`{"data":{"attachmentCreate":{"success":true}}}`))
-		case strings.Contains(req.Query, "branchName url"):
-			recorder.mu.Lock()
-			nodes := make([]map[string]any, 0, len(recorder.issueComments))
-			for _, comment := range recorder.issueComments {
-				if comment == nil {
-					continue
-				}
-				nodes = append(nodes, map[string]any{
-					"id":        comment.ID,
-					"body":      comment.Body,
-					"createdAt": comment.CreatedAt.UTC().Format(time.RFC3339),
-					"updatedAt": comment.UpdatedAt.UTC().Format(time.RFC3339),
-				})
-			}
-			recorder.mu.Unlock()
-			payload, err := json.Marshal(map[string]any{
-				"id":          "issue-1",
-				"identifier":  "J-29",
-				"title":       "feedback",
-				"description": "",
-				"priority":    nil,
-				"state":       map[string]any{"name": "In Progress"},
-				"branchName":  nil,
-				"url":         nil,
-				"comments":    map[string]any{"nodes": nodes},
-				"labels":      map[string]any{"nodes": []any{}},
-				"relations":   map[string]any{"nodes": []any{}},
-				"createdAt":   time.Now().UTC().Format(time.RFC3339),
-				"updatedAt":   time.Now().UTC().Format(time.RFC3339),
-			})
-			if err != nil {
-				t.Fatalf("marshal issue payload: %v", err)
-			}
-			_, _ = fmt.Fprintf(w, `{"data":{"issue":%s}}`, payload)
-		case strings.Contains(req.Query, "issue(id: $id)"):
-			_, _ = w.Write([]byte(`{"data":{"issue":{"team":{"states":{"nodes":[{"id":"state-human-review","name":"Human Review"},{"id":"state-rework","name":"Rework"}]}}}}}`))
-		case strings.Contains(req.Query, "issueUpdate"):
-			switch asString(req.Variables["stateId"]) {
-			case "state-human-review":
-				recorder.addState("Human Review")
-			case "state-rework":
-				recorder.addState("Rework")
-			default:
-				recorder.addState(asString(req.Variables["stateId"]))
-			}
-			_, _ = w.Write([]byte(`{"data":{"issueUpdate":{"success":true}}}`))
-		default:
-			t.Fatalf("unexpected query: %s", req.Query)
-		}
-	}))
-
-	return recorder, server
-}
-
-func TestMaybePostSuccessFeedbackUpdatesExistingCommentWithoutCreatingDuplicate(t *testing.T) {
-	t.Parallel()
-
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	existingAt := time.Now().Add(-2 * time.Minute).UTC()
-	recorder.seedIssueComments(&types.Comment{
-		ID:        "comment-feedback",
-		Body:      feedbackCommentMarker + "\n\n✅ **Symphony agent completed** (attempt 1, turn 1/3)",
-		CreatedAt: &existingAt,
-		UpdatedAt: &existingAt,
-	})
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
-
-	cfg := config.New(map[string]any{
-		"agent": map[string]any{
-			"max_turns": 3,
-		},
-	})
-
-	o := New("", 0, "alpha", nil)
-	attempt := &RunAttempt{
-		IssueID:    "issue-1",
-		Identifier: "J-49",
-		Attempt:    1,
-		StartedAt:  time.Now().Add(-2 * time.Minute),
-		Summary: &workspaceSummary{
-			ModifiedFiles: []string{"foo.txt"},
-			Branch:        "j-49-comment-feedback-upsert",
-		},
-	}
-	attempt.SetTurnCount(1)
-
-	o.maybePostSuccessFeedback(context.Background(), cfg, client, attempt.IssueID, attempt)
-	o.maybePostSuccessFeedback(context.Background(), cfg, client, attempt.IssueID, attempt)
-
-	if recorder.createCount() != 0 {
-		t.Fatalf("create count = %d, want 0", recorder.createCount())
-	}
-	if recorder.updateCount() != 2 {
-		t.Fatalf("update count = %d, want 2", recorder.updateCount())
-	}
-	if recorder.issueCommentCount() != 1 {
-		t.Fatalf("issue comment count = %d, want 1", recorder.issueCommentCount())
-	}
-	body := recorder.issueCommentBody("comment-feedback")
-	if !strings.Contains(body, feedbackCommentMarker) {
-		t.Fatalf("updated comment missing feedback marker:\n%s", body)
-	}
-	if !strings.Contains(body, "✅ **Symphony agent completed**") {
-		t.Fatalf("updated comment missing success summary:\n%s", body)
-	}
-}
-
-func TestOnWorkerDoneSuccessUpdatesLegacyFeedbackCommentEvenWhenHumanCommentIsLatest(t *testing.T) {
-	t.Parallel()
-
-	wsPath := initGitWorkspace(t)
-	recorder, server := newLinearRecorderServer(t)
-	defer server.Close()
-
-	feedbackAt := time.Now().Add(-4 * time.Minute).UTC()
-	humanAt := time.Now().Add(-1 * time.Minute).UTC()
-	recorder.seedIssueComments(
-		&types.Comment{
-			ID:        "comment-feedback",
-			Body:      "✅ **Symphony agent completed** (attempt 1, turn 1/3)\n\nold body",
-			CreatedAt: &feedbackAt,
-			UpdatedAt: &feedbackAt,
-		},
-		&types.Comment{
-			ID:        "comment-human",
-			Body:      "사람이 남긴 최신 코멘트",
-			CreatedAt: &humanAt,
-			UpdatedAt: &humanAt,
-		},
-	)
-
-	client, err := tracker.NewLinearClient("test-key", server.URL, "proj", []string{"In Progress"}, "")
-	if err != nil {
-		t.Fatalf("NewLinearClient: %v", err)
-	}
-
-	cfg := config.New(map[string]any{
-		"tracker": map[string]any{
-			"on_success_state": "Human Review",
-		},
-		"agent": map[string]any{
-			"max_attempts": 2,
-			"max_turns":    3,
-		},
-	})
-
-	o := New("", 0, "alpha", nil)
-	o.tracker = client
-	attempt := &RunAttempt{
-		IssueID:       "issue-1",
-		Identifier:    "J-49",
-		Attempt:       1,
-		WorkspacePath: wsPath,
-		StartedAt:     time.Now().Add(-(3*time.Minute + 4*time.Second)),
-		Session: LiveSession{
-			TurnCount:    2,
-			InputTokens:  28000,
-			OutputTokens: 14100,
-			TotalTokens:  42100,
-		},
-	}
-	attempt.SetStatus(StatusSucceeded)
-
-	o.state.mu.Lock()
-	o.state.Running[attempt.IssueID] = attempt
-	o.state.Claimed[attempt.IssueID] = struct{}{}
-	o.state.mu.Unlock()
-
-	o.onWorkerDone(context.Background(), cfg, attempt.IssueID, attempt, nil, nil)
-
-	if recorder.createCount() != 0 {
-		t.Fatalf("create count = %d, want 0", recorder.createCount())
-	}
-	if recorder.updateCount() != 1 {
-		t.Fatalf("update count = %d, want 1", recorder.updateCount())
-	}
-	if recorder.issueCommentCount() != 2 {
-		t.Fatalf("issue comment count = %d, want 2", recorder.issueCommentCount())
-	}
-	body := recorder.issueCommentBody("comment-feedback")
-	if !strings.Contains(body, feedbackCommentMarker) {
-		t.Fatalf("updated legacy comment missing feedback marker:\n%s", body)
-	}
-	if !strings.Contains(body, "✅ **Symphony agent completed** (attempt 1, turn 2/3)") {
-		t.Fatalf("updated comment missing latest success body:\n%s", body)
-	}
-	if got := recorder.issueCommentBody("comment-human"); got != "사람이 남긴 최신 코멘트" {
-		t.Fatalf("human comment was modified: %q", got)
-	}
-}
 
 func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
 	t.Helper()
@@ -2633,57 +1993,3 @@ func itoa(v int) string {
 	return fmt.Sprintf("%d", v)
 }
 
-func TestParseStatusPaths(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-		want  []string
-	}{
-		{
-			name:  "unstaged modified",
-			input: " M README.md",
-			want:  []string{"README.md"},
-		},
-		{
-			name:  "staged modified",
-			input: "M  README.md",
-			want:  []string{"README.md"},
-		},
-		{
-			name:  "untracked",
-			input: "?? new.go",
-			want:  []string{"new.go"},
-		},
-		{
-			name:  "rename",
-			input: "R  old.go -> new.go",
-			want:  []string{"new.go"},
-		},
-		{
-			name:  "multiple files",
-			input: " M internal/config/config.go\nM  README.md\n?? extra.txt",
-			want:  []string{"internal/config/config.go", "README.md", "extra.txt"},
-		},
-		{
-			name:  "empty output",
-			input: "",
-			want:  nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseStatusPaths(tc.input)
-			if len(got) != len(tc.want) {
-				t.Fatalf("parseStatusPaths(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("parseStatusPaths(%q)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
-				}
-			}
-		})
-	}
-}

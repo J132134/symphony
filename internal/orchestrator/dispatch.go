@@ -163,7 +163,6 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 
 	o.mu.Lock()
 	delete(o.workersByIssue, issueID)
-	tr := o.tracker
 	wsMgr := o.wsMgr
 	o.mu.Unlock()
 
@@ -225,12 +224,6 @@ func (o *Orchestrator) onWorkerDone(ctx context.Context, cfg *config.SymphonyCon
 		}
 	} else {
 		slog.Error("orchestrator.worker_failed", "project", o.name, "issue_id", issueID, "error", err)
-	}
-
-	if err == nil && !needsContinuation {
-		o.maybePostSuccessFeedback(ctx, cfg, tr, issueID, attempt)
-	} else if attempt.Attempt >= cfg.MaxAttempts() {
-		o.maybePostFinalFailureFeedback(ctx, cfg, tr, issueID, attempt, err)
 	}
 
 	if draining {
@@ -421,9 +414,6 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	runnerStarted = false
 
 	attempt.FinishedAt = time.Now().UTC()
-	if summary, err := collectWorkspaceSummary(ws.Path, issue.BranchName); err == nil {
-		attempt.Summary = &summary
-	}
 
 	if _, err := wsMgr.FinishRun(ctx, ws); err != nil {
 		slog.Warn("orchestrator.after_run_failed", "issue", issue.Identifier, "error", err)

@@ -254,14 +254,11 @@ hooks:
 
 ## Linear 피드백
 
-기본적으로 Symphony는 에이전트 실행이 성공하면 Linear 이슈에 실행 요약 코멘트를 남기고, `tracker.on_success_state`가 pause state(`tracker.pause_states`)일 때는 확인된 실제 PR URL이 있을 때만 Add link도 함께 등록한다. 성공 코멘트는 turn 종료 직전에 캡처한 스냅샷만 사용하며, `Tokens`, `PR`, `Branch`, `Changes`는 신뢰 가능한 값이 확보된 경우에만 표시한다. 예를 들어 토큰 집계가 0이거나, workspace branch와 issue branch가 충돌하거나, clean worktree라 변경 파일을 확정할 수 없거나, GitHub에서 실제 PR을 찾지 못하면 해당 줄은 통째로 생략된다. 최종 실패(`agent.max_attempts` 초과) 시에만 실패 코멘트를 남기며, 코멘트/링크/상태 전환 등록 실패는 워커 실행을 실패로 만들지 않고 경고 로그만 남긴다.
+Linear 이슈에 대한 코멘트, PR 링크 추가, 상태 전환은 에이전트가 MCP를 통해 직접 수행한다. Go 오케스트레이터는 이슈 폴링과 에이전트 디스패치만 담당한다.
 
 ```yaml
 tracker:
-  post_comments: true
   pause_states: [Plan Review, Human Review]
-  on_success_state: Human Review
-  on_failure_state: Rework
 
 agent:
   max_concurrent_agents_by_state:
@@ -269,10 +266,7 @@ agent:
   max_attempts: 3
 ```
 
-- `tracker.post_comments`: Linear 코멘트 등록 on/off. 기본값은 `true`.
 - `tracker.pause_states`: active 상태 중 dispatch/retry/concurrency 계산에서 제외할 상태 목록. 기본값은 `["Human Review"]`.
-- `tracker.on_success_state`: 성공 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
-- `tracker.on_failure_state`: 최종 실패 후 자동 전환할 상태 이름. 비우면 전환하지 않는다.
 - `agent.max_concurrent_agents_by_state`: 상태별 동시 실행 상한. 명시한 상태만 개별 quota를 적용하고, 나머지 활성 상태는 `agent.max_concurrent_agents` 전체 quota를 공유한다. 기본값은 비어 있음.
 - `agent.max_attempts`: 워커 실행 최대 시도 횟수. 기본값은 `3`.
 
@@ -303,7 +297,6 @@ agent:
 | `agent.max_attempts` | `3` |
 | `agent.max_turns` | `20` |
 | `agent.max_retry_backoff_ms` | `300000` (5분) |
-| `tracker.post_comments` | `true` |
 | `codex.command` | `codex app-server` |
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
 | `codex.stall_timeout_ms` | `300000` (5분) |

@@ -183,18 +183,6 @@ func (c *SymphonyConfig) TrackerProjectSlug() string {
 func (c *SymphonyConfig) TrackerEndpoint() string {
 	return c.getString("tracker.endpoint", "https://api.linear.app/graphql")
 }
-func (c *SymphonyConfig) TrackerPostComments() bool {
-	return c.getBool("tracker.post_comments", true)
-}
-func (c *SymphonyConfig) TrackerOnSuccessState() string {
-	return strings.TrimSpace(c.getString("tracker.on_success_state", ""))
-}
-func (c *SymphonyConfig) TrackerOnFailureState() string {
-	return strings.TrimSpace(c.getString("tracker.on_failure_state", ""))
-}
-func (c *SymphonyConfig) TrackerPRURLTemplate() string {
-	return strings.TrimSpace(c.getString("tracker.pr_url_template", ""))
-}
 func (c *SymphonyConfig) TrackerAssignee() string {
 	return c.getString("tracker.assignee", "")
 }
