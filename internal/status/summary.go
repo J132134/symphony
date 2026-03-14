@@ -28,19 +28,23 @@ type Summary struct {
 }
 
 type RunningIssueSummary struct {
-	Identifier   string `json:"identifier"`
-	IssueState   string `json:"issue_state,omitempty"`
-	Status       string `json:"status"`
-	Priority     *int   `json:"priority,omitempty"`
-	TurnCount    int    `json:"turn_count,omitempty"`
-	LastEventAt  string `json:"last_event_at,omitempty"`
-	LastEvent    string `json:"last_event,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
-	SessionID    string `json:"session_id,omitempty"`
-	PID          string `json:"pid,omitempty"`
-	InputTokens  int64  `json:"input_tokens,omitempty"`
-	OutputTokens int64  `json:"output_tokens,omitempty"`
-	TotalTokens  int64  `json:"total_tokens,omitempty"`
+	Identifier      string `json:"identifier"`
+	IssueState      string `json:"issue_state,omitempty"`
+	Status          string `json:"status"`
+	Priority        *int   `json:"priority,omitempty"`
+	TurnCount       int    `json:"turn_count,omitempty"`
+	LastEventAt     string `json:"last_event_at,omitempty"`
+	LastEvent       string `json:"last_event,omitempty"`
+	CurrentTaskAt   string `json:"current_task_at,omitempty"`
+	CurrentTask     string `json:"current_task,omitempty"`
+	ServerMessageAt string `json:"server_message_at,omitempty"`
+	ServerMessage   string `json:"server_message,omitempty"`
+	StartedAt       string `json:"started_at,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	PID             string `json:"pid,omitempty"`
+	InputTokens     int64  `json:"input_tokens,omitempty"`
+	OutputTokens    int64  `json:"output_tokens,omitempty"`
+	TotalTokens     int64  `json:"total_tokens,omitempty"`
 }
 
 type RetrySummary struct {
@@ -175,6 +179,8 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 	session := attempt.SessionSnapshot()
 	issue.TurnCount = session.TurnCount
 	issue.LastEvent = strings.TrimSpace(session.LastEvent)
+	issue.CurrentTask = strings.TrimSpace(session.CurrentTask)
+	issue.ServerMessage = strings.TrimSpace(session.ServerMessage)
 	issue.SessionID = session.SessionID
 	issue.PID = session.AgentPID
 	issue.InputTokens = session.InputTokens
@@ -182,6 +188,12 @@ func SummarizeRunningIssue(attempt *orchestrator.RunAttempt) RunningIssueSummary
 	issue.TotalTokens = session.TotalTokens
 	if session.LastEventAt != nil {
 		issue.LastEventAt = session.LastEventAt.UTC().Format(time.RFC3339)
+	}
+	if session.CurrentTaskAt != nil {
+		issue.CurrentTaskAt = session.CurrentTaskAt.UTC().Format(time.RFC3339)
+	}
+	if session.ServerMessageAt != nil {
+		issue.ServerMessageAt = session.ServerMessageAt.UTC().Format(time.RFC3339)
 	}
 
 	return issue

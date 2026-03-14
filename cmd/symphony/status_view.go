@@ -115,12 +115,12 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 	if len(running) == 0 {
 		fmt.Fprintln(&b, "No running agents")
 	} else {
-		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       SESSION        EVENT")
-		fmt.Fprintln(&b, "------------------------------------------------------------------------------------------------------")
+		fmt.Fprintln(&b, "PROJECT          ID         STAGE               P   AGE / TURN      TOKENS       SESSION")
+		fmt.Fprintln(&b, "----------------------------------------------------------------------------------------")
 		for _, issue := range running {
 			fmt.Fprintf(
 				&b,
-				"%-16s %-10s %-19s %-3s %-15s %-12s %-14s %s\n",
+				"%-16s %-10s %-19s %-3s %-15s %-12s %-14s\n",
 				truncate(issue.project, 16),
 				issue.issue.Identifier,
 				truncate(humanizeStatus(issue.issue.Status), 19),
@@ -128,8 +128,10 @@ func renderStatusDashboard(summary status.Summary, lastErr error, now, nextRefre
 				formatAgeTurn(issue.issue, now),
 				formatCompactTokens(issue.issue.TotalTokens),
 				truncate(shortSession(issue.issue.SessionID), 14),
-				truncate(issue.issue.LastEvent, 32),
 			)
+			for _, detail := range runningIssueDetailLines(issue.issue) {
+				fmt.Fprintf(&b, "  %s\n", truncate(detail, 96))
+			}
 		}
 	}
 
@@ -315,6 +317,20 @@ func shortSession(sessionID string) string {
 		return sessionID
 	}
 	return sessionID[:5] + "..." + sessionID[len(sessionID)-6:]
+}
+
+func runningIssueDetailLines(issue status.RunningIssueSummary) []string {
+	lines := make([]string, 0, 3)
+	if issue.CurrentTask != "" {
+		lines = append(lines, "current task: "+issue.CurrentTask)
+	}
+	if issue.ServerMessage != "" {
+		lines = append(lines, "app-server: "+issue.ServerMessage)
+	}
+	if len(lines) == 0 && issue.LastEvent != "" {
+		lines = append(lines, "last event: "+issue.LastEvent)
+	}
+	return lines
 }
 
 func humanizeStatus(v string) string {

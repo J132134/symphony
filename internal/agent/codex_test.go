@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -265,6 +267,70 @@ func TestBuildTurnSandboxPolicyMapsSandboxTypesToProtocolValues(t *testing.T) {
 				t.Fatalf("sandboxPolicy.writableRoots present for %s, want omitted", tt.input)
 			}
 		})
+	}
+}
+
+func TestHandleServerRequestEmitsCurrentTaskDetail(t *testing.T) {
+	t.Parallel()
+
+	r := NewRunner()
+	r.sessionID = "session-1"
+	r.pid = "4321"
+	r.stdin = &lockedWriter{w: &bytes.Buffer{}}
+
+	var events []Event
+	r.setActiveEventSink("thread-1", "turn-1", func(e Event) {
+		events = append(events, e)
+	})
+
+	r.handleServerRequest(&Request{
+		ID:     1,
+		Method: methodCmdApproval,
+		Params: map[string]any{"command": "go test ./..."},
+	})
+
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2 (%#v)", len(events), events)
+	}
+	if events[0].DetailKind != EventDetailCurrentTask {
+		t.Fatalf("events[0].DetailKind = %q, want %q", events[0].DetailKind, EventDetailCurrentTask)
+	}
+	if events[0].ThreadID != "thread-1" || events[0].TurnID != "turn-1" {
+		t.Fatalf("events[0] thread/turn = %q/%q, want thread-1/turn-1", events[0].ThreadID, events[0].TurnID)
+	}
+	if !strings.Contains(events[0].Message, "go test ./...") {
+		t.Fatalf("events[0].Message = %q, want command summary", events[0].Message)
+	}
+	if events[1].Name != "approval_granted" {
+		t.Fatalf("events[1].Name = %q, want approval_granted", events[1].Name)
+	}
+}
+
+func TestReadStderrEmitsServerMessageDetail(t *testing.T) {
+	t.Parallel()
+
+	r := NewRunner()
+	r.sessionID = "session-1"
+	r.pid = "4321"
+
+	var events []Event
+	r.setActiveEventSink("thread-1", "turn-1", func(e Event) {
+		events = append(events, e)
+	})
+
+	r.readStderr(bufio.NewReader(strings.NewReader("codex app-server: streaming output stalled\n")))
+
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1 (%#v)", len(events), events)
+	}
+	if events[0].DetailKind != EventDetailServerMessage {
+		t.Fatalf("events[0].DetailKind = %q, want %q", events[0].DetailKind, EventDetailServerMessage)
+	}
+	if events[0].Name != "app_server_message" {
+		t.Fatalf("events[0].Name = %q, want app_server_message", events[0].Name)
+	}
+	if !strings.Contains(events[0].Message, "streaming output stalled") {
+		t.Fatalf("events[0].Message = %q, want stderr summary", events[0].Message)
 	}
 }
 

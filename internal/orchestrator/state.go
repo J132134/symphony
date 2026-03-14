@@ -40,16 +40,20 @@ const retryAbandonCommentMarker = "<!-- symphony:retry-abandoned -->"
 type TokenUsage = types.TokenUsage
 
 type LiveSession struct {
-	SessionID    string
-	ThreadID     string
-	TurnID       string
-	AgentPID     string
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
-	TurnCount    int
-	LastEventAt  *time.Time
-	LastEvent    string
+	SessionID       string
+	ThreadID        string
+	TurnID          string
+	AgentPID        string
+	InputTokens     int64
+	OutputTokens    int64
+	TotalTokens     int64
+	TurnCount       int
+	LastEventAt     *time.Time
+	LastEvent       string
+	CurrentTaskAt   *time.Time
+	CurrentTask     string
+	ServerMessageAt *time.Time
+	ServerMessage   string
 }
 
 type WorkerCancelReason string
@@ -122,6 +126,30 @@ func (a *RunAttempt) SetLastEventDetail(name, message string) {
 	default:
 		a.Session.LastEvent = message
 	}
+}
+
+func (a *RunAttempt) SetCurrentTask(t time.Time, task string) {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.CurrentTaskAt = &t
+	a.Session.CurrentTask = task
+}
+
+func (a *RunAttempt) SetServerMessage(t time.Time, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Session.ServerMessageAt = &t
+	a.Session.ServerMessage = message
 }
 
 func (a *RunAttempt) GetLastEventAt() *time.Time {

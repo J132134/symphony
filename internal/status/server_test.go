@@ -134,6 +134,8 @@ func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
 	attempt.SetStatus(orchestrator.StatusStreamingTurn)
 	attempt.SetTurnCount(2)
 	attempt.UpdateLastEvent(now.Add(time.Minute))
+	attempt.SetCurrentTask(now.Add(30*time.Second), "running tool: apply_patch")
+	attempt.SetServerMessage(now.Add(45*time.Second), "diff stream stalled")
 	state.Running["run-1"] = attempt
 
 	server := New(&fakeSummarySource{
@@ -160,5 +162,11 @@ func TestHandleProjectsBuildsProjectSummaryFromStates(t *testing.T) {
 	}
 	if len(payload[0].RunningIssues) != 1 || payload[0].RunningIssues[0].Identifier != "J-54" {
 		t.Fatalf("running_issues = %#v, want J-54 detail", payload[0].RunningIssues)
+	}
+	if payload[0].RunningIssues[0].CurrentTask != "running tool: apply_patch" {
+		t.Fatalf("current_task = %q, want running tool: apply_patch", payload[0].RunningIssues[0].CurrentTask)
+	}
+	if payload[0].RunningIssues[0].ServerMessage != "diff stream stalled" {
+		t.Fatalf("server_message = %q, want diff stream stalled", payload[0].RunningIssues[0].ServerMessage)
 	}
 }

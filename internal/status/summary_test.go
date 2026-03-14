@@ -24,6 +24,8 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 	attempt.SetSessionIdentity("thread-1", "session-1234567890", "4321")
 	attempt.AddTokens(100, 20, 120)
 	attempt.SetLastEventDetail("item.completed", "done")
+	attempt.SetCurrentTask(lastEvent.Add(-time.Minute), "running tool: apply_patch")
+	attempt.SetServerMessage(lastEvent, "diff stream stalled")
 	running.Running["1"] = attempt
 	running.Totals.InputTokens = 100
 	running.Totals.OutputTokens = 20
@@ -63,6 +65,12 @@ func TestBuildSummaryPrefersNetworkLoss(t *testing.T) {
 		}
 		if got[0].LastEvent != "item.completed: done" {
 			t.Fatalf("last_event = %q, want item.completed: done", got[0].LastEvent)
+		}
+		if got[0].CurrentTask != "running tool: apply_patch" {
+			t.Fatalf("current_task = %q, want running tool: apply_patch", got[0].CurrentTask)
+		}
+		if got[0].ServerMessage != "diff stream stalled" {
+			t.Fatalf("server_message = %q, want diff stream stalled", got[0].ServerMessage)
 		}
 		if got[0].SessionID != "session-1234567890" {
 			t.Fatalf("session_id = %q, want session-1234567890", got[0].SessionID)

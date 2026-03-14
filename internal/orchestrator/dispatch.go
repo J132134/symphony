@@ -437,6 +437,12 @@ func (o *Orchestrator) loadTurnContext(issue *types.Issue, wsMgr *workspace.Mana
 func (o *Orchestrator) handleAgentEvent(issueID string, attempt *RunAttempt, e agent.Event) {
 	attempt.UpdateLastEvent(e.Timestamp)
 	attempt.SetLastEventDetail(e.Name, e.Message)
+	switch e.DetailKind {
+	case agent.EventDetailCurrentTask:
+		attempt.SetCurrentTask(e.Timestamp, e.Message)
+	case agent.EventDetailServerMessage:
+		attempt.SetServerMessage(e.Timestamp, e.Message)
+	}
 	attempt.UpdateSessionRuntime(e.SessionID, e.PID)
 	if e.Usage != nil {
 		o.state.mu.Lock()
@@ -471,7 +477,6 @@ func buildAgentConfig(cfg *config.SymphonyConfig, workspacePath string) (*agent.
 		AdditionalWritableDirs: writableDirs,
 	}, nil
 }
-
 
 func isUrgentIssue(issue *types.Issue) bool {
 	return issue != nil && issue.Priority != nil && *issue.Priority == urgentPriority
