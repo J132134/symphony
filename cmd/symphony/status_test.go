@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -18,6 +19,10 @@ type stubSummaryClient struct {
 }
 
 func (s stubSummaryClient) Summary() (status.Summary, error) {
+	return s.summary, s.err
+}
+
+func (s stubSummaryClient) SummaryCtx(_ context.Context) (status.Summary, error) {
 	return s.summary, s.err
 }
 

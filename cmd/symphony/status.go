@@ -19,6 +19,7 @@ import (
 
 type summaryClient interface {
 	Summary() (status.Summary, error)
+	SummaryCtx(ctx context.Context) (status.Summary, error)
 }
 
 var newSummaryClient = func(baseURL string) summaryClient {

@@ -36,7 +36,7 @@ func watchStatus(ctx context.Context, stdout io.Writer, client summaryClient, po
 		poll:        poll,
 		nextRefresh: time.Now(),
 	}
-	if err := state.refresh(client); err != nil {
+	if err := state.refresh(ctx, client); err != nil {
 		state.lastErr = err
 	}
 
@@ -63,7 +63,10 @@ func watchStatus(ctx context.Context, stdout io.Writer, client summaryClient, po
 			return nil
 		case <-ticker.C:
 			if !time.Now().Before(state.nextRefresh) {
-				if err := state.refresh(client); err != nil {
+				if err := state.refresh(ctx, client); err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
 					state.lastErr = err
 				}
 			}
@@ -78,8 +81,8 @@ type liveStatusState struct {
 	nextRefresh time.Time
 }
 
-func (s *liveStatusState) refresh(client summaryClient) error {
-	summary, err := client.Summary()
+func (s *liveStatusState) refresh(ctx context.Context, client summaryClient) error {
+	summary, err := client.SummaryCtx(ctx)
 	s.nextRefresh = time.Now().Add(s.poll)
 	if err != nil {
 		return err
