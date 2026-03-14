@@ -43,17 +43,26 @@ type RateLimitEvent struct {
 	ResetAt *time.Time
 }
 
+type EventDetailKind string
+
+const (
+	EventDetailNone          EventDetailKind = ""
+	EventDetailCurrentTask   EventDetailKind = "current_task"
+	EventDetailServerMessage EventDetailKind = "server_message"
+)
+
 // Event is emitted by the runner to the orchestrator callback.
 type Event struct {
-	Name      string
-	Timestamp time.Time
-	SessionID string
-	ThreadID  string
-	TurnID    string
-	PID       string
-	Usage     *TokenUsage
-	RateLimit *RateLimitEvent
-	Message   string
+	Name       string
+	Timestamp  time.Time
+	SessionID  string
+	ThreadID   string
+	TurnID     string
+	PID        string
+	Usage      *TokenUsage
+	RateLimit  *RateLimitEvent
+	Message    string
+	DetailKind EventDetailKind
 }
 
 // TurnResult is the outcome of a single turn.
@@ -83,6 +92,10 @@ type Runner struct {
 	pending map[int]chan rpcResult
 	reqID   atomic.Int32
 
+	eventMu         sync.RWMutex
+	activeCallback  EventCallback
+	activeThreadID  string
+	activeTurnID    string
 	notifCh         chan *Incoming
 	priorityNotifCh chan *Incoming
 
@@ -207,6 +220,8 @@ func (r *Runner) RunTurn(
 
 	// Drain stale notifications from previous turns.
 	r.drainNotifications()
+	r.setActiveEventSink(threadID, turnID, cb)
+	defer r.clearActiveEventSink(threadID, turnID)
 
 	turnParams := map[string]any{
 		"threadId":       threadID,
@@ -259,7 +274,7 @@ func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, 
 		}
 
 		if msg.ServerReq != nil {
-			r.handleServerRequest(msg.ServerReq, cb)
+			r.handleServerRequest(msg.ServerReq)
 			continue
 		}
 		if msg.Notif == nil {
@@ -325,7 +340,17 @@ func (r *Runner) handleTokenUsage(threadID, turnID string, params map[string]any
 	})
 }
 
-func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
+func (r *Runner) handleServerRequest(req *Request) {
+	taskSummary := summarizeServerRequest(req)
+	if taskSummary != "" {
+		r.emitActiveEvent(Event{
+			Name:       "agent_task",
+			Timestamp:  time.Now().UTC(),
+			Message:    taskSummary,
+			DetailKind: EventDetailCurrentTask,
+		})
+	}
+
 	switch req.Method {
 	case methodCmdApproval, methodFileApproval:
 		slog.Info("agent.auto_approve", "method", req.Method, "params", summarizeParams(req.Params))
@@ -337,8 +362,7 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 		if err := r.stdin.Write(data); err != nil {
 			slog.Warn("agent.write_response_failed", "method", req.Method, "error", err)
 		}
-		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
-			SessionID: r.sessionID, Message: req.Method})
+		r.emitActiveEvent(Event{Name: "approval_granted", Timestamp: time.Now().UTC(), Message: taskSummary})
 	case methodToolCall:
 		slog.Warn("agent.tool_call_unsupported", "params", summarizeParams(req.Params))
 		r.sendErrorResponse(req.ID, -32601, "Tool call not supported", req.Method)
@@ -353,8 +377,7 @@ func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 			if err := r.stdin.Write(data); err != nil {
 				slog.Warn("agent.write_response_failed", "method", req.Method, "error", err)
 			}
-			emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
-				SessionID: r.sessionID, Message: req.Method})
+			r.emitActiveEvent(Event{Name: "approval_granted", Timestamp: time.Now().UTC(), Message: taskSummary})
 			return
 		}
 		slog.Warn("agent.user_input_unsupported", "params", summarizeParams(req.Params))
@@ -490,6 +513,112 @@ func summarizeParams(params map[string]any) string {
 	return string(raw[:limit]) + "...(truncated)"
 }
 
+func summarizeServerRequest(req *Request) string {
+	if req == nil {
+		return ""
+	}
+
+	switch req.Method {
+	case methodCmdApproval:
+		return summarizeCommandApproval(req.Params)
+	case methodFileApproval:
+		return summarizeFileApproval(req.Params)
+	case methodUserInput:
+		return summarizeUserInput(req.Params)
+	case methodToolCall:
+		return summarizeToolCall(req.Params)
+	default:
+		return ""
+	}
+}
+
+func summarizeCommandApproval(params map[string]any) string {
+	command := compactInline(firstNonEmptyString(
+		params["command"],
+		params["cmd"],
+		params["reason"],
+	), 120)
+	if command == "" {
+		command = compactInline(summarizeParams(params), 120)
+	}
+	if command == "" {
+		return "awaiting command approval"
+	}
+	return "awaiting command approval: " + command
+}
+
+func summarizeFileApproval(params map[string]any) string {
+	target := compactInline(firstNonEmptyString(
+		params["path"],
+		params["filePath"],
+		params["target"],
+	), 120)
+	if target == "" {
+		target = compactInline(summarizeParams(params), 120)
+	}
+	if target == "" {
+		return "awaiting file change approval"
+	}
+	return "awaiting file change approval: " + target
+}
+
+func summarizeUserInput(params map[string]any) string {
+	if rawQuestions, ok := params["questions"].([]any); ok {
+		for _, raw := range rawQuestions {
+			question, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			prompt := compactInline(firstNonEmptyString(question["header"], question["question"]), 120)
+			if prompt != "" {
+				return "waiting for tool input: " + prompt
+			}
+		}
+	}
+
+	prompt := compactInline(firstNonEmptyString(params["header"], params["question"], params["prompt"]), 120)
+	if prompt == "" {
+		prompt = compactInline(summarizeParams(params), 120)
+	}
+	if prompt == "" {
+		return "waiting for tool input"
+	}
+	return "waiting for tool input: " + prompt
+}
+
+func summarizeToolCall(params map[string]any) string {
+	toolName := compactInline(firstNonEmptyString(params["toolName"], params["name"]), 80)
+	if toolName == "" {
+		if tool, ok := params["tool"].(map[string]any); ok {
+			toolName = compactInline(firstNonEmptyString(tool["name"]), 80)
+		}
+	}
+
+	if toolName == "" {
+		toolName = "unknown tool"
+	}
+
+	args := compactInline(firstNonEmptyString(params["arguments"], params["input"], params["prompt"]), 120)
+	if args == "" {
+		return "running tool: " + toolName
+	}
+	return "running tool: " + toolName + " " + args
+}
+
+func compactInline(v string, limit int) string {
+	v = strings.Join(strings.Fields(strings.TrimSpace(v)), " ")
+	if v == "" {
+		return ""
+	}
+	if limit > 0 && len(v) > limit {
+		if limit <= 3 {
+			return v[:limit]
+		}
+		return v[:limit-3] + "..."
+	}
+	return v
+}
+
 func sortedKeys(params map[string]any) []string {
 	keys := make([]string, 0, len(params))
 	for key := range params {
@@ -559,7 +688,16 @@ func (r *Runner) readStderr(reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			slog.Debug("agent.stderr", "line", strings.TrimRight(string(line), "\r\n"))
+			text := compactInline(strings.TrimRight(string(line), "\r\n"), 160)
+			slog.Debug("agent.stderr", "line", text)
+			if text != "" {
+				r.emitActiveEvent(Event{
+					Name:       "app_server_message",
+					Timestamp:  time.Now().UTC(),
+					Message:    text,
+					DetailKind: EventDetailServerMessage,
+				})
+			}
 		}
 		if err != nil {
 			return
@@ -1031,6 +1169,49 @@ func emit(cb EventCallback, e Event) {
 	if cb != nil {
 		cb(e)
 	}
+}
+
+func (r *Runner) setActiveEventSink(threadID, turnID string, cb EventCallback) {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	r.activeCallback = cb
+	r.activeThreadID = threadID
+	r.activeTurnID = turnID
+}
+
+func (r *Runner) clearActiveEventSink(threadID, turnID string) {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	if r.activeThreadID != threadID || r.activeTurnID != turnID {
+		return
+	}
+	r.activeCallback = nil
+	r.activeThreadID = ""
+	r.activeTurnID = ""
+}
+
+func (r *Runner) emitActiveEvent(e Event) {
+	r.eventMu.RLock()
+	cb := r.activeCallback
+	threadID := r.activeThreadID
+	turnID := r.activeTurnID
+	r.eventMu.RUnlock()
+	if cb == nil {
+		return
+	}
+	if e.SessionID == "" {
+		e.SessionID = r.sessionID
+	}
+	if e.ThreadID == "" {
+		e.ThreadID = threadID
+	}
+	if e.TurnID == "" {
+		e.TurnID = turnID
+	}
+	if e.PID == "" {
+		e.PID = r.pid
+	}
+	emit(cb, e)
 }
 
 type lockedWriter struct {

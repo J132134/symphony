@@ -43,9 +43,11 @@ func TestClientProjects(t *testing.T) {
 		writeJSON(w, http.StatusOK, []ProjectSummary{{
 			Name: "alpha",
 			RunningIssues: []RunningIssueSummary{{
-				Identifier: "J-54",
-				Status:     "streaming_turn",
-				TurnCount:  3,
+				Identifier:    "J-54",
+				Status:        "streaming_turn",
+				TurnCount:     3,
+				CurrentTask:   "running tool: apply_patch",
+				ServerMessage: "diff stream stalled",
 			}},
 		}})
 	}))
@@ -60,6 +62,12 @@ func TestClientProjects(t *testing.T) {
 	}
 	if len(projects[0].RunningIssues) != 1 || projects[0].RunningIssues[0].Identifier != "J-54" {
 		t.Fatalf("running_issues = %#v, want J-54", projects[0].RunningIssues)
+	}
+	if projects[0].RunningIssues[0].CurrentTask != "running tool: apply_patch" {
+		t.Fatalf("current_task = %q, want running tool: apply_patch", projects[0].RunningIssues[0].CurrentTask)
+	}
+	if projects[0].RunningIssues[0].ServerMessage != "diff stream stalled" {
+		t.Fatalf("server_message = %q, want diff stream stalled", projects[0].RunningIssues[0].ServerMessage)
 	}
 }
 

@@ -822,6 +822,51 @@ func TestHandleAgentEventRateLimitPausesDispatchUntilReset(t *testing.T) {
 	}
 }
 
+func TestHandleAgentEventPreservesTaskAndServerDetailsAcrossGenericEvents(t *testing.T) {
+	t.Parallel()
+
+	o := New("", 0, "alpha", nil)
+	attempt := &RunAttempt{IssueID: "issue-1", Identifier: "J-20"}
+	now := time.Now().UTC()
+
+	o.handleAgentEvent(attempt.IssueID, attempt, agent.Event{
+		Name:       "agent_task",
+		Timestamp:  now,
+		Message:    "running tool: apply_patch",
+		DetailKind: agent.EventDetailCurrentTask,
+		SessionID:  "session-1",
+		PID:        "4321",
+	})
+	o.handleAgentEvent(attempt.IssueID, attempt, agent.Event{
+		Name:       "app_server_message",
+		Timestamp:  now.Add(time.Second),
+		Message:    "diff stream stalled",
+		DetailKind: agent.EventDetailServerMessage,
+	})
+	o.handleAgentEvent(attempt.IssueID, attempt, agent.Event{
+		Name:      "token_usage",
+		Timestamp: now.Add(2 * time.Second),
+		Usage:     &agent.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	})
+
+	session := attempt.SessionSnapshot()
+	if session.CurrentTask != "running tool: apply_patch" {
+		t.Fatalf("current_task = %q, want running tool: apply_patch", session.CurrentTask)
+	}
+	if session.ServerMessage != "diff stream stalled" {
+		t.Fatalf("server_message = %q, want diff stream stalled", session.ServerMessage)
+	}
+	if session.LastEvent != "token_usage" {
+		t.Fatalf("last_event = %q, want token_usage", session.LastEvent)
+	}
+	if session.SessionID != "session-1" || session.AgentPID != "4321" {
+		t.Fatalf("session identity = %q/%q, want session-1/4321", session.SessionID, session.AgentPID)
+	}
+	if session.TotalTokens != 15 {
+		t.Fatalf("total_tokens = %d, want 15", session.TotalTokens)
+	}
+}
+
 func TestHandleAgentEventRateLimitPausesGlobalLimiter(t *testing.T) {
 	t.Parallel()
 
@@ -1744,8 +1789,6 @@ func TestIsRetryAbandonComment(t *testing.T) {
 	}
 }
 
-
-
 func newLinearIssueStateServer(t *testing.T, issues []*types.Issue) *httptest.Server {
 	t.Helper()
 
@@ -1992,4 +2035,3 @@ func randomFreePort(t *testing.T) int {
 func itoa(v int) string {
 	return fmt.Sprintf("%d", v)
 }
-

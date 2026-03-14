@@ -156,6 +156,9 @@ func formatStatusSummary(summary status.Summary) string {
 				fmt.Fprintf(&b, " | last event %s", issue.LastEventAt)
 			}
 			b.WriteByte('\n')
+			for _, detail := range runningIssueDetailLines(issue) {
+				fmt.Fprintf(&b, "      %s\n", detail)
+			}
 		}
 	}
 
