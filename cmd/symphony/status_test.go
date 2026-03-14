@@ -85,7 +85,7 @@ func TestFormatStatusSummaryIncludesRunningIssueDetails(t *testing.T) {
 		"Status: running",
 		"[alpha] running (healthy)",
 		"J-54 | streaming_turn | turn 3 | last event 2026-03-09T01:00:00Z",
-		"task: running tool: apply_patch",
+		"current task: running tool: apply_patch",
 		"app-server: diff stream stalled",
 	} {
 		if !strings.Contains(out, want) {
