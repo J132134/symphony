@@ -392,6 +392,52 @@ func TestCompactInline(t *testing.T) {
 	}
 }
 
+func TestStripStderrNoise(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"plain text unchanged",
+			"some normal log line",
+			"some normal log line",
+		},
+		{
+			"ANSI codes stripped then prefix stripped",
+			"\x1b[2m2026-03-14T17:06:03Z\x1b[0m \x1b[31mERROR\x1b[0m \x1b[2mcodex_app_server::bespoke\x1b[0m\x1b[2m:\x1b[0m failed to deserialize",
+			"failed to deserialize",
+		},
+		{
+			"Rust log prefix stripped",
+			"2026-03-14T17:06:03.311664Z ERROR codex_app_server::bespoke_event_handling: failed to deserialize response",
+			"failed to deserialize response",
+		},
+		{
+			"ANSI + Rust prefix both stripped",
+			"\x1b[2m2026-03-14T17:06:03.311664Z\x1b[0m \x1b[31mERROR\x1b[0m \x1b[2mcodex_app_server::bespoke_event_handling\x1b[0m\x1b[2m:\x1b[0m failed to deserialize",
+			"failed to deserialize",
+		},
+		{
+			"rmcp transport error cleaned",
+			"\x1b[2m2026-03-14T17:05:40.731146Z\x1b[0m \x1b[31mERROR\x1b[0m \x1b[2mrmcp::transport::worker\x1b[0m\x1b[2m:\x1b[0m worker quit with fatal",
+			"worker quit with fatal",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripStderrNoise(tc.input)
+			if got != tc.want {
+				t.Fatalf("stripStderrNoise(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildAutoUserInputResponseApprovesAppToolPrompt(t *testing.T) {
 	t.Parallel()
 

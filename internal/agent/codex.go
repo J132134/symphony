@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -624,6 +625,18 @@ func compactInline(v string, limit int) string {
 	return v
 }
 
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// rustLogPrefixRe matches Rust tracing log prefixes like:
+// "2026-03-14T17:06:03.311664Z ERROR codex_app_server::bespoke_event_handling: "
+var rustLogPrefixRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+[\w:]+:\s*`)
+
+func stripStderrNoise(s string) string {
+	s = ansiEscapeRe.ReplaceAllString(s, "")
+	s = rustLogPrefixRe.ReplaceAllString(s, "")
+	return s
+}
+
 func sortedKeys(params map[string]any) []string {
 	keys := make([]string, 0, len(params))
 	for key := range params {
@@ -693,7 +706,7 @@ func (r *Runner) readStderr(reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			text := compactInline(strings.TrimRight(string(line), "\r\n"), 160)
+			text := compactInline(stripStderrNoise(strings.TrimRight(string(line), "\r\n")), 160)
 			slog.Debug("agent.stderr", "line", text)
 			if text != "" {
 				now := time.Now().UTC()
