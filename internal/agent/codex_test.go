@@ -459,8 +459,13 @@ func TestBuildAutoUserInputResponseApprovesAppToolPrompt(t *testing.T) {
 		t.Fatal("buildAutoUserInputResponse() = false, want true")
 	}
 	answers, _ := response["answers"].(map[string]any)
-	if got, _ := answers["mcp_tool_call_approval_call_123"].(string); got != "Approve Once" {
-		t.Fatalf("answers[id] = %q, want Approve Once", got)
+	entry, ok := answers["mcp_tool_call_approval_call_123"].(map[string]any)
+	if !ok {
+		t.Fatalf("answers[id] type = %T, want map[string]any", answers["mcp_tool_call_approval_call_123"])
+	}
+	got, _ := entry["answers"].([]string)
+	if len(got) != 1 || got[0] != "Approve Once" {
+		t.Fatalf("answers[id] = %v, want [Approve Once]", got)
 	}
 }
 

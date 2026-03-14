@@ -422,7 +422,7 @@ func buildAutoUserInputResponse(params map[string]any) (map[string]any, bool) {
 		if questionID == "" || !ok {
 			return nil, false
 		}
-		answers[questionID] = answer
+		answers[questionID] = map[string]any{"answers": []string{answer}}
 	}
 	if len(answers) == 0 {
 		return nil, false
