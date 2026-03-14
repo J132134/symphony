@@ -312,6 +312,7 @@ func TestReadStderrEmitsServerMessageDetail(t *testing.T) {
 	r := NewRunner()
 	r.sessionID = "session-1"
 	r.pid = "4321"
+	r.stderrDebounceWindow = 0 // disable debounce for this test
 
 	var events []Event
 	r.setActiveEventSink("thread-1", "turn-1", func(e Event) {
@@ -331,6 +332,63 @@ func TestReadStderrEmitsServerMessageDetail(t *testing.T) {
 	}
 	if !strings.Contains(events[0].Message, "streaming output stalled") {
 		t.Fatalf("events[0].Message = %q, want stderr summary", events[0].Message)
+	}
+}
+
+func TestReadStderrDebouncesRapidLines(t *testing.T) {
+	t.Parallel()
+
+	r := NewRunner()
+	r.sessionID = "session-1"
+	r.pid = "4321"
+	r.stderrDebounceWindow = time.Hour // very large window — only first line should pass
+
+	var events []Event
+	r.setActiveEventSink("thread-1", "turn-1", func(e Event) {
+		events = append(events, e)
+	})
+
+	input := "line one\nline two\nline three\n"
+	r.readStderr(bufio.NewReader(strings.NewReader(input)))
+
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1 (debounce should suppress later lines); events = %#v", len(events), events)
+	}
+	if !strings.Contains(events[0].Message, "line one") {
+		t.Fatalf("events[0].Message = %q, want first line", events[0].Message)
+	}
+}
+
+func TestCompactInline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		limit int
+		want  string
+	}{
+		{"empty", "", 100, ""},
+		{"whitespace only", "   \t\n  ", 100, ""},
+		{"no truncation", "hello world", 100, "hello world"},
+		{"collapses whitespace", "  hello   world  ", 100, "hello world"},
+		{"exact limit", "abcde", 5, "abcde"},
+		{"truncation with ellipsis", "abcdefgh", 6, "abc..."},
+		{"limit zero means unlimited", "abcdefgh", 0, "abcdefgh"},
+		{"limit 3 no ellipsis", "abcde", 3, "abc"},
+		{"limit 2 no ellipsis", "abcde", 2, "ab"},
+		{"limit 1 no ellipsis", "abcde", 1, "a"},
+		{"multiline collapsed", "hello\n  world\n", 100, "hello world"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := compactInline(tc.input, tc.limit)
+			if got != tc.want {
+				t.Fatalf("compactInline(%q, %d) = %q, want %q", tc.input, tc.limit, got, tc.want)
+			}
+		})
 	}
 }
 
