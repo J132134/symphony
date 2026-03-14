@@ -315,6 +315,66 @@ func TestBuildAutoUserInputResponseSkipsNonApprovalPrompt(t *testing.T) {
 	}
 }
 
+func TestContainsApprovalWord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"approve this action", true},
+		{"Approve Once", true},
+		{"do you approve?", true},
+		{"disapprove this", false},
+		{"need more details", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := containsApprovalWord(strings.ToLower(tc.text)); got != tc.want {
+			t.Errorf("containsApprovalWord(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestLooksLikeApprovalQuestionRejectsDisapprove(t *testing.T) {
+	t.Parallel()
+
+	got := looksLikeApprovalQuestion(
+		map[string]any{"header": "Do you disapprove of this change?"},
+		[]any{
+			map[string]any{"label": "Yes"},
+			map[string]any{"label": "No"},
+		},
+	)
+	if got {
+		t.Fatal("looksLikeApprovalQuestion() = true for 'disapprove', want false")
+	}
+}
+
+func TestSelectAutoUserInputAnswerRejectsUnknownOptions(t *testing.T) {
+	t.Parallel()
+
+	// Options that contain "approve" in the header but no known "Approve Once"/"Approve this session"
+	_, ok := selectAutoUserInputAnswer(map[string]any{
+		"header": "Approve something?",
+		"options": []any{
+			map[string]any{"label": "Do it"},
+			map[string]any{"label": "Skip"},
+		},
+	})
+	if ok {
+		t.Fatal("selectAutoUserInputAnswer() = true for unknown options, want false")
+	}
+}
+
+func TestNormalizeSandboxPolicyNone(t *testing.T) {
+	t.Parallel()
+
+	if got := normalizeSandboxPolicy("none"); got != "" {
+		t.Fatalf("normalizeSandboxPolicy(\"none\") = %q, want empty", got)
+	}
+}
+
 func fillNotifQueue(r *Runner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}

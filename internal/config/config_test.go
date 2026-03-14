@@ -379,6 +379,41 @@ func TestTrackerAssigneeEnvVar(t *testing.T) {
 	}
 }
 
+func TestTurnSandboxPolicyDefaultsToWorkspaceWrite(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(nil)
+	if got := cfg.TurnSandboxPolicy(); got != "workspace-write" {
+		t.Fatalf("TurnSandboxPolicy() = %q, want workspace-write", got)
+	}
+}
+
+func TestTurnSandboxPolicyExplicitNone(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"codex": map[string]any{
+			"turn_sandbox_policy": "none",
+		},
+	})
+	if got := cfg.TurnSandboxPolicy(); got != "none" {
+		t.Fatalf("TurnSandboxPolicy() = %q, want none", got)
+	}
+}
+
+func TestTurnSandboxPolicyExplicitOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"codex": map[string]any{
+			"turn_sandbox_policy": "read-only",
+		},
+	})
+	if got := cfg.TurnSandboxPolicy(); got != "read-only" {
+		t.Fatalf("TurnSandboxPolicy() = %q, want read-only", got)
+	}
+}
+
 func requireErrorContaining(t *testing.T, errs []string, want string) {
 	t.Helper()
 

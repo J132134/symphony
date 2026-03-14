@@ -151,7 +151,7 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 	initRes, err := r.sendRequest(ctx, readTimeout, methodInitialize, map[string]any{
 		"protocolVersion": "2025-01-01",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "symphony", "version": "0.5.0"},
+		"clientInfo":      map[string]any{"name": "symphony", "version": "0.5.4"},
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialize: %w", err)
@@ -328,31 +328,51 @@ func (r *Runner) handleTokenUsage(threadID, turnID string, params map[string]any
 func (r *Runner) handleServerRequest(req *Request, cb EventCallback) {
 	switch req.Method {
 	case methodCmdApproval, methodFileApproval:
-		slog.Debug("agent.auto_approve", "method", req.Method)
-		data, _ := FormatResponse(req.ID, map[string]any{"approved": true})
-		_ = r.stdin.Write(data)
+		slog.Info("agent.auto_approve", "method", req.Method, "params", summarizeParams(req.Params))
+		data, err := FormatResponse(req.ID, map[string]any{"approved": true})
+		if err != nil {
+			slog.Warn("agent.format_response_failed", "method", req.Method, "error", err)
+			return
+		}
+		if err := r.stdin.Write(data); err != nil {
+			slog.Warn("agent.write_response_failed", "method", req.Method, "error", err)
+		}
 		emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
 			SessionID: r.sessionID, Message: req.Method})
 	case methodToolCall:
 		slog.Warn("agent.tool_call_unsupported", "params", summarizeParams(req.Params))
-		data, _ := FormatErrorResponse(req.ID, -32601, "Tool call not supported")
-		_ = r.stdin.Write(data)
+		r.sendErrorResponse(req.ID, -32601, "Tool call not supported", req.Method)
 	case methodUserInput:
 		if response, ok := buildAutoUserInputResponse(req.Params); ok {
 			slog.Info("agent.auto_approve_user_input", "params", summarizeParams(req.Params))
-			data, _ := FormatResponse(req.ID, response)
-			_ = r.stdin.Write(data)
+			data, err := FormatResponse(req.ID, response)
+			if err != nil {
+				slog.Warn("agent.format_response_failed", "method", req.Method, "error", err)
+				return
+			}
+			if err := r.stdin.Write(data); err != nil {
+				slog.Warn("agent.write_response_failed", "method", req.Method, "error", err)
+			}
 			emit(cb, Event{Name: "approval_granted", Timestamp: time.Now().UTC(),
 				SessionID: r.sessionID, Message: req.Method})
 			return
 		}
 		slog.Warn("agent.user_input_unsupported", "params", summarizeParams(req.Params))
-		data, _ := FormatErrorResponse(req.ID, -32601, "User input not supported")
-		_ = r.stdin.Write(data)
+		r.sendErrorResponse(req.ID, -32601, "User input not supported", req.Method)
 	default:
 		slog.Warn("agent.unknown_server_request", "method", req.Method)
-		data, _ := FormatErrorResponse(req.ID, -32601, "Unsupported: "+req.Method)
-		_ = r.stdin.Write(data)
+		r.sendErrorResponse(req.ID, -32601, "Unsupported: "+req.Method, req.Method)
+	}
+}
+
+func (r *Runner) sendErrorResponse(id any, code int, message, method string) {
+	data, err := FormatErrorResponse(id, code, message)
+	if err != nil {
+		slog.Warn("agent.format_error_response_failed", "method", method, "error", err)
+		return
+	}
+	if err := r.stdin.Write(data); err != nil {
+		slog.Warn("agent.write_response_failed", "method", method, "error", err)
 	}
 }
 
@@ -413,19 +433,12 @@ func selectAutoUserInputAnswer(question map[string]any) (string, bool) {
 			}
 		}
 	}
-	for _, label := range labels {
-		lower := strings.ToLower(label)
-		if strings.Contains(lower, "cancel") || strings.Contains(lower, "deny") || strings.Contains(lower, "reject") {
-			continue
-		}
-		return label, true
-	}
 	return "", false
 }
 
 func looksLikeApprovalQuestion(question map[string]any, options []any) bool {
 	text := strings.ToLower(firstNonEmptyString(question["header"], question["question"]))
-	if strings.Contains(text, "approve") {
+	if containsApprovalWord(text) {
 		return true
 	}
 	for _, raw := range options {
@@ -434,11 +447,23 @@ func looksLikeApprovalQuestion(question map[string]any, options []any) bool {
 			continue
 		}
 		label := strings.ToLower(firstNonEmptyString(option["label"], option["description"]))
-		if strings.Contains(label, "approve") || strings.Contains(label, "run the tool") {
+		if containsApprovalWord(label) || strings.Contains(label, "run the tool") {
 			return true
 		}
 	}
 	return false
+}
+
+// containsApprovalWord checks for "approve" while excluding negated forms like "disapprove".
+func containsApprovalWord(text string) bool {
+	idx := strings.Index(text, "approve")
+	if idx < 0 {
+		return false
+	}
+	if idx >= 3 && text[idx-3:idx] == "dis" {
+		return false
+	}
+	return true
 }
 
 func firstNonEmptyString(values ...any) string {
@@ -754,6 +779,8 @@ func normalizeSandboxPolicy(p string) string {
 	switch p {
 	case "read-only", "workspace-write", "external-sandbox":
 		return p
+	case "none":
+		return ""
 	}
 	return ""
 }

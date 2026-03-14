@@ -370,12 +370,12 @@ func (c *SymphonyConfig) StallTimeoutMs() int {
 func (c *SymphonyConfig) TurnSandboxPolicy() string {
 	v := c.get("codex.turn_sandbox_policy")
 	if v == nil {
-		return ""
+		return "workspace-write"
 	}
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return ""
+	return "workspace-write"
 }
 func (c *SymphonyConfig) ThreadSandbox() string {
 	return c.getString("codex.thread_sandbox", "")
