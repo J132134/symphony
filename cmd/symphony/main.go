@@ -41,6 +41,14 @@ func main() {
 		cmdDaemon(args[1:])
 	case "status":
 		cmdStatus(args[1:])
+	case "stop":
+		cmdStop(args[1:])
+	case "start":
+		cmdStart(args[1:])
+	case "restart":
+		cmdRestart(args[1:])
+	case "logs":
+		cmdLogs(args[1:])
 	case "version":
 		cmdVersion()
 	case "help", "--help", "-h":
@@ -238,6 +246,13 @@ Usage:
   symphony validate [--workflow WORKFLOW.md]
   symphony daemon   [--config CONFIG_PATH]  [--log-level LEVEL]
   symphony status   [--config CONFIG_PATH] [--url URL] [--json] [--once] [--poll 3s]
+
+Lifecycle:
+  symphony start                        Load LaunchAgent and start daemon
+  symphony stop                         Unload LaunchAgent and stop daemon
+  symphony restart                      Restart daemon (stop + wait for new PID)
+  symphony logs [-f] [--lines N]        Tail daemon stderr log
+
   symphony version
   symphony help
 `)
