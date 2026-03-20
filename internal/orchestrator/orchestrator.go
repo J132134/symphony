@@ -61,7 +61,7 @@ type workerHandle struct {
 	mu          sync.Mutex
 	cancel      context.CancelFunc
 	attempt     *RunAttempt
-	runner      *agent.Runner
+	runner      agent.Runner
 	agentCfg    *agent.Config
 	drainTimer  *time.Timer
 	draining    bool
@@ -90,7 +90,7 @@ func NewWithBase(workflowBasePath, workflowPath string, port int, name string, g
 	}
 }
 
-func (h *workerHandle) setRunner(runner *agent.Runner, cfg *agent.Config) {
+func (h *workerHandle) setRunner(runner agent.Runner, cfg *agent.Config) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.runner = runner

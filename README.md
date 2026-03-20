@@ -189,13 +189,23 @@ Linear에서 `Settings -> API -> Webhooks`로 들어가 URL을 `https://<public-
 `codex.command` 첫 번째 단어가 `claude` 또는 `claude-code`이면 Claude Code가 사용되고, 그 외에는 Codex가 사용된다.
 
 ```yaml
-# Codex (기본)
+# Codex (기본) — JSON-RPC 장수 프로세스
 codex:
   command: codex app-server
 
-# Claude Code
+# Claude Code — process-per-turn (claude -p)
 codex:
   command: claude
+```
+
+**Claude Code 동작 방식**: 턴마다 `claude -p` 프로세스를 새로 생성한다. 이슈별 세션 ID가 워크스페이스의 `.symphony/session_id`에 저장되어 `--session-id`/`--resume`로 멀티턴 대화를 유지한다. `--output-format stream-json --verbose`로 실시간 이벤트를 스트리밍하며, `--dangerously-skip-permissions`로 자동 실행된다.
+
+**Claude 전용 설정** (선택):
+
+```yaml
+claude:
+  model: claude-sonnet-4-20250514    # 모델 오버라이드 (빈 문자열이면 기본값)
+  append_system_prompt: ""           # 시스템 프롬프트에 추가할 텍스트
 ```
 
 ## 상태 확인
@@ -300,6 +310,8 @@ agent:
 | `codex.command` | `codex app-server` |
 | `codex.turn_timeout_ms` | `3600000` (1시간) |
 | `codex.stall_timeout_ms` | `300000` (5분) |
+| `claude.model` | `""` (빈 문자열 = 기본 모델) |
+| `claude.append_system_prompt` | `""` |
 | `hooks.timeout_ms` | `60000` (60초) |
 | `daemon.drain_timeout_ms` | `codex.stall_timeout_ms + hooks.timeout_ms` (`360000`, 6분) |
 

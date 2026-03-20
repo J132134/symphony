@@ -35,6 +35,8 @@ type Config struct {
 	TurnSandboxPolicy      string
 	ThreadSandbox          string
 	AdditionalWritableDirs []string
+	Model                  string
+	AppendSystemPrompt     string
 }
 
 // TokenUsage is an alias for types.TokenUsage.
@@ -81,8 +83,11 @@ type rpcResult struct {
 	err    error
 }
 
-// Runner manages the Codex/Claude subprocess lifecycle.
-type Runner struct {
+// Compile-time interface check.
+var _ Runner = (*CodexRunner)(nil)
+
+// CodexRunner manages the Codex app-server subprocess lifecycle over JSON-RPC stdio.
+type CodexRunner struct {
 	cmd       *exec.Cmd
 	stdin     *lockedWriter
 	sessionID string
@@ -110,8 +115,8 @@ type Runner struct {
 
 const defaultStderrDebounce = 500 * time.Millisecond
 
-func NewRunner() *Runner {
-	return &Runner{
+func NewCodexRunner() *CodexRunner {
+	return &CodexRunner{
 		pending:              make(map[int]chan rpcResult),
 		notifCh:              make(chan *Incoming, 512),
 		stderrDebounceWindow: defaultStderrDebounce,
@@ -120,13 +125,13 @@ func NewRunner() *Runner {
 	}
 }
 
-func (r *Runner) PID() string       { return r.pid }
-func (r *Runner) SessionID() string { return r.sessionID }
-func (r *Runner) ThreadID() string  { return r.threadID }
+func (r *CodexRunner) PID() string       { return r.pid }
+func (r *CodexRunner) SessionID() string { return r.sessionID }
+func (r *CodexRunner) ThreadID() string  { return r.threadID }
 
 // StartSession launches the agent process and performs the JSON-RPC handshake.
 // Returns the thread ID to use for turns.
-func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Config) (string, error) {
+func (r *CodexRunner) StartSession(ctx context.Context, workspacePath string, cfg *Config) (string, error) {
 	r.sessionID = fmt.Sprintf("%d", time.Now().UnixNano())
 	r.lastInput, r.lastOutput, r.lastTotal = 0, 0, 0
 
@@ -209,7 +214,7 @@ func (r *Runner) StartSession(ctx context.Context, workspacePath string, cfg *Co
 
 // RunTurn sends turn/start and streams events until the turn completes.
 // issueTitle is used only for the turn title field in the protocol.
-func (r *Runner) RunTurn(
+func (r *CodexRunner) RunTurn(
 	ctx context.Context,
 	threadID, turnID, prompt, issueIdentifier, issueTitle string,
 	cfg *Config,
@@ -252,7 +257,7 @@ func (r *Runner) RunTurn(
 	return r.consumeUntilDone(tctx, threadID, turnID, cb)
 }
 
-func (r *Runner) InterruptTurn(ctx context.Context, threadID, turnID string, cfg *Config) error {
+func (r *CodexRunner) InterruptTurn(ctx context.Context, threadID, turnID string, cfg *Config) error {
 	if r.cmd == nil || r.cmd.Process == nil {
 		return nil
 	}
@@ -267,7 +272,7 @@ func (r *Runner) InterruptTurn(ctx context.Context, threadID, turnID string, cfg
 	return err
 }
 
-func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, cb EventCallback) TurnResult {
+func (r *CodexRunner) consumeUntilDone(ctx context.Context, threadID, turnID string, cb EventCallback) TurnResult {
 	for {
 		msg, err := r.nextNotification(ctx)
 		if err != nil {
@@ -327,7 +332,7 @@ func (r *Runner) consumeUntilDone(ctx context.Context, threadID, turnID string, 
 	}
 }
 
-func (r *Runner) handleTokenUsage(threadID, turnID string, params map[string]any, cb EventCallback) {
+func (r *CodexRunner) handleTokenUsage(threadID, turnID string, params map[string]any, cb EventCallback) {
 	newIn := toInt64(params["inputTokens"])
 	newOut := toInt64(params["outputTokens"])
 	newTotal := toInt64(params["totalTokens"])
@@ -346,7 +351,7 @@ func (r *Runner) handleTokenUsage(threadID, turnID string, params map[string]any
 	})
 }
 
-func (r *Runner) handleServerRequest(req *Request) {
+func (r *CodexRunner) handleServerRequest(req *Request) {
 	taskSummary := summarizeServerRequest(req)
 	if taskSummary != "" {
 		r.emitActiveEvent(Event{
@@ -394,7 +399,7 @@ func (r *Runner) handleServerRequest(req *Request) {
 	}
 }
 
-func (r *Runner) sendErrorResponse(id any, code int, message, method string) {
+func (r *CodexRunner) sendErrorResponse(id any, code int, message, method string) {
 	data, err := FormatErrorResponse(id, code, message)
 	if err != nil {
 		slog.Warn("agent.format_error_response_failed", "method", method, "error", err)
@@ -647,11 +652,11 @@ func sortedKeys(params map[string]any) []string {
 }
 
 // StopSession gracefully terminates: SIGTERM → 10s → SIGKILL.
-func (r *Runner) StopSession() {
+func (r *CodexRunner) StopSession() {
 	r.stopSessionWithTimeout(10 * time.Second)
 }
 
-func (r *Runner) stopSessionWithTimeout(timeout time.Duration) {
+func (r *CodexRunner) stopSessionWithTimeout(timeout time.Duration) {
 	if r.cmd == nil || r.cmd.Process == nil {
 		return
 	}
@@ -687,7 +692,7 @@ func (r *Runner) stopSessionWithTimeout(timeout time.Duration) {
 
 // -- stdout/stderr readers --
 
-func (r *Runner) readStdout(reader *bufio.Reader) {
+func (r *CodexRunner) readStdout(reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -702,7 +707,7 @@ func (r *Runner) readStdout(reader *bufio.Reader) {
 	}
 }
 
-func (r *Runner) readStderr(reader *bufio.Reader) {
+func (r *CodexRunner) readStderr(reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -733,7 +738,7 @@ func (r *Runner) readStderr(reader *bufio.Reader) {
 	}
 }
 
-func (r *Runner) dispatchLine(line []byte) {
+func (r *CodexRunner) dispatchLine(line []byte) {
 	msg, err := ParseLine(line)
 	if err != nil {
 		slog.Debug("agent.parse_error", "line", string(line[:min(len(line), 200)]))
@@ -780,7 +785,7 @@ func (r *Runner) dispatchLine(line []byte) {
 
 var errNotificationChannelClosed = errors.New("notification channel closed")
 
-func (r *Runner) nextNotification(ctx context.Context) (*Incoming, error) {
+func (r *CodexRunner) nextNotification(ctx context.Context) (*Incoming, error) {
 	select {
 	case msg, ok := <-r.priorityNotifCh:
 		if !ok {
@@ -806,7 +811,7 @@ func (r *Runner) nextNotification(ctx context.Context) (*Incoming, error) {
 	}
 }
 
-func (r *Runner) drainNotifications() {
+func (r *CodexRunner) drainNotifications() {
 	drainNotificationChannel(r.priorityNotifCh)
 	drainNotificationChannel(r.notifCh)
 }
@@ -836,7 +841,7 @@ func isPriorityNotification(method string) bool {
 
 // -- JSON-RPC helpers --
 
-func (r *Runner) sendRequest(ctx context.Context, timeout time.Duration, method string, params map[string]any) (map[string]any, error) {
+func (r *CodexRunner) sendRequest(ctx context.Context, timeout time.Duration, method string, params map[string]any) (map[string]any, error) {
 	id := int(r.reqID.Add(1))
 	ch := make(chan rpcResult, 1)
 
@@ -879,7 +884,7 @@ func (r *Runner) sendRequest(ctx context.Context, timeout time.Duration, method 
 	}
 }
 
-func (r *Runner) sendNotification(method string, params map[string]any) error {
+func (r *CodexRunner) sendNotification(method string, params map[string]any) error {
 	data, err := FormatNotification(method, params)
 	if err != nil {
 		return err
@@ -1199,7 +1204,7 @@ func emit(cb EventCallback, e Event) {
 	}
 }
 
-func (r *Runner) setActiveEventSink(threadID, turnID string, cb EventCallback) {
+func (r *CodexRunner) setActiveEventSink(threadID, turnID string, cb EventCallback) {
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	r.activeCallback = cb
@@ -1207,7 +1212,7 @@ func (r *Runner) setActiveEventSink(threadID, turnID string, cb EventCallback) {
 	r.activeTurnID = turnID
 }
 
-func (r *Runner) clearActiveEventSink(threadID, turnID string) {
+func (r *CodexRunner) clearActiveEventSink(threadID, turnID string) {
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	if r.activeThreadID != threadID || r.activeTurnID != turnID {
@@ -1218,7 +1223,7 @@ func (r *Runner) clearActiveEventSink(threadID, turnID string) {
 	r.activeTurnID = ""
 }
 
-func (r *Runner) emitActiveEvent(e Event) {
+func (r *CodexRunner) emitActiveEvent(e Event) {
 	r.eventMu.RLock()
 	cb := r.activeCallback
 	threadID := r.activeThreadID

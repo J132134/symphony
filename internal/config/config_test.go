@@ -384,6 +384,50 @@ func TestTurnSandboxPolicyExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestClaudeModelDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(nil)
+	if got := cfg.ClaudeModel(); got != "" {
+		t.Fatalf("ClaudeModel() = %q, want empty", got)
+	}
+}
+
+func TestClaudeModelOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"claude": map[string]any{
+			"model": "claude-sonnet-4-20250514",
+		},
+	})
+	if got := cfg.ClaudeModel(); got != "claude-sonnet-4-20250514" {
+		t.Fatalf("ClaudeModel() = %q, want claude-sonnet-4-20250514", got)
+	}
+}
+
+func TestClaudeAppendSystemPromptDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(nil)
+	if got := cfg.ClaudeAppendSystemPrompt(); got != "" {
+		t.Fatalf("ClaudeAppendSystemPrompt() = %q, want empty", got)
+	}
+}
+
+func TestClaudeAppendSystemPromptOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := New(map[string]any{
+		"claude": map[string]any{
+			"append_system_prompt": "Always respond in JSON",
+		},
+	})
+	if got := cfg.ClaudeAppendSystemPrompt(); got != "Always respond in JSON" {
+		t.Fatalf("ClaudeAppendSystemPrompt() = %q, want 'Always respond in JSON'", got)
+	}
+}
+
 func requireErrorContaining(t *testing.T, errs []string, want string) {
 	t.Helper()
 

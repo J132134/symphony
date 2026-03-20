@@ -10,7 +10,7 @@ import (
 )
 
 func TestRunnerDispatchLineKeepsTerminalNotificationWhenNotifQueueFull(t *testing.T) {
-	r := NewRunner()
+	r := NewCodexRunner()
 	fillNotifQueue(r)
 
 	r.dispatchLine(mustNotification(t, methodTurnCompleted, nil))
@@ -24,7 +24,7 @@ func TestRunnerDispatchLineKeepsTerminalNotificationWhenNotifQueueFull(t *testin
 }
 
 func TestRunnerDispatchLineKeepsRateLimitNotificationWhenNotifQueueFull(t *testing.T) {
-	r := NewRunner()
+	r := NewCodexRunner()
 	fillNotifQueue(r)
 
 	r.dispatchLine(mustNotification(t, methodRateLimits, nil))
@@ -38,7 +38,7 @@ func TestRunnerDispatchLineKeepsRateLimitNotificationWhenNotifQueueFull(t *testi
 }
 
 func TestRunnerConsumeUntilDoneReadsTerminalNotificationWhenNotifQueueFull(t *testing.T) {
-	r := NewRunner()
+	r := NewCodexRunner()
 	fillNotifQueue(r)
 	r.dispatchLine(mustNotification(t, methodTurnCompleted, nil))
 
@@ -273,7 +273,7 @@ func TestBuildTurnSandboxPolicyMapsSandboxTypesToProtocolValues(t *testing.T) {
 func TestHandleServerRequestEmitsCurrentTaskDetail(t *testing.T) {
 	t.Parallel()
 
-	r := NewRunner()
+	r := NewCodexRunner()
 	r.sessionID = "session-1"
 	r.pid = "4321"
 	r.stdin = &lockedWriter{w: &bytes.Buffer{}}
@@ -309,7 +309,7 @@ func TestHandleServerRequestEmitsCurrentTaskDetail(t *testing.T) {
 func TestReadStderrEmitsServerMessageDetail(t *testing.T) {
 	t.Parallel()
 
-	r := NewRunner()
+	r := NewCodexRunner()
 	r.sessionID = "session-1"
 	r.pid = "4321"
 	r.stderrDebounceWindow = 0 // disable debounce for this test
@@ -338,7 +338,7 @@ func TestReadStderrEmitsServerMessageDetail(t *testing.T) {
 func TestReadStderrDebouncesRapidLines(t *testing.T) {
 	t.Parallel()
 
-	r := NewRunner()
+	r := NewCodexRunner()
 	r.sessionID = "session-1"
 	r.pid = "4321"
 	r.stderrDebounceWindow = time.Hour // very large window — only first line should pass
@@ -550,7 +550,7 @@ func TestNormalizeSandboxPolicyNone(t *testing.T) {
 	}
 }
 
-func fillNotifQueue(r *Runner) {
+func fillNotifQueue(r *CodexRunner) {
 	for i := 0; i < cap(r.notifCh); i++ {
 		r.notifCh <- &Incoming{Notif: &Notification{Method: methodRateLimits}}
 	}

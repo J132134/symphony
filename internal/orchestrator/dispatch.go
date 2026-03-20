@@ -271,7 +271,7 @@ func (o *Orchestrator) runAttempt(ctx context.Context, cfg *config.SymphonyConfi
 	wf := o.wf
 	o.mu.Unlock()
 
-	runner := agent.NewRunner()
+	runner := agent.NewRunnerForCommand(cfg.CodexCommand())
 	runnerStarted := false
 	defer func() {
 		if runnerStarted {
@@ -475,6 +475,8 @@ func buildAgentConfig(cfg *config.SymphonyConfig, workspacePath string) (*agent.
 		TurnSandboxPolicy:      cfg.TurnSandboxPolicy(),
 		ThreadSandbox:          cfg.ThreadSandbox(),
 		AdditionalWritableDirs: writableDirs,
+		Model:                  cfg.ClaudeModel(),
+		AppendSystemPrompt:     cfg.ClaudeAppendSystemPrompt(),
 	}, nil
 }
 

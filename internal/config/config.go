@@ -369,6 +369,15 @@ func (c *SymphonyConfig) ThreadSandbox() string {
 	return c.getString("codex.thread_sandbox", "")
 }
 
+// -- Claude Code --
+
+func (c *SymphonyConfig) ClaudeModel() string {
+	return c.getString("claude.model", "")
+}
+func (c *SymphonyConfig) ClaudeAppendSystemPrompt() string {
+	return c.getString("claude.append_system_prompt", "")
+}
+
 // -- Validation --
 
 func (c *SymphonyConfig) Validate() []string {
